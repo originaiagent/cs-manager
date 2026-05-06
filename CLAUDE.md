@@ -23,5 +23,7 @@ npm run dev
 ```
 
 ## Diagnostics
-- `/api/_diag/core`: Check Core API connectivity
-- `/api/_diag/ai`: Check AI API connectivity
+- `/api/diag/core`: Check Core API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
+- `/api/diag/ai`: Check AI API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
+
+Note: spec で示された `_diag` は Next.js App Router の private folder 規約 (アンダースコアプレフィックスはルーティングから除外) と衝突するため `diag` に変更。

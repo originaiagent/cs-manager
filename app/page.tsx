@@ -7,8 +7,8 @@ export default function Home() {
         <div className="mt-8">
           <h2 className="text-2xl font-semibold">Diagnostics</h2>
           <ul className="list-disc ml-6 mt-2">
-            <li><a href="/api/_diag/core" className="text-blue-500 underline">Core API Check</a></li>
-            <li><a href="/api/_diag/ai" className="text-blue-500 underline">AI API Check</a></li>
+            <li><a href="/api/diag/core" className="text-blue-500 underline">Core API Check</a></li>
+            <li><a href="/api/diag/ai" className="text-blue-500 underline">AI API Check</a></li>
           </ul>
         </div>
       </div>
