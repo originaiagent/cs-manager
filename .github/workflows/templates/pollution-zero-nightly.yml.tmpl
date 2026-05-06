@@ -1,0 +1,84 @@
+name: Pollution Zero Nightly Verification
+
+# Distributed by tool-template. Do not edit in tool repos — edits will be
+# overwritten by the next sync. Source:
+#   tool-template/.github/workflows/templates/pollution-zero-nightly.yml.tmpl
+#
+# v7 R-4 / W-4 テスト B
+# 業務 UI 通常 URL に test-fixture 由来データが露出していないかを毎晩検査する。
+# SDK デフォルト除外 (is_test_fixture=false) が各ツールで実際に効いている証拠を取り続ける。
+#
+# 各ツールはリポ root の pollution-zero.config.json で URL を opt-in する。
+# 設定ファイル未配置の状態では SKIP するので副作用ゼロ。
+
+on:
+  schedule:
+    # 19:00 UTC = 04:00 JST。1/6 cache-purge (18:00 UTC = 03:00 JST) と被らない時刻帯。
+    # 各ツールは run-time に最大 60s ジッターを足して同時着弾を分散させる。
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  verify-pollution-zero:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Jitter
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            sleep $((RANDOM % 60))
+          fi
+
+      - name: Run verification
+        run: |
+          node scripts/pollution-zero-verify.mjs 2>&1 | tee verify.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Open issue on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            let log = '';
+            try { log = fs.readFileSync('verify.log', 'utf8'); } catch {}
+            const title = `pollution-zero-fail: test-fixture exposure detected (${new Date().toISOString().slice(0, 10)})`;
+            const body = [
+              'v7 R-4 / W-4 テスト B の nightly 検証で異常を検出しました。',
+              '',
+              '## 検出ログ',
+              '```',
+              log.slice(0, 8000) || '(verify.log empty)',
+              '```',
+              '',
+              '## 想定される原因',
+              '- SDK のデフォルト除外フィルタ (is_test_fixture=false) が効いていない',
+              '- アプリ側で includeTestFixture: true を誤って指定している',
+              '- SDK バージョンが古く R-4/W-4 対応版 (npm @origin/sdk >= 0.6.0-alpha.1, PyPI origin-sdk >= 0.5.0a1) になっていない',
+              '- アプリが SDK を経由せず生の Supabase Client / 生 SQL でマスタを参照している',
+              '',
+              '## 対応',
+              '1. 検出ログから露出 URL とパターンを特定',
+              '2. 該当 UI / API のコードで SDK 呼び出し側の includeTestFixture を確認',
+              '3. SDK バージョンを最新に更新',
+              '',
+              'v7 失格表現「アプリ側 WHERE 句で test-fixture を除外」は採用しないこと。SDK デフォルト除外に依存することが正解。',
+              '',
+              `Run: ${runUrl}`,
+            ].join('\n');
+            await github.rest.issues.create({
+              owner, repo, title, body, labels: ['pollution-zero-fail'],
+            });

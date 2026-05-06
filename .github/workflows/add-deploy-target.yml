@@ -1,0 +1,91 @@
+name: Add DeployTarget tag to all repos
+
+on:
+  workflow_dispatch:
+
+jobs:
+  add-tag:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: ys-staff-tool
+            tag: "[DeployTarget: Vercel]"
+          - repo: origin-ai
+            tag: "[DeployTarget: Vercel]"
+          - repo: image-factory
+            tag: "[DeployTarget: Vercel]"
+          - repo: skillquest
+            tag: "[DeployTarget: Vercel]"
+          - repo: factory-management
+            tag: "[DeployTarget: Vercel]"
+          - repo: origintree-logi
+            tag: "[DeployTarget: Vercel]"
+          - repo: ec-data-platform
+            tag: "[DeployTarget: Vercel, Cloudflare]"
+          - repo: origintree-soumu-portal
+            tag: "[DeployTarget: Vercel]"
+          - repo: origin-core
+            tag: "[DeployTarget: CloudRun]"
+          - repo: rakuten-manager
+            tag: "[DeployTarget: CloudRun]"
+          - repo: testpilot
+            tag: "[DeployTarget: CloudRun]"
+          - repo: lp-generator
+            tag: "[DeployTarget: Streamlit]"
+          - repo: minpaku-tool
+            tag: "[DeployTarget: Streamlit]"
+          - repo: product-dev-tool
+            tag: "[DeployTarget: Streamlit]"
+          - repo: origintree-ec-ops
+            tag: "[DeployTarget: Cloudflare]"
+      max-parallel: 3
+    steps:
+      - name: Add DeployTarget tag to CLAUDE.md
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
+        run: |
+          set -e
+
+          REPO="originaiagent/${{ matrix.repo }}"
+          TAG="${{ matrix.tag }}"
+
+          git clone https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git _target
+          cd _target
+
+          # Use main branch
+          git fetch origin main
+          git checkout main
+
+          # Check if CLAUDE.md exists
+          if [ ! -f CLAUDE.md ]; then
+            echo "CLAUDE.md not found in ${REPO}, skipping"
+            exit 0
+          fi
+
+          # Check if DeployTarget tag already exists
+          if head -1 CLAUDE.md | grep -q "\[DeployTarget:"; then
+            echo "DeployTarget tag already exists in ${REPO}, skipping"
+            exit 0
+          fi
+
+          # Prepend tag to CLAUDE.md (preserving existing content exactly)
+          {
+            echo "${TAG}"
+            cat CLAUDE.md
+          } > CLAUDE.md.tmp
+          mv CLAUDE.md.tmp CLAUDE.md
+
+          # Check if there are actual changes
+          if git diff --quiet; then
+            echo "No changes for ${REPO}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b claude/add-deploy-target
+          git add CLAUDE.md
+          git commit -m "chore: add DeployTarget tag to CLAUDE.md"
+          git push origin claude/add-deploy-target --force

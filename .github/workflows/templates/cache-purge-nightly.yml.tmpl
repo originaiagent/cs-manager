@@ -1,0 +1,69 @@
+name: Cache Purge Nightly Verification
+
+# Distributed by tool-template. Do not edit in tool repos — edits will be
+# overwritten by the next sync. Source:
+#   tool-template/.github/workflows/templates/cache-purge-nightly.yml.tmpl
+
+on:
+  schedule:
+    # 03:00 JST (= 18:00 UTC). Each tool adds up to 60s of jitter at run-time
+    # to avoid stampeding origin-core (see "Jitter" step below).
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  verify-cache-purge:
+    runs-on: ubuntu-latest
+    env:
+      TOOL_NAME: ${{ vars.TOOL_NAME }}
+      TOOL_URL: ${{ vars.TOOL_URL }}
+      CORE_API_URL: ${{ vars.CORE_API_URL }}
+      INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Jitter
+        # Spread the 9 nightly runs over a minute so origin-core doesn't get a
+        # synchronized burst of test-fixture touches at exactly 18:00:00 UTC.
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            sleep $((RANDOM % 60))
+          fi
+
+      - name: Run verification
+        run: node scripts/cache-purge-verify.mjs
+
+      - name: Open issue on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const title = `cache-purge-fail: nightly verification failed (${new Date().toISOString().slice(0, 10)})`;
+            const body = [
+              'Nightly cache-purge verification failed.',
+              '',
+              `Run: ${runUrl}`,
+              '',
+              'Likely causes:',
+              '- /_test/cache-verify endpoint not deployed on the tool',
+              '- INTERNAL_API_KEY mismatch between Core, the tool, and this CI',
+              '- /api/internal/revalidate not wired to the same cache layer the business UI uses',
+              '- Core /api/internal/test-fixture/touch is not pinging this tool',
+              '',
+              'Triage: re-run with workflow_dispatch and inspect the JSON output of cache-purge-verify.mjs.',
+            ].join('\n');
+            await github.rest.issues.create({
+              owner, repo, title, body, labels: ['cache-purge-fail'],
+            });

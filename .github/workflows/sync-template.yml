@@ -1,0 +1,69 @@
+name: Sync from tool-template
+
+on:
+  repository_dispatch:
+    types: [sync-template]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout tool-template
+        uses: actions/checkout@v4
+        with:
+          repository: originaiagent/tool-template
+          path: _template
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync shared files
+        run: |
+          # 共通ファイルをコピー（同期対象のみ）
+          cp _template/.claude/rules.md .claude/rules.md
+          cp _template/.claude/settings.json .claude/settings.json
+
+          # commands ディレクトリ同期
+          mkdir -p .claude/commands
+          cp _template/.claude/commands/*.md .claude/commands/
+
+          # agents ディレクトリ同期
+          mkdir -p .claude/agents
+          cp _template/.claude/agents/*.md .claude/agents/
+
+          # skills ディレクトリ同期
+          mkdir -p .claude/skills
+          cp -r _template/.claude/skills/* .claude/skills/
+
+          # docs 同期
+          mkdir -p docs
+          if [ -f _template/docs/origin-integration-map.md ]; then cp _template/docs/origin-integration-map.md docs/origin-integration-map.md; fi
+
+          # ワークフロー同期（sync-template 自身のみ、auto-mergeはdispatch-syncでインライン生成）
+          mkdir -p .github/workflows
+          cp _template/.github/workflows/sync-template.yml .github/workflows/sync-template.yml
+
+          # テンプレートのクリーンアップ
+          rm -rf _template
+
+      - name: Check for changes
+        id: changes
+        run: |
+          git diff --quiet && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Push to claude/sync-template branch
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -b claude/sync-template origin/main
+          git commit -m "sync: update shared files from tool-template"
+          git push origin claude/sync-template --force

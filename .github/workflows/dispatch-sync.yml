@@ -1,0 +1,229 @@
+name: Sync template to all repos
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.claude/rules.md'
+      - '.claude/rules/**'
+      - '.claude/settings.json'
+      - '.claude/hooks/**'
+      - '.claude/commands/**'
+      - '.claude/agents/**'
+      - '.github/workflows/dispatch-sync.yml'
+      - '.claude/skills/**'
+      - 'docs/origin-integration-map.md'
+      - 'docs/auth-fetch-checker.md'
+      - 'docs/pollution-zero-checker.md'
+      - 'scripts/check-auth-fetch.mjs'
+      - 'scripts/cache-purge-verify.mjs'
+      - 'scripts/pollution-zero-verify.mjs'
+      - '.github/workflows/templates/cache-purge-nightly.yml.tmpl'
+      - '.github/workflows/templates/pollution-zero-nightly.yml.tmpl'
+      - 'templates/**'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        repo:
+          - ys-staff-tool
+          - origin-ai
+          - image-factory
+          - skillquest
+          - factory-management
+          - origintree-logi
+          - ec-data-platform
+          - origintree-soumu-portal
+          - lp-generator
+          - minpaku-tool
+          - product-dev-tool
+          - origin-core
+          - ec-manager
+          - testpilot
+          - origintree-ec-ops
+      max-parallel: 3
+    steps:
+      - name: Checkout tool-template
+        uses: actions/checkout@v4
+
+      - name: Clone target repo and sync files
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
+        run: |
+          git clone https://x-access-token:${GH_TOKEN}@github.com/originaiagent/${{ matrix.repo }}.git _target
+          cd _target
+
+          git fetch origin main
+          git checkout main
+
+          cp ../.claude/rules.md .claude/rules.md
+          mkdir -p .claude/rules
+          cp ../.claude/rules/*.md .claude/rules/
+          cp ../.claude/settings.json .claude/settings.json
+          mkdir -p .claude/hooks
+          cp ../.claude/hooks/*.sh .claude/hooks/
+          chmod +x .claude/hooks/*.sh
+          # hook 共通ライブラリ + bundled fallback（origin-policy 正本取得用）
+          if [ -d ../.claude/hooks/lib ]; then
+            mkdir -p .claude/hooks/lib
+            cp -r ../.claude/hooks/lib/. .claude/hooks/lib/
+            find .claude/hooks/lib -name '*.sh' -exec chmod +x {} \;
+          fi
+          mkdir -p .claude/commands
+          cp ../.claude/commands/*.md .claude/commands/
+          mkdir -p .claude/agents
+          cp ../.claude/agents/*.md .claude/agents/
+          mkdir -p .claude/skills
+          cp -r ../.claude/skills/* .claude/skills/
+          mkdir -p docs
+          if [ -f ../docs/origin-integration-map.md ]; then cp ../docs/origin-integration-map.md docs/origin-integration-map.md; fi
+          if [ -f ../docs/auth-fetch-checker.md ]; then cp ../docs/auth-fetch-checker.md docs/auth-fetch-checker.md; fi
+
+          mkdir -p scripts
+          if [ -f ../scripts/check-auth-fetch.mjs ]; then cp ../scripts/check-auth-fetch.mjs scripts/check-auth-fetch.mjs; fi
+
+          # ---- Cache Purge Verification (v7 R-4/W-4 test A) ----
+          # Distributed only to the 9 tools that participate in nightly
+          # cache-purge verification. origin-core is the SoT (separate flow);
+          # other repos are out of scope for this verification.
+          CACHE_PURGE_TARGETS=" ec-manager origintree-logi lp-generator origin-ai product-dev-tool ys-staff-tool factory-management testpilot origintree-soumu-portal "
+          if echo "$CACHE_PURGE_TARGETS" | grep -q " ${{ matrix.repo }} "; then
+            # nightly CI workflow + verify script: always overwrite
+            mkdir -p .github/workflows
+            if [ -f ../.github/workflows/templates/cache-purge-nightly.yml.tmpl ]; then
+              cp ../.github/workflows/templates/cache-purge-nightly.yml.tmpl .github/workflows/cache-purge-nightly.yml
+            fi
+            if [ -f ../scripts/cache-purge-verify.mjs ]; then
+              cp ../scripts/cache-purge-verify.mjs scripts/cache-purge-verify.mjs
+            fi
+
+            # Stack-specific hidden pages: copy only if missing so tool-side
+            # adapter customisations are preserved on subsequent syncs.
+            if [ -d app ]; then
+              # Next.js (app router)
+              if [ ! -d app/_test/cache-verify ]; then
+                mkdir -p app/_test/cache-verify
+                cp ../templates/nextjs/app/_test/cache-verify/route.ts app/_test/cache-verify/route.ts
+              fi
+              if [ ! -d app/api/internal/revalidate ]; then
+                mkdir -p app/api/internal/revalidate
+                cp ../templates/nextjs/app/api/internal/revalidate/route.ts app/api/internal/revalidate/route.ts
+              fi
+              if [ ! -d lib/cache-verify ]; then
+                mkdir -p lib/cache-verify
+                cp ../templates/nextjs/lib/cache-verify/auth.ts lib/cache-verify/auth.ts
+                cp ../templates/nextjs/lib/cache-verify/masters.ts lib/cache-verify/masters.ts
+                cp ../templates/nextjs/lib/cache-verify/index.ts lib/cache-verify/index.ts
+              fi
+            elif [ -d origin_ai ] && [ -f origin_ai/__init__.py ]; then
+              # Python (Streamlit / FastAPI) — sub-app sidecar
+              if [ ! -f origin_ai/cache_verify.py ]; then
+                cp ../templates/python/origin_ai/cache_verify.py origin_ai/cache_verify.py
+              fi
+            elif [ -d lib ]; then
+              # Generic Node (Express/Fastify/Hono/raw http)
+              if [ ! -d lib/cache-verify ]; then
+                mkdir -p lib/cache-verify
+                cp ../templates/node/lib/cache-verify/index.ts lib/cache-verify/index.ts
+                cp ../templates/node/lib/cache-verify/README.md lib/cache-verify/README.md
+              fi
+            fi
+          fi
+
+          # ---- Pollution Zero Verification (v7 R-4/W-4 test B) ----
+          # Distributed only to the same 9 tools as cache-purge (test A).
+          # 業務 UI 通常 URL に test-fixture 由来データが露出していないかを毎晩検査する。
+          # SDK デフォルト除外 (is_test_fixture=false) が各ツールで実際に効いている証拠。
+          POLLUTION_ZERO_TARGETS="$CACHE_PURGE_TARGETS"
+          if echo "$POLLUTION_ZERO_TARGETS" | grep -q " ${{ matrix.repo }} "; then
+            mkdir -p .github/workflows
+            if [ -f ../.github/workflows/templates/pollution-zero-nightly.yml.tmpl ]; then
+              cp ../.github/workflows/templates/pollution-zero-nightly.yml.tmpl .github/workflows/pollution-zero-nightly.yml
+            fi
+            if [ -f ../scripts/pollution-zero-verify.mjs ]; then
+              cp ../scripts/pollution-zero-verify.mjs scripts/pollution-zero-verify.mjs
+            fi
+            # ドキュメントもスコープ内 9 ツールのみに配布 (script/workflow と整合)
+            if [ -f ../docs/pollution-zero-checker.md ]; then
+              cp ../docs/pollution-zero-checker.md docs/pollution-zero-checker.md
+            fi
+          fi
+
+          # package.json への check:auth-fetch / verify:pollution-zero script 追加（既存値は保持・非破壊）
+          if [ -f package.json ] && command -v jq >/dev/null; then
+            if ! jq -e '.scripts["check:auth-fetch"]' package.json >/dev/null 2>&1; then
+              tmp=$(mktemp)
+              jq '.scripts["check:auth-fetch"] = "node scripts/check-auth-fetch.mjs"' package.json > "$tmp" && mv "$tmp" package.json
+            fi
+            if echo "$POLLUTION_ZERO_TARGETS" | grep -q " ${{ matrix.repo }} "; then
+              if ! jq -e '.scripts["verify:pollution-zero"]' package.json >/dev/null 2>&1; then
+                tmp=$(mktemp)
+                jq '.scripts["verify:pollution-zero"] = "node scripts/pollution-zero-verify.mjs"' package.json > "$tmp" && mv "$tmp" package.json
+              fi
+            fi
+          fi
+
+          if [ -f .github/workflows/auto-merge.yml ]; then
+            git rm .github/workflows/auto-merge.yml
+          fi
+          if git diff --quiet && [ -z "$(git status --porcelain)" ]; then
+            echo "No changes for ${{ matrix.repo }}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b claude/sync-template
+          git add .claude/
+          [ -f docs/origin-integration-map.md ] && git add docs/origin-integration-map.md
+          [ -f docs/auth-fetch-checker.md ] && git add docs/auth-fetch-checker.md
+          [ -f docs/pollution-zero-checker.md ] && git add docs/pollution-zero-checker.md
+          [ -f scripts/check-auth-fetch.mjs ] && git add scripts/check-auth-fetch.mjs
+          if echo "$CACHE_PURGE_TARGETS" | grep -q " ${{ matrix.repo }} "; then
+            [ -f scripts/cache-purge-verify.mjs ] && git add scripts/cache-purge-verify.mjs
+            [ -f .github/workflows/cache-purge-nightly.yml ] && git add .github/workflows/cache-purge-nightly.yml
+            [ -d app/_test ] && git add app/_test
+            [ -d app/api/internal/revalidate ] && git add app/api/internal/revalidate
+            [ -d lib/cache-verify ] && git add lib/cache-verify
+            [ -f origin_ai/cache_verify.py ] && git add origin_ai/cache_verify.py
+          fi
+          if echo "$POLLUTION_ZERO_TARGETS" | grep -q " ${{ matrix.repo }} "; then
+            [ -f scripts/pollution-zero-verify.mjs ] && git add scripts/pollution-zero-verify.mjs
+            [ -f .github/workflows/pollution-zero-nightly.yml ] && git add .github/workflows/pollution-zero-nightly.yml
+            [ -f docs/pollution-zero-checker.md ] && git add docs/pollution-zero-checker.md
+          fi
+          [ -f package.json ] && git add package.json
+          git commit -m "sync: update shared files from tool-template"
+          git push origin claude/sync-template --force
+
+      - name: Open or refresh sync PR
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_PAT }}
+        run: |
+          set -e
+          REPO="originaiagent/${{ matrix.repo }}"
+          # Branch may not exist if the previous step short-circuited via "No changes" exit 0.
+          if ! gh api "repos/${REPO}/git/refs/heads/claude/sync-template" >/dev/null 2>&1; then
+            echo "No claude/sync-template branch on ${REPO} (no diff this run) — skip PR creation."
+            exit 0
+          fi
+          existing=$(gh pr list --repo "${REPO}" --head claude/sync-template --state open --json number --jq '.[0].number' || true)
+          if [ -n "$existing" ]; then
+            echo "Open sync PR already exists for ${REPO}: #$existing (force-push refreshes it automatically)."
+            exit 0
+          fi
+          ahead=$(gh api "repos/${REPO}/compare/main...claude/sync-template" --jq '.ahead_by' 2>/dev/null || echo 0)
+          if [ "$ahead" = "0" ] || [ -z "$ahead" ]; then
+            echo "claude/sync-template has no commits ahead of main on ${REPO} — nothing to PR."
+            exit 0
+          fi
+          gh pr create \
+            --repo "${REPO}" \
+            --base main \
+            --head claude/sync-template \
+            --title "sync: update shared files from tool-template" \
+            --body "Auto-sync from \`tool-template\` main branch (workflow: dispatch-sync.yml run ${GITHUB_RUN_ID})."
