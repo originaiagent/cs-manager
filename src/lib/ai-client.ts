@@ -14,12 +14,13 @@
  *   X-Tool-Name は origin-ai 側で利用する識別子として送信。
  */
 
-const ORIGIN_AI_URL = process.env.ORIGIN_AI_URL;
-const ORIGIN_AI_API_KEY = process.env.ORIGIN_AI_API_KEY;
-const ORIGIN_AI_TOOL_NAME = process.env.ORIGIN_AI_TOOL_NAME || 'cs-manager';
+const ORIGIN_AI_URL = process.env.ORIGIN_AI_URL?.replace(/\s+$/, '');
+const ORIGIN_AI_API_KEY = process.env.ORIGIN_AI_API_KEY?.replace(/\s+$/, '');
+const ORIGIN_AI_TOOL_NAME =
+  process.env.ORIGIN_AI_TOOL_NAME?.replace(/\s+$/, '') || 'cs-manager';
 const ORIGIN_AI_TIMEOUT_MS = process.env.ORIGIN_AI_TIMEOUT_MS
   ? parseInt(process.env.ORIGIN_AI_TIMEOUT_MS, 10)
-  : 90_000;
+  : 120_000;
 
 export interface ChatResult {
   ok: boolean;
@@ -32,7 +33,23 @@ export interface ChatResult {
   error?: string;
 }
 
-export async function invokeChat(message: string): Promise<ChatResult> {
+export interface InvokeChatOptions {
+  /**
+   * AI集約 (Phase 2-A) では agent_name 未指定時に `core_assistant` がデフォルト発火するため、
+   * スキルマッチを意図する場合は空文字を渡して Route A をバイパスする。
+   */
+  agentName?: string;
+  /**
+   * origin-ai 側 chat/sync ルートに添付する追加 data。skill matcher のための
+   * 構造化情報を渡すのに使う。
+   */
+  data?: Record<string, unknown>;
+}
+
+export async function invokeChat(
+  message: string,
+  options: InvokeChatOptions = {},
+): Promise<ChatResult> {
   const startTime = Date.now();
   const traceId = crypto.randomUUID();
 
@@ -46,6 +63,10 @@ export async function invokeChat(message: string): Promise<ChatResult> {
   const url = `${ORIGIN_AI_URL.replace(/\/$/, '')}/api/chat/sync`;
 
   try {
+    const body: Record<string, unknown> = { message };
+    if (options.agentName !== undefined) body.agent_name = options.agentName;
+    if (options.data !== undefined) body.data = options.data;
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -54,7 +75,7 @@ export async function invokeChat(message: string): Promise<ChatResult> {
         'X-Tool-Name': ORIGIN_AI_TOOL_NAME,
         'X-Request-Id': traceId,
       },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(ORIGIN_AI_TIMEOUT_MS),
     });
 

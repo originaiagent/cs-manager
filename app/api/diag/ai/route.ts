@@ -4,7 +4,7 @@ import { invokeChat } from '@/lib/ai-client';
 export const dynamic = 'force-dynamic';
 
 function authorize(req: NextRequest): NextResponse | null {
-  const required = process.env.DIAG_TOKEN;
+  const required = process.env.DIAG_TOKEN?.replace(/\s+$/, '');
   if (!required) {
     return NextResponse.json({ ok: false, error: 'DIAG_TOKEN is not set on server' }, { status: 500 });
   }
