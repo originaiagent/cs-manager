@@ -15,6 +15,11 @@ const CORE_API_TIMEOUT_MS = process.env.CORE_API_TIMEOUT_MS
   : 10_000;
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
+// Gemini code review Medium 指摘: 長寿命プロセス (テスト常駐 / 仮想 dev server 等)
+// で scope_key 数 = キャッシュサイズが線形に増えないよう、最大サイズで FIFO 風に古い
+// エントリを破棄する単純な防御策を入れる。Vercel Functions では本来コールドスタート
+// で全消去されるため過剰なリスクは無いが、ガード代わり。
+const CACHE_MAX_ENTRIES = 256;
 
 export interface CredentialResponse<T = Record<string, unknown>> {
   service_code: string;
@@ -133,6 +138,11 @@ export async function getCredential<T = Record<string, unknown>>(
   }
 
   const body = (await res.json()) as CredentialResponse<T>;
+  // FIFO 風の LRU 簡易実装: max を超えたら最古を削除 (Map の挿入順を利用)
+  if (cache.size >= CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
   // キャッシュは型を消した上で保管 (取り出し時に caller の T で再キャスト)
   cache.set(key, { fetchedAt: Date.now(), value: body as unknown as CredentialResponse });
   return body;

@@ -98,6 +98,12 @@ async function upsertTicket(
   channelId: string,
   payload: NormalizedTicketWithMessages['ticket'],
 ): Promise<string> {
+  // Gemini code review High 指摘: 旧 select→insert パターンは並行 cron 実行時に
+  // unique 制約違反を起こすレース条件を含むため、(channel_id, external_id) UNIQUE を
+  // 利用した atomic な .upsert() に切替。
+  // ただし「既存の status を踏み潰さない」要件があるため、まず存在確認 + 既存行は
+  // status を除外して update、未存在は upsert (再 select) の二段構成。
+  // single-process cron が前提だが、二重起動への防御として onConflict を採用。
   const supa = getSupabaseAdmin();
   const { data: existing, error: selErr } = await supa
     .from('tickets')
@@ -107,40 +113,48 @@ async function upsertTicket(
     .maybeSingle();
   if (selErr) throw new Error(`upsertTicket(select) failed: ${selErr.message}`);
 
+  const baseUpdate = {
+    customer_name: payload.customerName ?? null,
+    customer_email: payload.customerEmail ?? null,
+    subject: payload.subject ?? null,
+    channel_meta: payload.channelMeta ?? {},
+    resolved_at: payload.resolvedAt ?? null,
+  };
+
   if (existing) {
-    const { error: updErr } = await supa
-      .from('tickets')
-      .update({
-        customer_name: payload.customerName ?? null,
-        customer_email: payload.customerEmail ?? null,
-        subject: payload.subject ?? null,
-        channel_meta: payload.channelMeta ?? {},
-        resolved_at: payload.resolvedAt ?? null,
-        ...(existing.status === 'untouched' && payload.status === 'done'
-          ? { status: 'done' }
-          : {}),
-      })
-      .eq('id', existing.id);
+    const update = {
+      ...baseUpdate,
+      // untouched → done のみ自動遷移を許可。in_progress は人手フローを尊重して踏み潰さない。
+      ...(existing.status === 'untouched' && payload.status === 'done'
+        ? { status: 'done' }
+        : {}),
+    };
+    const { error: updErr } = await supa.from('tickets').update(update).eq('id', existing.id);
     if (updErr) throw new Error(`upsertTicket(update) failed: ${updErr.message}`);
     return existing.id as string;
   }
 
-  const { data: ins, error: insErr } = await supa
-    .from('tickets')
-    .insert({
+  // 競合した insert で並行 cron が同時に到達した場合のレース対策として
+  // .upsert(..., onConflict) を使い、衝突時は無視 (ignoreDuplicates=true) → 後続 select で id を取得
+  const { error: upErr } = await supa.from('tickets').upsert(
+    {
       channel_id: channelId,
       external_id: payload.externalId,
-      customer_name: payload.customerName ?? null,
-      customer_email: payload.customerEmail ?? null,
-      subject: payload.subject ?? null,
+      ...baseUpdate,
       status: payload.status,
-      resolved_at: payload.resolvedAt ?? null,
-      channel_meta: payload.channelMeta ?? {},
-    })
+    },
+    { onConflict: 'channel_id,external_id', ignoreDuplicates: true },
+  );
+  if (upErr) throw new Error(`upsertTicket(upsert) failed: ${upErr.message}`);
+
+  const { data: postSel, error: postErr } = await supa
+    .from('tickets')
     .select('id')
+    .eq('channel_id', channelId)
+    .eq('external_id', payload.externalId)
     .single();
-  if (insErr) throw new Error(`upsertTicket(insert) failed: ${insErr.message}`);
-  return ins.id as string;
+  if (postErr) throw new Error(`upsertTicket(post-select) failed: ${postErr.message}`);
+  return postSel.id as string;
 }
 
 async function upsertMessages(
