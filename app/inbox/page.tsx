@@ -21,11 +21,10 @@ export default async function InboxPage({
   noStore();
   const sb = getSupabaseAdmin();
 
-  // チャネル一覧
+  // チャネル一覧 (Phase 2.0: status 問わず全 channels をフィルタチップに表示)
   const { data: channelsRaw } = await sb
     .from('channels')
     .select('id, code, display_name, status')
-    .eq('status', 'active')
     .order('display_name');
   const channels = channelsRaw ?? [];
 
@@ -44,7 +43,7 @@ export default async function InboxPage({
   let q = sb
     .from('tickets')
     .select(
-      'id, subject, customer_name, status, case_category, created_at, channel_id, channels(display_name, code)',
+      'id, subject, customer_name, status, case_category, created_at, channel_id, channels(code, display_name)',
     )
     .order('created_at', { ascending: false })
     .limit(200);
@@ -102,7 +101,7 @@ export default async function InboxPage({
                 case_category: t.case_category,
                 created_at: t.created_at,
                 channel: t.channels
-                  ? { display_name: t.channels.display_name }
+                  ? { code: t.channels.code, display_name: t.channels.display_name }
                   : null,
                 last_inbound_at: lastInboundMap.get(t.id) ?? null,
               }}

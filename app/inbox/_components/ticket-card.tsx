@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import ChannelBadge from '@/components/ui/channel-badge';
 import {
   CASE_CATEGORY_LABELS,
   STATUS_BADGE_CLASS,
@@ -14,7 +15,7 @@ interface Props {
     status: string;
     case_category: string | null;
     created_at: string;
-    channel: { display_name: string | null } | null;
+    channel: { code: string | null; display_name: string | null } | null;
     last_inbound_at: string | null;
   };
 }
@@ -45,10 +46,11 @@ export default function TicketCard({ ticket }: Props) {
                 {caseLabel}
               </span>
             )}
-            {ticket.channel?.display_name && (
-              <span className="text-[10px] text-gray-400">
-                {ticket.channel.display_name}
-              </span>
+            {ticket.channel?.code && (
+              <ChannelBadge
+                code={ticket.channel.code}
+                displayName={ticket.channel.display_name}
+              />
             )}
           </div>
           <h3 className="text-sm font-medium text-gray-900 truncate">

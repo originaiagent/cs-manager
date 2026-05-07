@@ -11,6 +11,7 @@ import {
   STATUS_LABELS,
   formatRelative,
 } from '@/lib/format';
+import ChannelBadge from '@/components/ui/channel-badge';
 import CustomerInfo from './_components/customer-info';
 import StatusControls from './_components/status-controls';
 import MessageThread from './_components/message-thread';
@@ -83,11 +84,18 @@ export default async function TicketDetailPage({ params }: { params: Params }) {
 
       <PageHeader
         title={ticket.subject || '(件名なし)'}
-        description={`${(ticket as any).channels?.display_name ?? ''} ・ 受信 ${formatRelative(ticket.created_at)}`}
+        description={`受信 ${formatRelative(ticket.created_at)}`}
         rightSlot={<StatusControls ticketId={ticket.id} currentStatus={status} />}
       />
 
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        {(ticket as any).channels?.code && (
+          <ChannelBadge
+            code={(ticket as any).channels.code}
+            displayName={(ticket as any).channels.display_name}
+            size="md"
+          />
+        )}
         <span
           className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${badgeCls}`}
         >
