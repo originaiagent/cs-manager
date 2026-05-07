@@ -47,15 +47,14 @@ export default async function TicketDetailPage({ params }: { params: Params }) {
       .eq('ticket_id', ticket.id)
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
+      .limit(1),
     ticket.product_id
       ? fetchProductById(ticket.product_id)
       : Promise.resolve({ ok: false as const, error: undefined }),
   ]);
 
   const messages = messagesRes.data ?? [];
-  const latestDraft = draftRes.data ?? null;
+  const latestDraft = (draftRes.data ?? [])[0] ?? null;
   const product: CoreProduct | null = productRes.ok ? productRes.product ?? null : null;
   const productError =
     !ticket.product_id || productRes.ok ? null : productRes.error ?? '不明エラー';
