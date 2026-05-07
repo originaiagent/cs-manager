@@ -27,6 +27,11 @@ export default function ScopeTabs({ counts }: { counts: Counts }) {
     const next = new URLSearchParams(sp.toString());
     if (value === 'all') next.delete('scope');
     else next.set('scope', value);
+    // タブ切替時はドリルダウン位置と検索クエリをリセット
+    next.delete('product_id');
+    next.delete('store_id');
+    next.delete('q');
+    next.delete('ai');
     startTransition(() => {
       router.push(`/knowledge${next.toString() ? `?${next}` : ''}`);
     });

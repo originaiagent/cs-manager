@@ -4,19 +4,32 @@ import { Search, Sparkles } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useState, useTransition, type FormEvent } from 'react';
 
-export default function SearchBar() {
+export type SearchMode = 'content' | 'product-name' | 'hidden';
+
+interface Props {
+  searchMode?: SearchMode;
+}
+
+export default function SearchBar({ searchMode = 'content' }: Props) {
   const router = useRouter();
   const sp = useSearchParams();
   const [pending, startTransition] = useTransition();
   const [q, setQ] = useState(sp.get('q') ?? '');
   const [aiOn, setAiOn] = useState(sp.get('ai') === '1');
 
+  if (searchMode === 'hidden') return null;
+
+  const isProductName = searchMode === 'product-name';
+  const placeholder = isProductName
+    ? '商品名で絞り込み (例: クール)'
+    : 'ナレッジを検索 (タイトル / 質問 / 回答)';
+
   function submit(e: FormEvent) {
     e.preventDefault();
     const next = new URLSearchParams(sp.toString());
     if (q.trim()) next.set('q', q.trim());
     else next.delete('q');
-    if (aiOn) next.set('ai', '1');
+    if (!isProductName && aiOn) next.set('ai', '1');
     else next.delete('ai');
     startTransition(() => {
       router.push(`/knowledge${next.toString() ? `?${next}` : ''}`);
@@ -32,28 +45,30 @@ export default function SearchBar() {
         />
         <input
           type="text"
-          placeholder="ナレッジを検索 (タイトル / 質問 / 回答)"
+          placeholder={placeholder}
           value={q}
           onChange={(e) => setQ(e.target.value)}
           className="w-full rounded-lg border border-gray-200 pl-9 pr-3 py-2 text-sm focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
         />
       </div>
-      <label
-        className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium cursor-pointer transition-colors ${
-          aiOn
-            ? 'bg-violet-50 text-violet-700 border-violet-200'
-            : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
-        }`}
-      >
-        <input
-          type="checkbox"
-          checked={aiOn}
-          onChange={(e) => setAiOn(e.target.checked)}
-          className="sr-only"
-        />
-        <Sparkles size={12} />
-        AI検索
-      </label>
+      {!isProductName && (
+        <label
+          className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium cursor-pointer transition-colors ${
+            aiOn
+              ? 'bg-violet-50 text-violet-700 border-violet-200'
+              : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+          }`}
+        >
+          <input
+            type="checkbox"
+            checked={aiOn}
+            onChange={(e) => setAiOn(e.target.checked)}
+            className="sr-only"
+          />
+          <Sparkles size={12} />
+          AI検索
+        </label>
+      )}
       <button
         type="submit"
         disabled={pending}
