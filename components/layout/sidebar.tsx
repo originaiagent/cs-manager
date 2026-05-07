@@ -2,13 +2,23 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Inbox, Settings, Menu, X, type LucideIcon } from 'lucide-react';
+import {
+  Inbox,
+  BookOpen,
+  BarChart3,
+  Settings,
+  Menu,
+  X,
+  type LucideIcon,
+} from 'lucide-react';
 import { useState } from 'react';
 
 type NavItem = { href: string; label: string; icon: LucideIcon };
 
 const navItems: NavItem[] = [
   { href: '/inbox', label: '受信箱', icon: Inbox },
+  { href: '/knowledge', label: 'ナレッジ', icon: BookOpen },
+  { href: '/quality', label: '品質分析', icon: BarChart3 },
   { href: '/settings', label: '設定', icon: Settings },
 ];
 

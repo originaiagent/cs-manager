@@ -11,6 +11,7 @@ export const revalidate = 0;
 interface SearchParams {
   status?: string;
   channel?: string;
+  product?: string;
 }
 
 export default async function InboxPage({
@@ -54,6 +55,9 @@ export default async function InboxPage({
   if (searchParams.channel && searchParams.channel !== 'all') {
     const ch = channels.find((c) => c.code === searchParams.channel);
     if (ch) q = q.eq('channel_id', ch.id);
+  }
+  if (searchParams.product) {
+    q = q.eq('product_id', searchParams.product);
   }
 
   const { data: tickets } = await q;

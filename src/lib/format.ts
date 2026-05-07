@@ -21,6 +21,25 @@ export const CASE_CATEGORY_LABELS: Record<string, string> = {
   other: 'その他',
 };
 
+export const SCOPE_LABELS: Record<string, string> = {
+  company: '会社共通',
+  store: '店舗共通',
+  product: '商品別',
+};
+
+export const DEFECT_TYPE_LABELS: Record<string, string> = {
+  size_mismatch: 'サイズ違い',
+  color_mismatch: '色違い',
+  damaged: '破損',
+  missing_part: '部品欠損',
+  other: 'その他',
+};
+
+export function formatPercent(value: number | null | undefined, digits = 2): string {
+  if (value == null || isNaN(value)) return '—';
+  return (value * 100).toFixed(digits) + '%';
+}
+
 export function formatRelative(input: string | Date | null | undefined): string {
   if (!input) return '';
   const d = typeof input === 'string' ? new Date(input) : input;
