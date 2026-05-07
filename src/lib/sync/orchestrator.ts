@@ -54,10 +54,13 @@ function makeLogger(channelCode: string): AdapterLogger {
 
 async function loadActiveChannels(): Promise<ChannelRow[]> {
   const supa = getSupabaseAdmin();
+  // 楽天は credential 動的取得 + 送信フローを含む専用 cron (/api/cron/rakuten-sync, 5分間隔)
+  // で処理するため、汎用 cron からは除外する (二重取込・競合防止)。
   const { data, error } = await supa
     .from('channels')
     .select('id, code, config')
-    .eq('status', 'active');
+    .eq('status', 'active')
+    .neq('code', 'rakuten');
   if (error) throw new Error(`loadActiveChannels failed: ${error.message}`);
   return (data ?? []) as ChannelRow[];
 }

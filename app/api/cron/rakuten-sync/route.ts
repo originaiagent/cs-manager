@@ -1,0 +1,310 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { rakutenAdapter } from '@/channels/rakuten/adapter';
+import { sendApprovedDrafts } from '@/channels/rakuten/outbound';
+import type { AdapterLogger, ChannelAdapterContext } from '@/channels/_lib/adapter';
+import type { NormalizedMessage, NormalizedTicketWithMessages } from '@/channels/_lib/types';
+import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+export const maxDuration = 300;
+
+/**
+ * 楽天 R-MessE 専用 cron (5 分間隔)
+ *
+ * 設計レビュー: Gemini APPROVE (2026-05-07)
+ *
+ * 流れ (1 サイクル):
+ *   1. code='rakuten' AND status='active' な channels を loop
+ *   2. 各 channel について:
+ *      a. fetchInbox (受信): tickets/messages upsert + channel_sync_state 更新
+ *      b. sendApprovedDrafts (送信): ticket_drafts.status='approved' を最大 20 件送信
+ *
+ * 認可: `Authorization: Bearer ${CRON_SECRET}` または `X-Diag-Token: ${DIAG_TOKEN}`
+ *      (既存 sync-channels と同パターン)
+ *
+ * 既存 /api/cron/sync-channels は楽天を除外する形で並走 (orchestrator 側でフィルタ)。
+ */
+
+function authorize(req: NextRequest): NextResponse | null {
+  const cronSecret = process.env.CRON_SECRET;
+  const diagToken = process.env.DIAG_TOKEN;
+
+  const authHeader = req.headers.get('authorization');
+  if (cronSecret && authHeader === `Bearer ${cronSecret}`) return null;
+
+  const provided = req.headers.get('x-diag-token');
+  if (diagToken && provided === diagToken) return null;
+
+  return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
+}
+
+function makeLogger(prefix: string): AdapterLogger {
+  const fmt = (extra?: Record<string, unknown>) =>
+    extra ? ` ${JSON.stringify(extra)}` : '';
+  return {
+    info: (msg, extra) => console.log(`[${prefix}] ${msg}${fmt(extra)}`),
+    warn: (msg, extra) => console.warn(`[${prefix}] ${msg}${fmt(extra)}`),
+    error: (msg, extra) => console.error(`[${prefix}] ${msg}${fmt(extra)}`),
+  };
+}
+
+interface RakutenChannelRow {
+  id: string;
+  code: string;
+  config: Record<string, unknown> | null;
+}
+
+async function loadActiveRakutenChannels(): Promise<RakutenChannelRow[]> {
+  const supa = getSupabaseAdmin();
+  const { data, error } = await supa
+    .from('channels')
+    .select('id, code, config')
+    .eq('status', 'active')
+    .eq('code', 'rakuten');
+  if (error) throw new Error(`loadActiveRakutenChannels failed: ${error.message}`);
+  return (data ?? []) as RakutenChannelRow[];
+}
+
+async function loadSyncState(channelId: string): Promise<Date | null> {
+  const supa = getSupabaseAdmin();
+  const { data, error } = await supa
+    .from('channel_sync_state')
+    .select('last_synced_at')
+    .eq('channel_id', channelId)
+    .maybeSingle();
+  if (error) throw new Error(`loadSyncState failed: ${error.message}`);
+  return data?.last_synced_at ? new Date(data.last_synced_at) : null;
+}
+
+async function persistSyncState(
+  channelId: string,
+  lastSyncedAt: Date,
+  lastExternalId: string | undefined,
+): Promise<void> {
+  const supa = getSupabaseAdmin();
+  const { error } = await supa.from('channel_sync_state').upsert(
+    {
+      channel_id: channelId,
+      last_synced_at: lastSyncedAt.toISOString(),
+      last_external_id: lastExternalId ?? null,
+    },
+    { onConflict: 'channel_id' },
+  );
+  if (error) throw new Error(`persistSyncState failed: ${error.message}`);
+}
+
+async function upsertTicket(
+  channelId: string,
+  payload: NormalizedTicketWithMessages['ticket'],
+): Promise<string> {
+  // Gemini code review High 指摘: 旧 select→insert パターンは並行 cron 実行時に
+  // unique 制約違反を起こすレース条件を含むため、(channel_id, external_id) UNIQUE を
+  // 利用した atomic な .upsert() に切替。
+  // ただし「既存の status を踏み潰さない」要件があるため、まず存在確認 + 既存行は
+  // status を除外して update、未存在は upsert (再 select) の二段構成。
+  // single-process cron が前提だが、二重起動への防御として onConflict を採用。
+  const supa = getSupabaseAdmin();
+  const { data: existing, error: selErr } = await supa
+    .from('tickets')
+    .select('id, status')
+    .eq('channel_id', channelId)
+    .eq('external_id', payload.externalId)
+    .maybeSingle();
+  if (selErr) throw new Error(`upsertTicket(select) failed: ${selErr.message}`);
+
+  const baseUpdate = {
+    customer_name: payload.customerName ?? null,
+    customer_email: payload.customerEmail ?? null,
+    subject: payload.subject ?? null,
+    channel_meta: payload.channelMeta ?? {},
+    resolved_at: payload.resolvedAt ?? null,
+  };
+
+  if (existing) {
+    const update = {
+      ...baseUpdate,
+      // untouched → done のみ自動遷移を許可。in_progress は人手フローを尊重して踏み潰さない。
+      ...(existing.status === 'untouched' && payload.status === 'done'
+        ? { status: 'done' }
+        : {}),
+    };
+    const { error: updErr } = await supa.from('tickets').update(update).eq('id', existing.id);
+    if (updErr) throw new Error(`upsertTicket(update) failed: ${updErr.message}`);
+    return existing.id as string;
+  }
+
+  // 競合した insert で並行 cron が同時に到達した場合のレース対策として
+  // .upsert(..., onConflict) を使い、衝突時は無視 (ignoreDuplicates=true) → 後続 select で id を取得
+  const { error: upErr } = await supa.from('tickets').upsert(
+    {
+      channel_id: channelId,
+      external_id: payload.externalId,
+      ...baseUpdate,
+      status: payload.status,
+    },
+    { onConflict: 'channel_id,external_id', ignoreDuplicates: true },
+  );
+  if (upErr) throw new Error(`upsertTicket(upsert) failed: ${upErr.message}`);
+
+  const { data: postSel, error: postErr } = await supa
+    .from('tickets')
+    .select('id')
+    .eq('channel_id', channelId)
+    .eq('external_id', payload.externalId)
+    .single();
+  if (postErr) throw new Error(`upsertTicket(post-select) failed: ${postErr.message}`);
+  return postSel.id as string;
+}
+
+async function upsertMessages(
+  ticketId: string,
+  messages: NormalizedMessage[],
+): Promise<number> {
+  if (messages.length === 0) return 0;
+  const supa = getSupabaseAdmin();
+  const rows = messages.map((m) => ({
+    ticket_id: ticketId,
+    channel_message_id: m.channelMessageId,
+    direction: m.direction,
+    body: m.body,
+    sender_name: m.senderName ?? null,
+    sent_at: m.sentAt,
+    attachments: m.attachments ?? [],
+  }));
+  const { error, count } = await supa
+    .from('messages')
+    .upsert(rows, { onConflict: 'ticket_id,channel_message_id', count: 'exact' });
+  if (error) throw new Error(`upsertMessages failed: ${error.message}`);
+  return count ?? rows.length;
+}
+
+interface InboundResult {
+  channelId: string;
+  ticketsProcessed: number;
+  messagesUpserted: number;
+  error?: string;
+}
+
+async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundResult> {
+  const logger = makeLogger(`rakuten-sync:inbound:${channel.code}`);
+  const startedAt = new Date();
+
+  let since: Date | null = null;
+  try {
+    since = await loadSyncState(channel.id);
+  } catch (err) {
+    logger.warn('loadSyncState_failed_falling_back_null', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const ctx: ChannelAdapterContext = {
+    channel: { id: channel.id, code: channel.code, config: channel.config ?? {} },
+    since,
+    logger,
+  };
+
+  let ticketsProcessed = 0;
+  let messagesUpserted = 0;
+  let lastExternalId: string | undefined;
+  let errorMessage: string | undefined;
+
+  try {
+    for await (const item of rakutenAdapter.fetchInbox(ctx)) {
+      const ticketId = await upsertTicket(channel.id, item.ticket);
+      const inserted = await upsertMessages(ticketId, item.messages);
+      ticketsProcessed += 1;
+      messagesUpserted += inserted;
+      lastExternalId = item.ticket.externalId;
+      try {
+        await persistSyncState(channel.id, new Date(), lastExternalId);
+      } catch (err) {
+        logger.warn('persistSyncState_failed_continuing', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  } catch (err) {
+    errorMessage = err instanceof Error ? err.message : String(err);
+    logger.error('fetchInbox_failed', { error: errorMessage });
+  }
+
+  if (!errorMessage) {
+    try {
+      await persistSyncState(channel.id, startedAt, lastExternalId);
+    } catch (err) {
+      logger.warn('persistSyncState_finalize_failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return {
+    channelId: channel.id,
+    ticketsProcessed,
+    messagesUpserted,
+    error: errorMessage,
+  };
+}
+
+export async function GET(req: NextRequest) {
+  const authError = authorize(req);
+  if (authError) return authError;
+
+  const startedAt = new Date();
+  try {
+    const channels = await loadActiveRakutenChannels();
+    const results: Array<{
+      channelId: string;
+      channelCode: string;
+      inbound: InboundResult;
+      outbound: { attempted: number; succeeded: number; failed: number };
+      error?: string;
+    }> = [];
+
+    for (const ch of channels) {
+      let inbound: InboundResult = {
+        channelId: ch.id,
+        ticketsProcessed: 0,
+        messagesUpserted: 0,
+      };
+      let outbound = { attempted: 0, succeeded: 0, failed: 0 };
+      let channelError: string | undefined;
+
+      try {
+        inbound = await runRakutenInbound(ch);
+        const out = await sendApprovedDrafts(ch, makeLogger(`rakuten-sync:outbound:${ch.code}`));
+        outbound = { attempted: out.attempted, succeeded: out.succeeded, failed: out.failed };
+      } catch (err) {
+        channelError = err instanceof Error ? err.message : String(err);
+      }
+
+      results.push({
+        channelId: ch.id,
+        channelCode: ch.code,
+        inbound,
+        outbound,
+        error: channelError ?? inbound.error,
+      });
+    }
+
+    const hasError = results.some((r) => r.error);
+    return NextResponse.json(
+      {
+        ok: !hasError,
+        startedAt: startedAt.toISOString(),
+        finishedAt: new Date().toISOString(),
+        channels: results,
+      },
+      { status: hasError ? 207 : 200 },
+    );
+  } catch (err: any) {
+    return NextResponse.json(
+      { ok: false, error: err?.message ?? String(err) },
+      { status: 500 },
+    );
+  }
+}
+
+export const POST = GET;
