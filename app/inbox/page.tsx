@@ -1,9 +1,12 @@
+import { unstable_noStore as noStore } from 'next/cache';
 import PageHeader from '@/components/ui/page-header';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import FilterChips from './_components/filter-chips';
 import TicketCard from './_components/ticket-card';
 
 export const dynamic = 'force-dynamic';
+export const fetchCache = 'force-no-store';
+export const revalidate = 0;
 
 interface SearchParams {
   status?: string;
@@ -15,6 +18,7 @@ export default async function InboxPage({
 }: {
   searchParams: SearchParams;
 }) {
+  noStore();
   const sb = getSupabaseAdmin();
 
   // チャネル一覧

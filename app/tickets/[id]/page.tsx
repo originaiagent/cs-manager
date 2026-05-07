@@ -1,3 +1,4 @@
+import { unstable_noStore as noStore } from 'next/cache';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ChevronLeft } from 'lucide-react';
@@ -16,12 +17,15 @@ import MessageThread from './_components/message-thread';
 import ReplyForm from './_components/reply-form';
 
 export const dynamic = 'force-dynamic';
+export const fetchCache = 'force-no-store';
+export const revalidate = 0;
 
 interface Params {
   id: string;
 }
 
 export default async function TicketDetailPage({ params }: { params: Params }) {
+  noStore();
   const sb = getSupabaseAdmin();
 
   const { data: ticket } = await sb
