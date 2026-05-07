@@ -69,10 +69,11 @@ test.describe('段階0a: 8 チャネル UI', () => {
     await expect(page.locator('body')).toContainText('Qoo10', { timeout: 15000 });
     for (const code of ['qoo10', 'aupay']) {
       const ch = CHANNELS.find((c) => c.code === code);
-      test.skip(!ch, `channels に ${code} が無いのでスキップ`);
+      // ループ内で test.skip() を呼ぶとループ全体が中断するため continue で個別スキップ
+      if (!ch) continue;
       // ChannelBadge: <span class="...bg-gray-50..."> 内に lucide-help-circle (or lucide-circle-help) SVG
       const fallbackBadge = page
-        .locator('span.bg-gray-50.text-gray-600.border-gray-200', { hasText: ch!.display_name })
+        .locator('span.bg-gray-50.text-gray-600.border-gray-200', { hasText: ch.display_name })
         .filter({ has: page.locator('svg.lucide-circle-help, svg.lucide-help-circle') });
       await expect(fallbackBadge.first(), `${code} fallback badge with HelpCircle`).toBeVisible({ timeout: 10000 });
     }
@@ -83,10 +84,10 @@ test.describe('段階0a: 8 チャネル UI', () => {
     await expect(page.locator('body')).toContainText('Qoo10', { timeout: 15000 });
     for (const code of ['qoo10', 'aupay']) {
       const ch = CHANNELS.find((c) => c.code === code);
-      test.skip(!ch, `channels に ${code} が無いのでスキップ`);
+      if (!ch) continue;
       const grayBadge = page.locator(
         'span.bg-gray-50.text-gray-600.border-gray-200',
-        { hasText: ch!.display_name },
+        { hasText: ch.display_name },
       );
       await expect(grayBadge.first(), `${code} neutral gray badge`).toBeVisible({ timeout: 10000 });
     }

@@ -18,7 +18,9 @@ if (existsSync(envPath)) {
   }
 }
 
-const baseURL = process.env.E2E_BASE_URL ?? 'https://cs-manager-q1pm87jpd-origin-trees-projects.vercel.app';
+// env 必須化(ハードコード回避)。preview URL を取り違えてリグレッションを見逃すのを防ぐため、
+// 未設定時はローカル dev server を既定にし、CI/preview テスト時は明示的に E2E_BASE_URL を指定する運用。
+const baseURL = process.env.E2E_BASE_URL ?? 'http://localhost:3000';
 
 export default defineConfig({
   testDir: './tests/e2e',
