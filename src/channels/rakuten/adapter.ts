@@ -8,6 +8,8 @@ import type {
   NormalizedTicket,
   NormalizedTicketWithMessages,
 } from '../_lib/types';
+import { getCredential } from '@/lib/credentials';
+import type { RakutenCredentials } from './auth';
 import { RakutenInquiryClient } from './client';
 import type { RakutenInquiry, RakutenInquiryReply } from './types';
 
@@ -115,8 +117,18 @@ export const rakutenAdapter: ChannelAdapter = {
       (cfg as Record<string, unknown>).lookback_minutes,
       DEFAULT_LOOKBACK_MINUTES,
     );
+    // 楽天店舗 ID は channels.config.shop_id に格納する運用。
+    // Core /api/credentials の scope_key にも同じ値を渡す (1 店舗 1 credential 世代)。
+    const shopId = asStr((cfg as Record<string, unknown>).shop_id, '');
+    if (!shopId) {
+      throw new Error(
+        `rakuten.fetchInbox: channels.config.shop_id is required (channel_id=${ctx.channel.id})`,
+      );
+    }
 
-    const client = new RakutenInquiryClient({ apiBase });
+    // Core から credential 動的取得 (5 分 TTL キャッシュ)
+    const credResp = await getCredential<RakutenCredentials>('rakuten_rmesse', shopId);
+    const client = new RakutenInquiryClient({ apiBase, credentials: credResp.credentials });
 
     const now = new Date();
     const fromDate =

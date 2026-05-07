@@ -42,8 +42,15 @@ export default defineConfig({
     navigationTimeout: 30000,
   },
   projects: [
+    // Unit テスト (browser 不使用)。Playwright test runner を流用してユニットテストを書く。
+    {
+      name: 'unit',
+      testDir: './tests/unit',
+      use: {},
+    },
     {
       name: 'chromium',
+      testDir: './tests/e2e',
       use: { ...devices['Desktop Chrome'] },
     },
   ],

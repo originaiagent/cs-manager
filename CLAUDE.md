@@ -9,15 +9,16 @@ OriginAI マルチチャネル統合カスタマーサポート + AI改善サイ
 
 ## Environment Variables
 - `CORE_API_URL`: Core API endpoint
-- `INTERNAL_API_KEY`: Shared secret for Core API (X-Internal-API-Key)
+- `INTERNAL_API_KEY`: Shared secret for Core API (X-Internal-API-Key) — credential / master 取得共通
 - `ORIGIN_AI_URL`: AI API endpoint
 - `ORIGIN_AI_API_KEY`: AI API key
 - `ORIGIN_AI_TOOL_NAME`: cs-manager
 - `NEXT_PUBLIC_SUPABASE_URL`: Supabase project URL
 - `SUPABASE_SERVICE_ROLE_KEY`: Supabase service role key
-- `RAKUTEN_SERVICE_SECRET`: 楽天 RMS Service Secret (R-MessE adapter 用)
-- `RAKUTEN_LICENSE_KEY`: 楽天 RMS License Key (R-MessE adapter 用)
-- `CRON_SECRET`: Vercel Cron Bearer token (`/api/cron/sync-channels` 認可)
+- `CRON_SECRET`: Vercel Cron Bearer token (`/api/cron/*` 認可)
+
+外部サービス認証 (楽天 R-MessE 等) は cs-manager 内に持たない。
+Core `/api/credentials/:service_code?scope_key=<店舗ID>` 経由で動的取得 (5 分 TTL キャッシュ)。
 
 ## Development
 ```bash
@@ -30,17 +31,24 @@ npm run dev
 - `/api/diag/ai`: Check AI API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 
 ## Cron Jobs (Vercel)
-- `/api/cron/sync-channels`: 10分間隔（`*/10 * * * *`）。active な channels を順に adapter 実行 → tickets/messages を upsert。
+- `/api/cron/sync-channels`: 10分間隔（`*/10 * * * *`）。code='rakuten' を**除く** active channels を順に adapter 実行 → tickets/messages を upsert。
   - 認可: `Authorization: Bearer ${CRON_SECRET}` または手動 `X-Diag-Token: $DIAG_TOKEN`
+- `/api/cron/rakuten-sync`: 5分間隔（`*/5 * * * *`）。楽天 R-MessE 専用。受信 (fetchInbox) + 送信 (sendApprovedDrafts) を 1 サイクルで実行。
+  - 認可: 上記同パターン
+  - 1 サイクルあたり最大送信件数 20 件 (Vercel タイムアウト対策)
 
-## DB Schema (Phase 1.1)
-channels / channel_credentials / tickets / messages / channel_sync_state.
+## DB Schema (Phase 1.1+)
+channels / tickets / messages / channel_sync_state / ticket_drafts.
 全テーブル RLS 有効、service_role のみ読み書き可（Phase 1.2 で UI 用ポリシー追加予定）。
+`channel_credentials` は廃止 (Core /api/credentials 経由に移行済)。
 
 ## Channel Adapters
 - `src/channels/_lib/`: ChannelAdapter インターフェース・正規化型・registry
 - `src/channels/rakuten/`: 楽天 R-MessE (InquiryManagementAPI) adapter
   - エンドポイント: `https://api.rms.rakuten.co.jp/es/1.0/inquirymng-api/`
-  - 認証: `ESA <base64(serviceSecret:licenseKey)>` (ec-manager パターン踏襲)
+  - 認証: `ESA <base64(serviceSecret:licenseKey)>` を Core `/api/credentials/rakuten_rmesse?scope_key=<店舗ID>` 取得結果から構築
+  - 受信 (fetchInbox): `src/channels/rakuten/adapter.ts`
+  - 送信 (sendApprovedDrafts): `src/channels/rakuten/outbound.ts`
+  - **店舗 ID** は `channels.config.shop_id` に格納する運用 (Core API の scope_key と同一)
 
 Note: spec で示された `_diag` は Next.js App Router の private folder 規約 (アンダースコアプレフィックスはルーティングから除外) と衝突するため `diag` に変更。

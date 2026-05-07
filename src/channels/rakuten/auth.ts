@@ -2,26 +2,27 @@
  * 楽天 RMS 認証ヘッダ生成
  *
  * 形式: `ESA <base64(serviceSecret:licenseKey)>`
- * ec-manager (server/rakuten-api.ts:getAuthHeader) のパターンを踏襲。
  *
- * Phase 1.1 では env から取得。Phase 4 で channel_credentials テーブル + Vault 化予定。
+ * Phase 4 で Core API `/api/credentials/rakuten_rmesse` 経由に切り替え。
+ * cs-manager 内に楽天認証情報をハードコード or env で持たない (Single Source of Truth = Core/Vault)。
+ *
+ * credential 取得は呼び出し側 (adapter / outbound) で `getCredential('rakuten_rmesse', shopId)` を実行し、
+ * このモジュールは「与えられた credentials から ESA ヘッダを構築する」純関数のみを提供する。
  */
 
 export interface RakutenCredentials {
-  serviceSecret: string;
-  licenseKey: string;
-}
-
-export function getRakutenCredentials(): RakutenCredentials {
-  const serviceSecret = process.env.RAKUTEN_SERVICE_SECRET;
-  const licenseKey = process.env.RAKUTEN_LICENSE_KEY;
-  if (!serviceSecret) throw new Error('RAKUTEN_SERVICE_SECRET is not set');
-  if (!licenseKey) throw new Error('RAKUTEN_LICENSE_KEY is not set');
-  return { serviceSecret, licenseKey };
+  /** vault.secrets に保管されている credentials JSON のフィールド名は `service_secret` (snake_case) */
+  service_secret: string;
+  license_key: string;
+  /** 取得 API のレスポンスに含まれるが ESA ヘッダ生成には不要 (将来用) */
+  rms_user?: string;
+  dev_auth_key?: string;
 }
 
 export function buildRakutenAuthHeader(creds: RakutenCredentials): string {
-  const raw = `${creds.serviceSecret}:${creds.licenseKey}`;
+  if (!creds.service_secret) throw new Error('rakuten credential: service_secret is missing');
+  if (!creds.license_key) throw new Error('rakuten credential: license_key is missing');
+  const raw = `${creds.service_secret}:${creds.license_key}`;
   const b64 = Buffer.from(raw, 'utf8').toString('base64');
   return `ESA ${b64}`;
 }
