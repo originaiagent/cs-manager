@@ -1,6 +1,6 @@
 # QA自動評価（Step 5.5）
 
-push前にGeminiによる品質自動評価を実行する。
+push前にcodexによる品質自動評価を実行する。
 verdict=pass でPR作成へ進む。verdict=fail なら減点理由を元に修正して再評価（最大3回）。
 
 引数: $ARGUMENTS（テンプレートslug。例: api_implementation, ui_implementation, bugfix, refactoring, cross_tool_integration, builder_output）
@@ -70,29 +70,29 @@ input_data 内の以下パターンを `***` に置換:
 3. 検知されたパターンの種類と件数を報告
 4. 「シークレットをコードから除去してから再実行してください」と指示
 
-### Step 4: Gemini評価実行
+### Step 4: codex評価実行
 
 #### 4-1. judge_promptにinput_dataを注入
 テンプレートの `judge_prompt` 内の `{{input_data}}` をStep 2-3で構築した input_data で置換する。
 
-#### 4-2. gemini実行
+#### 4-2. codex実行
 ```bash
-echo "{置換済みjudge_prompt}" | gemini -m pro
+echo "{置換済みjudge_prompt}" | codex exec -
 ```
 
 **重要**:
-- temperature=0 で実行（評価ブレ防止）。gemini CLIの場合は上記コマンドのまま（CLIはデフォルトでtemperature制御）
+- temperature=0 で実行（評価ブレ防止）。codex CLIの場合は上記コマンドのまま（CLIはデフォルトでtemperature制御）
 - JSONのみの出力を期待。前後にテキストが付いた場合はJSON部分を抽出
 
 #### 4-3. レスポンスパース
-Geminiの出力をJSONとしてパースし、以下を取得:
+codexの出力をJSONとしてパースし、以下を取得:
 - `criteria[]` — 各項目のスコア・reasoning・evidence
 - `total_score` — 合計点
 - `max_score` — 満点
 - `verdict` — pass / fail
 - `verdict_reason` — 理由
 
-パースに失敗した場合は1回だけリトライ（gemini再実行）。2回失敗でエスカレーション。
+パースに失敗した場合は1回だけリトライ（codex再実行）。2回失敗でエスカレーション。
 
 ### Step 5: 合否判定
 
@@ -116,12 +116,12 @@ curl -s -X POST "${CORE_API_URL}/api/qa/runs" \
     "judge_prompt_snapshot": "（実際に使用したprompt全文）",
     "applied_criteria": （テンプレートのcriteria配列）,
     "verdict": "pass/fail",
-    "verdict_reason": "（Geminiの判定理由）",
+    "verdict_reason": "（codexの判定理由）",
     "total_score": N,
     "max_score": N,
     "score_percentage": N,
-    "judge_model": "gemini-pro",
-    "judge_raw_response": "（Geminiの生レスポンス）",
+    "judge_model": "codex",
+    "judge_raw_response": "（codexの生レスポンス）",
     "results": [
       {"criteria_key": "項目名", "score": N, "max_score": N, "reasoning": "...", "evidence": "..."},
       ...

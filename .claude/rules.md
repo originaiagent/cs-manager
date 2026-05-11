@@ -193,10 +193,10 @@ parent_goal_change / business_priority / external_communication / cost_commitmen
 
 ### Step 5.5: コードレビュー（push前に必須）
 
-**YOU MUST run Gemini review before every push. No exceptions.**
+**YOU MUST run codex review before every push. No exceptions.**
 
-gemini-review（メイン）:
-git diff --merge-base origin/main | gemini -p "コードレビューして。問題点・改善点を日本語で指摘して"
+codex review（メイン）:
+git diff --merge-base origin/main | codex exec "コードレビューして。問題点・改善点を日本語で指摘して"
 → APPROVE相当でなければ修正→再レビュー。未実施のpushは禁止。
 
 /codex（サブ）: 以下1つでもYesなら実行:
@@ -205,11 +205,11 @@ git diff --merge-base origin/main | gemini -p "コードレビューして。問
 ## デプロイ運用
 
 - デプロイはmainブランチ上でのみ実行。フィーチャーブランチからの直デプロイ禁止
-- 手順: Geminiレビュー → push → PR → マージ → mainでデプロイ
+- 手順: codexレビュー → push → PR → マージ → mainでデプロイ
 
 ## 本番E2E実施必須化ルール（merge前ゲート）
 
-**ローカルテスト + Geminiレビュー通過 ≠ 本番で動く保証。** 以下に該当するPRは merge 前に本番URL上でのE2E実施を必須とする。スキップ禁止。
+**ローカルテスト + codexレビュー通過 ≠ 本番で動く保証。** 以下に該当するPRは merge 前に本番URL上でのE2E実施を必須とする。スキップ禁止。
 
 ### 対象PR（いずれか1つでも該当でE2E必須）
 - 複数リソース（agent / skill / workflow / multi-table records 等）を横断して作成・更新するAPI変更
@@ -223,7 +223,7 @@ git diff --merge-base origin/main | gemini -p "コードレビューして。問
 - 該当判断は「partial-create / 整合性破壊が起こり得るか」を基準にする。迷ったら対象とみなしてE2Eを実施
 
 ### コードレビュー時の前提チェック（E2Eと併せて必須）
-本ルール対象PRは Gemini レビュー時点で **DBトランザクション（atomic操作）が正しく実装されているか** を最優先で確認する。E2Eはあくまで最終ゲートであり、コードレベルでの atomic性が崩れていれば本来そこで弾く。両方をクリアして初めて merge可。
+本ルール対象PRは codex レビュー時点で **DBトランザクション（atomic操作）が正しく実装されているか** を最優先で確認する。E2Eはあくまで最終ゲートであり、コードレベルでの atomic性が崩れていれば本来そこで弾く。両方をクリアして初めて merge可。
 
 ### E2E実施内容（4項目すべて）
 1. **本番相当環境** で、実データを使った操作を **UI経由** で行う（curl / script 単体での確認は不可）
@@ -241,7 +241,7 @@ git diff --merge-base origin/main | gemini -p "コードレビューして。問
 このルール対象PRで完了報告に「E2E結果」（上記4項目のエビデンス）が含まれていない場合、管理クロードは差し戻す。`未確認` 表記も差し戻し対象。
 
 ### 背景（incident-log）
-発生日: 2026-04-29 / 事象: origin-ai builderモード PR #137 / #138 がローカルテスト + Geminiレビュー通過後に本番で partial-create バグ発生 / 根本原因: PR merge 前に本番URLでのフルE2E未実施 / 再発防止: 本ルールを tool-template に永続化、全ツールへ配布。
+発生日: 2026-04-29 / 事象: origin-ai builderモード PR #137 / #138 がローカルテスト + codexレビュー通過後に本番で partial-create バグ発生 / 根本原因: PR merge 前に本番URLでのフルE2E未実施 / 再発防止: 本ルールを tool-template に永続化、全ツールへ配布。
 
 ## 完了報告
 【完了報告】
