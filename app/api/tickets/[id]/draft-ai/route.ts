@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { fetchProductById, type CoreProduct } from '@/lib/core-client';
 import { invokeChat } from '@/lib/ai-client';
 import { extractDraftFromAiResponse } from '@/lib/draft-extract';
+import { authorizeInternalApiKey } from '@/lib/auth/internal-api-key';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -18,11 +19,17 @@ const MAX_THREAD_MESSAGES = 10;
  * - origin-ai の skill `cs_reply_draft_generation` に構造化入力を渡し、ドラフト本文を受け取る
  * - 製品情報は Core /api/v1/master/products/{id} から取得 (B案原則)
  * - 戻りドラフトは保存せず、cs-manager UI が「採用」した時点で /drafts に保存される
+ *
+ * 認可: X-Internal-API-Key ヘッダ必須 (Server Action 経由でのみ呼び出し可)。
+ * 第三者からの LLM コスト消費・顧客文言抽出を遮断する目的 (backlog e6520f91)。
  */
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: { id: string } },
 ) {
+  const authError = authorizeInternalApiKey(req);
+  if (authError) return authError;
+
   const startedAt = Date.now();
   const sb = getSupabaseAdmin();
 

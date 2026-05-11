@@ -3,6 +3,7 @@
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { Sparkles, Save, Loader2, RefreshCw, Pencil, Check } from 'lucide-react';
+import { generateAiDraft } from '../_actions/generate-ai-draft';
 
 interface Props {
   ticketId: string;
@@ -58,25 +59,17 @@ export default function ReplyForm({
 
   async function generateAi() {
     setAi({ kind: 'loading' });
-    try {
-      const startedAt = Date.now();
-      const res = await fetch(`/api/tickets/${ticketId}/draft-ai`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok || !j.ok) {
-        throw new Error(j.error ?? `AI generation failed: ${res.status}`);
-      }
-      setAi({
-        kind: 'preview',
-        draft: j.draft,
-        durationMs: j.durationMs ?? Date.now() - startedAt,
-      });
-    } catch (e: any) {
-      setAi({ kind: 'error', error: e?.message ?? 'unknown error' });
+    const startedAt = Date.now();
+    const result = await generateAiDraft(ticketId);
+    if (!result.ok || typeof result.draft !== 'string') {
+      setAi({ kind: 'error', error: result.error ?? 'unknown error' });
+      return;
     }
+    setAi({
+      kind: 'preview',
+      draft: result.draft,
+      durationMs: result.durationMs ?? Date.now() - startedAt,
+    });
   }
 
   async function adoptAiDraft() {
