@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/sync-channels",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/rakuten-sync",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}

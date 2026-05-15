@@ -1,52 +1,54 @@
-# [DeployTarget: Template] {TOOL_NAME}
+# cs-manager
 
-> 共通の行動原則は `.claude/rules.md` を参照。このファイルにはプロジェクト固有の情報のみ記載する。
+OriginAI マルチチャネル統合カスタマーサポート + AI改善サイクル
 
-## ツール概要
-{TOOL_DESCRIPTION}
+## Project Info
+- DeployTarget: Vercel
+- Core API: https://origin-core-465031496778.asia-northeast1.run.app
+- AI API: https://origin-ai-five.vercel.app
 
-## 技術スタック
-- フレームワーク: {FRAMEWORK}
-- デプロイ先: {DEPLOY_TARGET}
-- DB: {DATABASE}
-- 主要ライブラリ: {LIBRARIES}
+## Environment Variables
+- `CORE_API_URL`: Core API endpoint
+- `INTERNAL_API_KEY`: Shared secret for Core API (X-Internal-API-Key) — credential / master 取得共通
+- `ORIGIN_AI_URL`: AI API endpoint
+- `ORIGIN_AI_API_KEY`: AI API key
+- `ORIGIN_AI_TOOL_NAME`: cs-manager
+- `NEXT_PUBLIC_SUPABASE_URL`: Supabase project URL
+- `SUPABASE_SERVICE_ROLE_KEY`: Supabase service role key
+- `CRON_SECRET`: Vercel Cron Bearer token (`/api/cron/*` 認可)
 
-## URL
-- 本番(main): {PRODUCTION_URL}
-- プレビュー: PRごとにVercel等が自動生成
+外部サービス認証 (楽天 R-MessE 等) は cs-manager 内に持たない。
+Core `/api/credentials/:service_code?scope_key=<店舗ID>` 経由で動的取得 (5 分 TTL キャッシュ)。
 
-## ディレクトリ構成
+## Development
+```bash
+npm install
+npm run dev
 ```
-{DIRECTORY_STRUCTURE}
-```
 
-## Supabase接続
+## Diagnostics
+- `/api/diag/core`: Check Core API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
+- `/api/diag/ai`: Check AI API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 
-DB操作はSupabase MCPツール（execute_sql, apply_migration, list_tables等）を使う。
+## Cron Jobs (Vercel)
+- `/api/cron/sync-channels`: 10分間隔（`*/10 * * * *`）。code='rakuten' を**除く** active channels を順に adapter 実行 → tickets/messages を upsert。
+  - 認可: `Authorization: Bearer ${CRON_SECRET}` または手動 `X-Diag-Token: $DIAG_TOKEN`
+- `/api/cron/rakuten-sync`: 5分間隔（`*/5 * * * *`）。楽天 R-MessE 専用。受信 (fetchInbox) + 送信 (sendApprovedDrafts) を 1 サイクルで実行。
+  - 認可: 上記同パターン
+  - 1 サイクルあたり最大送信件数 20 件 (Vercel タイムアウト対策)
 
-| プロジェクト | project_id | 権限 |
-|---|---|---|
-| {TOOL_NAME} | {SUPABASE_PROJECT_ID} | 読み書き |
+## DB Schema (Phase 1.1+)
+channels / tickets / messages / channel_sync_state / ticket_drafts.
+全テーブル RLS 有効、service_role のみ読み書き可（Phase 1.2 で UI 用ポリシー追加予定）。
+`channel_credentials` は廃止 (Core /api/credentials 経由に移行済)。
 
-## プロジェクト固有の注意事項
-{PROJECT_SPECIFIC_NOTES}
+## Channel Adapters
+- `src/channels/_lib/`: ChannelAdapter インターフェース・正規化型・registry
+- `src/channels/rakuten/`: 楽天 R-MessE (InquiryManagementAPI) adapter
+  - エンドポイント: `https://api.rms.rakuten.co.jp/es/1.0/inquirymng-api/`
+  - 認証: `ESA <base64(serviceSecret:licenseKey)>` を Core `/api/credentials/rakuten_rmesse?scope_key=<店舗ID>` 取得結果から構築
+  - 受信 (fetchInbox): `src/channels/rakuten/adapter.ts`
+  - 送信 (sendApprovedDrafts): `src/channels/rakuten/outbound.ts`
+  - **店舗 ID** は `channels.config.shop_id` に格納する運用 (Core API の scope_key と同一)
 
-## アーキテクチャ原則（B案）— 絶対ルール
-
-### マスタデータはorigin-coreが唯一の正（Single Source of Truth）
-- 商品マスタ（products, product_costs, product_mall_settings等）、ユーザー情報、商品グループ等はorigin-core DBが正
-- 各ツールのローカルDBにマスタデータのコピーテーブルを作るのは禁止
-- マスタデータの参照・更新は必ずCore API経由（INTERNAL_API_KEY認証）
-- 唯一の例外: origin-aiのみorigin-core DB直接アクセス許可
-
-### 各ツールのローカルDBに持つのは業務データのみ
-- 例: ec-managerのsales, amazon_financial_events等（そのツール固有のデータ）
-- 「ローカルDBが空 → 自動登録機能を作る」は禁止。Coreから取得するAPIを使え
-- Core APIに適切なエンドポイントがない場合は、勝手に代替を作らず報告して止まれ
-
-### 場当たり的な解決の禁止
-実装する前に必ず以下を確認:
-1. この変更は他のページ・機能・ツールに影響しないか
-2. アーキテクチャ原則に違反していないか
-3. 既存の仕組みで解決できないか（新しいテーブル/API/機能を作る前に確認）
-4. 指示文の内容がこの原則に矛盾する場合は、指示に従わず報告して確認を取ること
+Note: spec で示された `_diag` は Next.js App Router の private folder 規約 (アンダースコアプレフィックスはルーティングから除外) と衝突するため `diag` に変更。
