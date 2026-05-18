@@ -22,7 +22,19 @@ function normalize(s: string | null | undefined): string | null {
 }
 
 function isIsoDate(v: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(v);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const [y, m, d] = v.split('-').map((s) => parseInt(s, 10));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m - 1 &&
+    dt.getUTCDate() === d
+  );
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(v: string): boolean {
+  return UUID_RE.test(v);
 }
 
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
@@ -113,7 +125,15 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     if (k in payload) update[k] = normalize(payload[k]);
   }
   if ('ticket_id' in payload) {
-    update.ticket_id = normalize(payload.ticket_id);
+    const v = normalize(payload.ticket_id);
+    if (v && !isUuid(v)) {
+      return NextResponse.json({ ok: false, error: 'ticket_id must be a UUID' }, { status: 400 });
+    }
+    update.ticket_id = v;
+  }
+  if ('id' in params && !isUuid(params.id)) {
+    // 念のため id 自体も validate
+    return NextResponse.json({ ok: false, error: 'invalid id (UUID required)' }, { status: 400 });
   }
 
   if (Object.keys(update).length === 0) {

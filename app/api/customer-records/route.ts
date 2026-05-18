@@ -25,8 +25,24 @@ function normalize(s: string | null | undefined): string | null {
   return t === '' ? null : t;
 }
 
+/**
+ * `YYYY-MM-DD` の正規表現一致 + 実在日付チェック。
+ * Date() で組み立てて Y/M/D が一致するか確認 (2026-99-99 を弾く)。
+ */
 function isIsoDate(v: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(v);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const [y, m, d] = v.split('-').map((s) => parseInt(s, 10));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m - 1 &&
+    dt.getUTCDate() === d
+  );
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(v: string): boolean {
+  return UUID_RE.test(v);
 }
 
 export async function GET(req: NextRequest) {
@@ -120,6 +136,13 @@ export async function POST(req: NextRequest) {
   // honorific は空なら default '様' を採用
   const recipientHonorific = normalize(payload.recipient_honorific) ?? '様';
 
+  // ticket_id は UUID validate (空 → null、形式不正 → 400)
+  const ticketIdRaw = normalize(payload.ticket_id);
+  if (ticketIdRaw && !isUuid(ticketIdRaw)) {
+    return NextResponse.json({ ok: false, error: 'ticket_id must be a UUID' }, { status: 400 });
+  }
+  const ticketId = ticketIdRaw;
+
   const insert = {
     product_id: productId,
     product_name_text: productNameText,
@@ -135,7 +158,7 @@ export async function POST(req: NextRequest) {
     line_account: normalize(payload.line_account),
     memo: normalize(payload.memo),
     defect_type: normalize(payload.defect_type),
-    ticket_id: normalize(payload.ticket_id),
+    ticket_id: ticketId,
   };
 
   const sb = getSupabaseAdmin();
