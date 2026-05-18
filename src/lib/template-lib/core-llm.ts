@@ -42,7 +42,7 @@ export async function resolveForTool(purpose: string): Promise<LLMConfig> {
     throw new LLMResolveError('INTERNAL_API_KEY is not set');
   }
 
-  const url = `${coreApiUrl}/api/llm/resolve?tool=${encodeURIComponent(TOOL_ID)}&purpose=${encodeURIComponent(purpose)}`;
+  const url = `${coreApiUrl.replace(/\/$/, '')}/api/llm/resolve?tool=${encodeURIComponent(TOOL_ID)}&purpose=${encodeURIComponent(purpose)}`;
 
   let response: Response;
   try {
