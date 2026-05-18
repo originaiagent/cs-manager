@@ -145,7 +145,7 @@ export default async function ProductProposalsPage() {
 
                 <ActionButtons
                   id={r.id}
-                  endpoint={`/api/product-proposals/${r.id}`}
+                  kind="product-proposal"
                   status={r.status}
                   options={[
                     { value: 'accepted', label: '採用', variant: 'accept' },

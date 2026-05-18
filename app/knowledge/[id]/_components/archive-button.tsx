@@ -3,6 +3,7 @@
 import { useTransition, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Archive, RotateCcw } from 'lucide-react';
+import { updateArticleStatus } from '../../_actions/update-article-status';
 
 export default function ArchiveButton({
   id,
@@ -19,12 +20,8 @@ export default function ArchiveButton({
     if (busy) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/knowledge/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: next }),
-      });
-      if (!res.ok) throw new Error('failed');
+      const result = await updateArticleStatus(id, next);
+      if (!result.ok) throw new Error(result.error ?? 'failed');
       startTransition(() => router.refresh());
     } catch {
       alert('更新に失敗しました');

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { X, Search } from 'lucide-react';
+import { suggestProducts } from '../_actions/suggest-products';
 
 interface SuggestItem {
   id: string;
@@ -23,6 +24,7 @@ export default function ProductSuggest({ selected, onChange, label = '製品 (Co
   const [error, setError] = useState<string | null>(null);
   const [resolvedNames, setResolvedNames] = useState<Record<string, string>>({});
   const debounceRef = useRef<any>(null);
+  const seqRef = useRef(0);
 
   useEffect(() => {
     if (!q.trim()) {
@@ -31,21 +33,21 @@ export default function ProductSuggest({ selected, onChange, label = '製品 (Co
     }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
+      const mySeq = ++seqRef.current;
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(
-          `/api/products/suggest?q=${encodeURIComponent(q.trim())}`,
-        );
-        const j = await res.json();
-        if (!j.ok) throw new Error(j.error ?? 'サジェスト取得失敗');
-        setItems(j.items ?? []);
+        const result = await suggestProducts(q.trim());
+        if (mySeq !== seqRef.current) return;
+        if (!result.ok) throw new Error(result.error ?? 'サジェスト取得失敗');
+        setItems(result.items ?? []);
         setOpen(true);
       } catch (e: any) {
+        if (mySeq !== seqRef.current) return;
         setError(e.message ?? 'failed');
         setItems([]);
       } finally {
-        setLoading(false);
+        if (mySeq === seqRef.current) setLoading(false);
       }
     }, 300);
     return () => debounceRef.current && clearTimeout(debounceRef.current);

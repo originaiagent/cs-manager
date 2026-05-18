@@ -1,6 +1,6 @@
 'use server';
 
-import { headers } from 'next/headers';
+import { internalFetch } from '@/lib/auth/internal-fetch';
 
 export interface GenerateAiDraftResult {
   ok: boolean;
@@ -15,37 +15,17 @@ export interface GenerateAiDraftResult {
  *
  * /api/tickets/[id]/draft-ai は X-Internal-API-Key 必須化されているため、
  * ブラウザから直接 fetch せず、本 Server Action 経由で呼ぶ。
- * 鍵は process.env.INTERNAL_API_KEY (server only)。クライアントには絶対露出しない。
  *
- * Vercel 上では二段関数呼び出し (Server Action lambda → API Route lambda) になるが、
- * AI 集約原則 + 単一のルート責務維持のため許容 (Gemini APPROVE 2026-05-11)。
+ * 鍵注入と base URL 解決は internalFetch に集約 (Host header 由来 SSRF 防止)。
  */
 export async function generateAiDraft(
   ticketId: string,
 ): Promise<GenerateAiDraftResult> {
-  const apiKey = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
-  if (!apiKey) {
-    return { ok: false, error: 'INTERNAL_API_KEY is not configured' };
-  }
-
-  const h = headers();
-  const host = h.get('host');
-  if (!host) {
-    return { ok: false, error: 'host header missing' };
-  }
-  const proto = h.get('x-forwarded-proto') ?? (host.startsWith('localhost') ? 'http' : 'https');
-  const url = `${proto}://${host}/api/tickets/${encodeURIComponent(ticketId)}/draft-ai`;
-
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Internal-API-Key': apiKey,
-      },
-      body: JSON.stringify({}),
-      cache: 'no-store',
-    });
+    const res = await internalFetch(
+      `/api/tickets/${encodeURIComponent(ticketId)}/draft-ai`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
     const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (!res.ok || j.ok !== true) {
       return {

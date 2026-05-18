@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
+import { authorizeApiRoute } from '@/lib/auth/api-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -8,6 +9,8 @@ const ALLOWED_SCOPES = ['company', 'store', 'product'] as const;
 const ALLOWED_STATUSES = ['draft', 'published', 'archived'] as const;
 
 export async function GET(req: NextRequest) {
+  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  if (authError) return authError;
   const sp = req.nextUrl.searchParams;
   const sb = getSupabaseAdmin();
   let q = sb
@@ -33,6 +36,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  if (authError) return authError;
   let payload: any;
   try {
     payload = await req.json();

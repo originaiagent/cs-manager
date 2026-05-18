@@ -4,6 +4,7 @@ import { sendApprovedDrafts } from '@/channels/rakuten/outbound';
 import type { AdapterLogger, ChannelAdapterContext } from '@/channels/_lib/adapter';
 import type { NormalizedMessage, NormalizedTicketWithMessages } from '@/channels/_lib/types';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
+import { authorizeApiRoute } from '@/lib/auth/api-auth';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -25,19 +26,6 @@ export const maxDuration = 300;
  *
  * 既存 /api/cron/sync-channels は楽天を除外する形で並走 (orchestrator 側でフィルタ)。
  */
-
-function authorize(req: NextRequest): NextResponse | null {
-  const cronSecret = process.env.CRON_SECRET;
-  const diagToken = process.env.DIAG_TOKEN;
-
-  const authHeader = req.headers.get('authorization');
-  if (cronSecret && authHeader === `Bearer ${cronSecret}`) return null;
-
-  const provided = req.headers.get('x-diag-token');
-  if (diagToken && provided === diagToken) return null;
-
-  return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
-}
 
 function makeLogger(prefix: string): AdapterLogger {
   const fmt = (extra?: Record<string, unknown>) =>
@@ -249,7 +237,7 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
 }
 
 export async function GET(req: NextRequest) {
-  const authError = authorize(req);
+  const authError = authorizeApiRoute(req, { tier: 'cron' });
   if (authError) return authError;
 
   const startedAt = new Date();

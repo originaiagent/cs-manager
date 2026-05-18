@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
+import { authorizeApiRoute } from '@/lib/auth/api-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -7,7 +8,9 @@ export const dynamic = 'force-dynamic';
 const ALLOWED_SCOPES = ['company', 'store', 'product'] as const;
 const ALLOWED_STATUSES = ['draft', 'published', 'archived'] as const;
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  if (authError) return authError;
   const sb = getSupabaseAdmin();
   const { data, error } = await sb
     .from('knowledge_articles')
@@ -20,6 +23,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  if (authError) return authError;
   let payload: any;
   try {
     payload = await req.json();
@@ -64,7 +69,9 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   return NextResponse.json({ ok: true, article: data });
 }
 
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(req: NextRequest, { params }: { params: { id: string } }) {
+  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  if (authError) return authError;
   const sb = getSupabaseAdmin();
   const { error } = await sb.from('knowledge_articles').delete().eq('id', params.id);
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
