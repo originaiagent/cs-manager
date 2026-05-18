@@ -33,7 +33,7 @@ export default async function ImprovementSuggestionsPage({
   searchParams: SearchParams;
 }) {
   noStore();
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
 
   let q = sb.from('improvement_suggestions').select('*');
   if (searchParams.type && (searchParams.type === 'manual' || searchParams.type === 'faq')) {

@@ -12,7 +12,7 @@ export default async function EditKnowledgePage({
 }: {
   params: { id: string };
 }) {
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const [{ data: a }, { data: channels }] = await Promise.all([
     sb.from('knowledge_articles').select('*').eq('id', params.id).maybeSingle(),
     sb.from('channels').select('code, display_name').order('display_name'),

@@ -23,7 +23,7 @@ const CATEGORY_ORDER = ['design', 'material', 'inspection', 'package', 'other'];
 
 export default async function ProductProposalsPage() {
   noStore();
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data: rows } = await sb
     .from('product_improvement_proposals')
     .select('*')

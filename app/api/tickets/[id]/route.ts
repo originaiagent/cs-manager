@@ -29,7 +29,7 @@ export async function PATCH(
     );
   }
 
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const update: Record<string, any> = { status };
   if (status === 'done') update.resolved_at = new Date().toISOString();
   else update.resolved_at = null;

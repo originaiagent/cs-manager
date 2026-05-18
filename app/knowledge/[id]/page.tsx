@@ -21,7 +21,7 @@ export default async function KnowledgeDetail({
   params: { id: string };
 }) {
   noStore();
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data: a } = await sb
     .from('knowledge_articles')
     .select('*')

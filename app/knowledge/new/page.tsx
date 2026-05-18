@@ -7,7 +7,7 @@ import ArticleForm from '../_components/article-form';
 export const dynamic = 'force-dynamic';
 
 export default async function NewKnowledgePage() {
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data: channels } = await sb
     .from('channels')
     .select('code, display_name')

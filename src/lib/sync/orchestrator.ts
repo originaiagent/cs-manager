@@ -53,7 +53,7 @@ function makeLogger(channelCode: string): AdapterLogger {
 }
 
 async function loadActiveChannels(): Promise<ChannelRow[]> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   // 楽天は credential 動的取得 + 送信フローを含む専用 cron (/api/cron/rakuten-sync, 5分間隔)
   // で処理するため、汎用 cron からは除外する (二重取込・競合防止)。
   const { data, error } = await supa
@@ -66,7 +66,7 @@ async function loadActiveChannels(): Promise<ChannelRow[]> {
 }
 
 async function loadSyncState(channelId: string): Promise<Date | null> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { data, error } = await supa
     .from('channel_sync_state')
     .select('last_synced_at')
@@ -78,7 +78,7 @@ async function loadSyncState(channelId: string): Promise<Date | null> {
 }
 
 async function persistSyncState(channelId: string, lastSyncedAt: Date, lastExternalId?: string) {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { error } = await supa
     .from('channel_sync_state')
     .upsert(
@@ -96,7 +96,7 @@ async function upsertTicket(
   channelId: string,
   payload: NormalizedTicketWithMessages['ticket'],
 ): Promise<string> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   // status は cs-manager 内部で書き換わる可能性があるため、新規作成時のみ adapter 値を採用。
   // 既存行に対しては customer / subject / channel_meta / resolved_at だけ更新する方針。
   // ここでは select → insert/update を分岐して安全に扱う。
@@ -150,7 +150,7 @@ async function upsertMessages(
   messages: NormalizedMessage[],
 ): Promise<number> {
   if (messages.length === 0) return 0;
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const rows = messages.map((m) => ({
     ticket_id: ticketId,
     channel_message_id: m.channelMessageId,

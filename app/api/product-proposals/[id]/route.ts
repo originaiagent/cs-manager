@@ -22,7 +22,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       { status: 400 },
     );
   }
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data, error } = await sb
     .from('product_improvement_proposals')
     .update({ status: payload.status })

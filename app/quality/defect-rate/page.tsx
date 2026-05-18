@@ -40,7 +40,7 @@ export default async function DefectRatePage({
     ? (searchParams.period as Period)
     : '30d';
 
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
 
   const periodCutoff = (() => {
     const now = new Date();

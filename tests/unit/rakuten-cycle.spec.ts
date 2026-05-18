@@ -45,7 +45,7 @@ const rakutenRequests: Array<{ method: string; path: string; body: string }> = [
 
 let coreServer: Server;
 let rakutenServer: Server;
-let supabase: ReturnType<typeof getSupabaseAdmin>;
+let supabase: Awaited<ReturnType<typeof getSupabaseAdmin>>;
 let testChannelId: string;
 let testTicketId: string;
 let testDraftId: string;
@@ -172,7 +172,7 @@ test.beforeAll(async () => {
   });
 
   _clearCredentialCacheForTest();
-  supabase = getSupabaseAdmin();
+  supabase = await getSupabaseAdmin();
 
   // === 3. channels.code='rakuten' は UNIQUE のため既存行を一時的に書き換えて再利用 ===
   const { data: existing } = await supabase
