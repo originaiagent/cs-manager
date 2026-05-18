@@ -6,6 +6,7 @@ import {
   Inbox,
   BookOpen,
   BarChart3,
+  ClipboardList,
   Settings,
   Menu,
   X,
@@ -17,6 +18,7 @@ type NavItem = { href: string; label: string; icon: LucideIcon };
 
 const navItems: NavItem[] = [
   { href: '/inbox', label: '受信箱', icon: Inbox },
+  { href: '/customer-records', label: '対応記録', icon: ClipboardList },
   { href: '/knowledge', label: 'ナレッジ', icon: BookOpen },
   { href: '/quality', label: '品質分析', icon: BarChart3 },
   { href: '/settings', label: '設定', icon: Settings },

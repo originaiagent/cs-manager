@@ -1,7 +1,7 @@
 import { unstable_noStore as noStore } from 'next/cache';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { ChevronLeft } from 'lucide-react';
+import { ChevronLeft, ClipboardList } from 'lucide-react';
 import PageHeader from '@/components/ui/page-header';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { fetchProductById, type CoreProduct } from '@/lib/core-client';
@@ -85,7 +85,26 @@ export default async function TicketDetailPage({ params }: { params: Params }) {
       <PageHeader
         title={ticket.subject || '(件名なし)'}
         description={`受信 ${formatRelative(ticket.created_at)}`}
-        rightSlot={<StatusControls ticketId={ticket.id} currentStatus={status} />}
+        rightSlot={
+          <div className="flex items-center gap-2">
+            <Link
+              href={`/customer-records/new?ticket_id=${encodeURIComponent(ticket.id)}${
+                ticket.customer_name
+                  ? `&recipient_name=${encodeURIComponent(ticket.customer_name)}`
+                  : ''
+              }${
+                product?.product_name
+                  ? `&product_name=${encodeURIComponent(product.product_name)}`
+                  : ''
+              }`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700 hover:bg-gray-50"
+            >
+              <ClipboardList size={14} />
+              対応記録に追加
+            </Link>
+            <StatusControls ticketId={ticket.id} currentStatus={status} />
+          </div>
+        }
       />
 
       <div className="flex items-center gap-2 mb-4 flex-wrap">
