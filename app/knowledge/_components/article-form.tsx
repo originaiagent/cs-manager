@@ -4,6 +4,8 @@ import { useRouter } from 'next/navigation';
 import { useState, useTransition, type FormEvent } from 'react';
 import { Save, Loader2 } from 'lucide-react';
 import ProductSuggest from './product-suggest';
+import { createArticle } from '../_actions/create-article';
+import { updateArticle } from '../_actions/update-article';
 
 interface ChannelOption {
   code: string;
@@ -118,16 +120,12 @@ export default function ArticleForm({ channels, initial, mode }: Props) {
       return;
     }
     try {
-      const url = mode === 'edit' ? `/api/knowledge/${initial!.id}` : '/api/knowledge';
-      const method = mode === 'edit' ? 'PATCH' : 'POST';
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const j = await res.json();
-      if (!res.ok || !j.ok) throw new Error(j.error ?? `保存失敗: ${res.status}`);
-      const id = j.article?.id ?? initial?.id;
+      const result =
+        mode === 'edit'
+          ? await updateArticle(initial!.id!, payload)
+          : await createArticle(payload);
+      if (!result.ok) throw new Error(result.error ?? '保存失敗');
+      const id = result.article?.id ?? initial?.id;
       startTransition(() => router.push(`/knowledge/${id}`));
     } catch (e: any) {
       setError(e?.message ?? 'unknown error');

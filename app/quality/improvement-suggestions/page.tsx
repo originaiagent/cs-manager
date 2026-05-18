@@ -132,7 +132,7 @@ export default async function ImprovementSuggestionsPage({
                 )}
                 <ActionButtons
                   id={r.id}
-                  endpoint={`/api/improvement-suggestions/${r.id}`}
+                  kind="improvement-suggestion"
                   status={r.status}
                   options={[
                     { value: 'accepted', label: '採用', variant: 'accept' },

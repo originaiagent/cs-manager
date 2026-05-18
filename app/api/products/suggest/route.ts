@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { authorizeApiRoute } from '@/lib/auth/api-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -14,6 +15,8 @@ const cache = new Map<string, CacheEntry>();
 const TTL_MS = 60_000;
 
 export async function GET(req: NextRequest) {
+  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  if (authError) return authError;
   const q = req.nextUrl.searchParams.get('q')?.trim() ?? '';
   if (!q) return NextResponse.json({ ok: true, items: [] });
 

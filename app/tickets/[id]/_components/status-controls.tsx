@@ -3,6 +3,7 @@
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { STATUS_LABELS } from '@/lib/format';
+import { updateTicketStatus } from '../_actions/update-status';
 
 interface Props {
   ticketId: string;
@@ -26,15 +27,11 @@ export default function StatusControls({ ticketId, currentStatus }: Props) {
     setUpdating(next);
     setError(null);
     try {
-      const res = await fetch(`/api/tickets/${ticketId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: next }),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j.error ?? `update failed: ${res.status}`);
-      }
+      const result = await updateTicketStatus(
+        ticketId,
+        next as 'untouched' | 'in_progress' | 'done',
+      );
+      if (!result.ok) throw new Error(result.error ?? 'update failed');
       startTransition(() => router.refresh());
     } catch (e: any) {
       setError(e?.message ?? 'unknown error');

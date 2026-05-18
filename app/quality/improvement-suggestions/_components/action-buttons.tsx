@@ -3,10 +3,11 @@
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { Check, X, Pencil, Loader2 } from 'lucide-react';
+import { updateProposalStatus, type ProposalKind } from '@/app/quality/_actions/update-proposal-status';
 
 interface Props {
   id: string;
-  endpoint: string; // /api/improvement-suggestions/[id] or /api/product-proposals/[id]
+  kind: ProposalKind;
   status: string;
   options: Array<{ value: string; label: string; variant: 'accept' | 'reject' | 'edit' | 'escalate' }>;
 }
@@ -25,7 +26,7 @@ const VARIANT_ICON = {
   escalate: Pencil,
 };
 
-export default function ActionButtons({ id, endpoint, status, options }: Props) {
+export default function ActionButtons({ id, kind, status, options }: Props) {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
   const [, startTransition] = useTransition();
@@ -34,14 +35,9 @@ export default function ActionButtons({ id, endpoint, status, options }: Props) 
     if (busy) return;
     setBusy(next);
     try {
-      const res = await fetch(endpoint, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: next }),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j.error ?? `update failed: ${res.status}`);
+      const result = await updateProposalStatus(kind, id, next);
+      if (!result.ok) {
+        throw new Error(result.error ?? '更新に失敗しました');
       }
       startTransition(() => router.refresh());
     } catch (e: any) {

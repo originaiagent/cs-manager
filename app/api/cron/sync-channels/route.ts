@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { runChannelSync } from '@/lib/sync/orchestrator';
+import { authorizeApiRoute } from '@/lib/auth/api-auth';
 
 export const dynamic = 'force-dynamic';
 // 取込ジョブはやや時間がかかる可能性があるため Node ランタイムを明示
@@ -7,26 +8,10 @@ export const runtime = 'nodejs';
 export const maxDuration = 300; // 5 min（Vercel Hobby 上限まで）
 
 /**
- * 認可:
- *  - Vercel Cron は `Authorization: Bearer ${CRON_SECRET}` を自動付与する
- *  - 手動デバッグ実行用に X-Diag-Token: ${DIAG_TOKEN} も許可
- *  - いずれも一致しなければ 401
+ * 認可: tier='cron' (Authorization: Bearer ${CRON_SECRET} または X-Diag-Token: ${DIAG_TOKEN})
  */
-function authorize(req: NextRequest): NextResponse | null {
-  const cronSecret = process.env.CRON_SECRET;
-  const diagToken = process.env.DIAG_TOKEN;
-
-  const authHeader = req.headers.get('authorization');
-  if (cronSecret && authHeader === `Bearer ${cronSecret}`) return null;
-
-  const provided = req.headers.get('x-diag-token');
-  if (diagToken && provided === diagToken) return null;
-
-  return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
-}
-
 export async function GET(req: NextRequest) {
-  const authError = authorize(req);
+  const authError = authorizeApiRoute(req, { tier: 'cron' });
   if (authError) return authError;
 
   try {

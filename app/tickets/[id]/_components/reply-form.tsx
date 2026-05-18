@@ -4,6 +4,7 @@ import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { Sparkles, Save, Loader2, RefreshCw, Pencil, Check } from 'lucide-react';
 import { generateAiDraft } from '../_actions/generate-ai-draft';
+import { saveDraft } from '../_actions/save-draft';
 
 interface Props {
   ticketId: string;
@@ -38,14 +39,9 @@ export default function ReplyForm({
     setSavingManual(true);
     setSaveError(null);
     try {
-      const res = await fetch(`/api/tickets/${ticketId}/drafts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body, source: 'manual' }),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j.error ?? `save failed: ${res.status}`);
+      const result = await saveDraft(ticketId, body, 'manual');
+      if (!result.ok) {
+        throw new Error(result.error ?? 'save failed');
       }
       setSavedAt(new Date().toISOString());
       setSource('manual');
@@ -79,15 +75,15 @@ export default function ReplyForm({
     setAi({ kind: 'idle' });
     // 採用 = ai_draft で永続化
     try {
-      await fetch(`/api/tickets/${ticketId}/drafts`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body: ai.kind === 'preview' ? ai.draft : '', source: 'ai_draft' }),
-      });
+      const r = await saveDraft(ticketId, ai.draft, 'ai_draft');
+      if (!r.ok) {
+        setSaveError(r.error ?? '保存に失敗しました');
+        return;
+      }
       setSavedAt(new Date().toISOString());
       startTransition(() => router.refresh());
-    } catch {
-      // 失敗しても UI は落とさない (textarea には反映済み)
+    } catch (e: any) {
+      setSaveError(e?.message ?? '保存に失敗しました');
     }
   }
 
