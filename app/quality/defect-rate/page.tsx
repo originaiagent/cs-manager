@@ -213,24 +213,52 @@ export default async function DefectRatePage({
     }
   }
 
-  // Amazon 返品数を stub で埋める (将来差し替え予定)
+  // Amazon 返品数 (Core 未実装のため stub)。
+  // codex R3 PR-C feedback:
+  //  - period / monthKey を明示し、stub フラグで非加算を担保
+  //  - variation 粒度時は (product_id, VARIATION_UNKNOWN_LABEL) 行のみに加算
+  //    (Amazon 返品数は product 単位までしか取れない設計を前提、各 variation
+  //    行へ重複加算しない)
   const uniqProductIds = Array.from(new Set(Array.from(aggMap.values()).map((r) => r.product_id)));
   const amazonResults = await Promise.all(
     uniqProductIds.map(async (pid) => {
-      const r = await fetchAmazonReturnsByProduct(pid, monthKey ?? currentMonthKey());
+      const r = await fetchAmazonReturnsByProduct({
+        productId: pid,
+        period,
+        monthKey: period === 'monthly' ? monthKey : null,
+      });
       return { pid, count: r.count, stub: r.stub };
     }),
   );
   const amazonMap = new Map<string, { count: number; stub: boolean }>();
   for (const a of amazonResults) amazonMap.set(a.pid, { count: a.count, stub: a.stub });
-  for (const row of aggMap.values()) {
-    const a = amazonMap.get(row.product_id);
-    if (a) {
-      row.amazon_returns = a.count;
-      row.amazon_returns_stub = a.stub;
-      row.defect_count += a.count;
+
+  if (granularity === 'parent') {
+    for (const row of aggMap.values()) {
+      const a = amazonMap.get(row.product_id);
+      if (a) {
+        row.amazon_returns = a.count;
+        row.amazon_returns_stub = a.stub;
+        if (!a.stub) row.defect_count += a.count;
+      }
     }
+  } else {
+    // variation 粒度: Amazon 返品数は variation 別 API が無い限り、当該 product の
+    // 「(バリエーション不明)」行にのみ載せる (重複加算を回避)
+    for (const row of aggMap.values()) {
+      if (row.variation_label !== VARIATION_UNKNOWN_LABEL) continue;
+      const a = amazonMap.get(row.product_id);
+      if (a) {
+        row.amazon_returns = a.count;
+        row.amazon_returns_stub = a.stub;
+        if (!a.stub) row.defect_count += a.count;
+      }
+    }
+    // 該当 product の variation 行があるが「(バリエーション不明)」行が無い場合は、
+    // 返品数を載せられないので暗黙的に 0 + stub のままにする (期待挙動: 重複加算
+    // させないため敢えて捨てる。Core 側に variation 別 API が出たら別ハンドリング)
   }
+
   for (const row of aggMap.values()) {
     row.defect_rate = row.sales_count > 0 ? row.defect_count / row.sales_count : 0;
   }
