@@ -13,7 +13,7 @@ export async function GET(req: NextRequest) {
   const authError = authorizeApiRoute(req, { tier: 'internal' });
   if (authError) return authError;
 
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data, error } = await sb
     .from('customer_service_records')
     .select('defect_type')
