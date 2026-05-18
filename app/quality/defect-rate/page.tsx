@@ -243,20 +243,35 @@ export default async function DefectRatePage({
       }
     }
   } else {
-    // variation 粒度: Amazon 返品数は variation 別 API が無い限り、当該 product の
-    // 「(バリエーション不明)」行にのみ載せる (重複加算を回避)
-    for (const row of aggMap.values()) {
-      if (row.variation_label !== VARIATION_UNKNOWN_LABEL) continue;
-      const a = amazonMap.get(row.product_id);
-      if (a) {
-        row.amazon_returns = a.count;
-        row.amazon_returns_stub = a.stub;
-        if (!a.stub) row.defect_count += a.count;
+    // variation 粒度: Amazon 返品数は product 単位までしか取れない設計を前提。
+    // 当該 product の「(バリエーション不明)」行にのみ載せる (重複加算回避)。
+    // unknown 行が存在しない場合は synthetic に作って Amazon 返品数を載せる
+    // (codex R3 round 2 反映: 既知 variation のみの product で返品数が
+    // 欠落する事象を防ぐ)。stub かつ count=0 の場合は synthetic 行を作らず
+    // (UI を無駄に増やさない)、既存 unknown 行があれば flag だけ更新する。
+    for (const pid of uniqProductIds) {
+      const a = amazonMap.get(pid);
+      if (!a) continue;
+      const unknownKey = rowKey(pid, VARIATION_UNKNOWN_LABEL);
+      const existing = aggMap.get(unknownKey);
+      if (existing) {
+        existing.amazon_returns = a.count;
+        existing.amazon_returns_stub = a.stub;
+        if (!a.stub) existing.defect_count += a.count;
+      } else if (!a.stub && a.count > 0) {
+        aggMap.set(unknownKey, {
+          product_id: pid,
+          variation_label: VARIATION_UNKNOWN_LABEL,
+          defect_count: a.count,
+          defect_breakdown: {},
+          sales_count: salesMap.get(pid) ?? 0,
+          amazon_returns: a.count,
+          amazon_returns_stub: false,
+          defect_rate: 0,
+        });
       }
+      // stub === true && unknown 行不在 → 何もしない (UI を無駄に増やさない)
     }
-    // 該当 product の variation 行があるが「(バリエーション不明)」行が無い場合は、
-    // 返品数を載せられないので暗黙的に 0 + stub のままにする (期待挙動: 重複加算
-    // させないため敢えて捨てる。Core 側に variation 別 API が出たら別ハンドリング)
   }
 
   for (const row of aggMap.values()) {
