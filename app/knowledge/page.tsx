@@ -371,6 +371,8 @@ async function ProductDetail({
         storeDisplayMap={storeDisplayMap}
         productNameMap={productNameMap}
         emptyHint={searchParams.q}
+        simplified
+        titlePrefixToStrip={productName}
       />
     </>
   );
@@ -543,11 +545,15 @@ function ArticleList({
   storeDisplayMap,
   productNameMap,
   emptyHint,
+  simplified,
+  titlePrefixToStrip,
 }: {
   articles: any[];
   storeDisplayMap: Record<string, string>;
   productNameMap: Record<string, string>;
   emptyHint?: string;
+  simplified?: boolean;
+  titlePrefixToStrip?: string | null;
 }) {
   if (articles.length === 0) {
     return (
@@ -569,6 +575,8 @@ function ArticleList({
           article={a}
           storeDisplayMap={storeDisplayMap}
           productNameMap={productNameMap}
+          simplified={simplified}
+          titlePrefixToStrip={titlePrefixToStrip ?? null}
         />
       ))}
     </div>

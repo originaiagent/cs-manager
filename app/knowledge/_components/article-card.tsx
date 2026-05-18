@@ -22,6 +22,10 @@ interface Props {
   };
   storeDisplayMap: Record<string, string>;
   productNameMap: Record<string, string>;
+  /** product-detail (scope=product&product_id=X) ではタイトルのみ表示する簡素化モード */
+  simplified?: boolean;
+  /** simplified 時、title の先頭からこの文字列を除去 (商品名プレフィックス) */
+  titlePrefixToStrip?: string | null;
 }
 
 const SCOPE_BAR: Record<string, string> = {
@@ -30,12 +34,37 @@ const SCOPE_BAR: Record<string, string> = {
   product: 'border-l-violet-400',
 };
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripPrefix(title: string, prefix: string | null | undefined): string {
+  if (!prefix) return title;
+  const re = new RegExp('^' + escapeRegex(prefix) + '[\\s　]*');
+  return title.replace(re, '').trim() || title;
+}
+
 export default function ArticleCard({
   article,
   storeDisplayMap,
   productNameMap,
+  simplified = false,
+  titlePrefixToStrip,
 }: Props) {
   const bar = SCOPE_BAR[article.storage_scope] ?? 'border-l-gray-300';
+
+  if (simplified) {
+    const displayTitle = stripPrefix(article.title, titlePrefixToStrip ?? null);
+    return (
+      <Link
+        href={`/knowledge/${article.id}`}
+        className={`block rounded-xl border border-l-4 ${bar} border-gray-200 bg-white p-4 hover:border-brand-500 hover:shadow-sm transition-all`}
+        data-testid="knowledge-article-card-simplified"
+      >
+        <h3 className="text-sm font-medium text-gray-900">{displayTitle}</h3>
+      </Link>
+    );
+  }
 
   return (
     <Link
