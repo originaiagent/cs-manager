@@ -12,7 +12,7 @@ export default async function EditCustomerRecordPage({
 }: {
   params: { id: string };
 }) {
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data, error } = await sb
     .from('customer_service_records')
     .select('*')

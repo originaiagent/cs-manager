@@ -20,7 +20,7 @@ const ACTION_LABEL: Record<string, string> = {
 
 export default async function CustomerRecordsListPage() {
   noStore();
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data: rows } = await sb
     .from('customer_service_records')
     .select(

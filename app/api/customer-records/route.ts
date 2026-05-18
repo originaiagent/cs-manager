@@ -50,7 +50,7 @@ export async function GET(req: NextRequest) {
   if (authError) return authError;
 
   const sp = req.nextUrl.searchParams;
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   let q = sb.from('customer_service_records').select('*');
 
   const productId = sp.get('product_id');
@@ -161,7 +161,7 @@ export async function POST(req: NextRequest) {
     ticket_id: ticketId,
   };
 
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data, error } = await sb
     .from('customer_service_records')
     .insert(insert)
