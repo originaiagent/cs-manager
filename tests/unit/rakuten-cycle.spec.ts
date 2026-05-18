@@ -45,7 +45,7 @@ const rakutenRequests: Array<{ method: string; path: string; body: string }> = [
 
 let coreServer: Server;
 let rakutenServer: Server;
-let supabase: ReturnType<typeof getSupabaseAdmin>;
+let supabase: Awaited<ReturnType<typeof getSupabaseAdmin>>;
 let testChannelId: string;
 let testTicketId: string;
 let testDraftId: string;
@@ -72,9 +72,12 @@ async function readBody(req: IncomingMessage): Promise<string> {
 
 test.beforeAll(async () => {
   // === 1. Core mock サーバ起動 ===
+  //   - supabase_service_role: cs-manager が getSupabaseAdmin() 初回呼び出し時に解決
+  //   - rakuten_rmesse: outbound / adapter 内で getCredential(shopId) で解決
   coreServer = await listenOn(CORE_MOCK_PORT, (req, res) => {
+    const path = req.url ?? '';
     credentialRequests.push({
-      path: req.url ?? '',
+      path,
       headers: Object.fromEntries(
         Object.entries(req.headers).map(([k, v]) => [
           k.toLowerCase(),
@@ -83,6 +86,24 @@ test.beforeAll(async () => {
       ),
     });
     res.setHeader('Content-Type', 'application/json');
+    if (path.startsWith('/api/credentials/supabase_service_role')) {
+      // テストでは getSupabaseAdmin() の Core 解決を擬似的に通すために
+      // 実 SUPABASE_SERVICE_ROLE_KEY (.env.local の値) を返す。
+      // ※ 単体テストは本物の Supabase に接続する e2e 寄り設計のため。
+      const realKey = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? '').replace(/\s+$/, '');
+      res.end(
+        JSON.stringify({
+          service_code: 'supabase_service_role',
+          scope_key: 'jpnsoqzzylahpandbfcz',
+          credentials: { service_key: realKey },
+          metadata: {},
+          valid_from: '2026-05-18T00:00:00Z',
+          valid_to: null,
+        }),
+      );
+      return;
+    }
+    // それ以外 (rakuten_rmesse 想定) はデフォルトで楽天 credential を返す
     res.end(
       JSON.stringify({
         service_code: 'rakuten_rmesse',
@@ -172,7 +193,7 @@ test.beforeAll(async () => {
   });
 
   _clearCredentialCacheForTest();
-  supabase = getSupabaseAdmin();
+  supabase = await getSupabaseAdmin();
 
   // === 3. channels.code='rakuten' は UNIQUE のため既存行を一時的に書き換えて再利用 ===
   const { data: existing } = await supabase
@@ -288,11 +309,16 @@ test('rakuten 1 サイクル: 受信 → 送信 → DB 状態反映', async () =
   expect(ch.outbound.succeeded, 'A8: 送信成功 1 件').toBe(1);
   expect(ch.outbound.failed, 'A9: 送信失敗 0 件').toBe(0);
 
-  expect(credentialRequests.length, 'A10: Core credential 呼び出し >= 1').toBeGreaterThanOrEqual(1);
-  expect(credentialRequests[0].headers['x-internal-api-key'], 'A11: X-Internal-API-Key').toBe(
+  // getSupabaseAdmin() で supabase_service_role が解決されているはずなので
+  // rakuten_rmesse の解決は credentialRequests から path で探索する。
+  const rakutenCredReq = credentialRequests.find((r) =>
+    r.path.startsWith('/api/credentials/rakuten_rmesse'),
+  );
+  expect(rakutenCredReq, 'A10: Core credential 呼び出し (rakuten_rmesse) 存在').toBeTruthy();
+  expect(rakutenCredReq!.headers['x-internal-api-key'], 'A11: X-Internal-API-Key').toBe(
     'mock-internal-key',
   );
-  expect(credentialRequests[0].path, 'A12: scope_key 一致').toContain(`scope_key=${TEST_SHOP_ID}`);
+  expect(rakutenCredReq!.path, 'A12: scope_key 一致').toContain(`scope_key=${TEST_SHOP_ID}`);
 
   const replyCalls = rakutenRequests.filter(
     (r) => r.method === 'POST' && r.path === '/inquirymng-api/inquiry/reply',

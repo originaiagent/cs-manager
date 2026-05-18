@@ -31,7 +31,7 @@ export async function POST(
   if (authError) return authError;
 
   const startedAt = Date.now();
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
 
   // 1. ticket 取得
   const { data: ticket, error: ticketError } = await sb

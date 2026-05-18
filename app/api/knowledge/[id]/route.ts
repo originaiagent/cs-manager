@@ -11,7 +11,7 @@ const ALLOWED_STATUSES = ['draft', 'published', 'archived'] as const;
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
   const authError = authorizeApiRoute(req, { tier: 'internal' });
   if (authError) return authError;
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data, error } = await sb
     .from('knowledge_articles')
     .select('*')
@@ -57,7 +57,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     update.storage_product_id = payload.storage_scope === 'product' ? payload.storage_product_id : null;
   }
 
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data, error } = await sb
     .from('knowledge_articles')
     .update(update)
@@ -72,7 +72,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 export async function DELETE(req: NextRequest, { params }: { params: { id: string } }) {
   const authError = authorizeApiRoute(req, { tier: 'internal' });
   if (authError) return authError;
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { error } = await sb.from('knowledge_articles').delete().eq('id', params.id);
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   return NextResponse.json({ ok: true });

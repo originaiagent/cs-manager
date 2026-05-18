@@ -20,7 +20,7 @@ export default async function InboxPage({
   searchParams: SearchParams;
 }) {
   noStore();
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
 
   // チャネル一覧 (Phase 2.0: status 問わず全 channels をフィルタチップに表示)
   const { data: channelsRaw } = await sb

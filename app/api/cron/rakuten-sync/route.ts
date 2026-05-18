@@ -44,7 +44,7 @@ interface RakutenChannelRow {
 }
 
 async function loadActiveRakutenChannels(): Promise<RakutenChannelRow[]> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { data, error } = await supa
     .from('channels')
     .select('id, code, config')
@@ -55,7 +55,7 @@ async function loadActiveRakutenChannels(): Promise<RakutenChannelRow[]> {
 }
 
 async function loadSyncState(channelId: string): Promise<Date | null> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { data, error } = await supa
     .from('channel_sync_state')
     .select('last_synced_at')
@@ -70,7 +70,7 @@ async function persistSyncState(
   lastSyncedAt: Date,
   lastExternalId: string | undefined,
 ): Promise<void> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { error } = await supa.from('channel_sync_state').upsert(
     {
       channel_id: channelId,
@@ -92,7 +92,7 @@ async function upsertTicket(
   // ただし「既存の status を踏み潰さない」要件があるため、まず存在確認 + 既存行は
   // status を除外して update、未存在は upsert (再 select) の二段構成。
   // single-process cron が前提だが、二重起動への防御として onConflict を採用。
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { data: existing, error: selErr } = await supa
     .from('tickets')
     .select('id, status')
@@ -150,7 +150,7 @@ async function upsertMessages(
   messages: NormalizedMessage[],
 ): Promise<number> {
   if (messages.length === 0) return 0;
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const rows = messages.map((m) => ({
     ticket_id: ticketId,
     channel_message_id: m.channelMessageId,

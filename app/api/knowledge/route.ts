@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
   const authError = authorizeApiRoute(req, { tier: 'internal' });
   if (authError) return authError;
   const sp = req.nextUrl.searchParams;
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   let q = sb
     .from('knowledge_articles')
     .select('*');
@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
   if (payload.storage_scope === 'product' && !payload.storage_product_id) {
     return NextResponse.json({ ok: false, error: 'storage_product_id required for product scope' }, { status: 400 });
   }
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const insert = {
     storage_scope: payload.storage_scope,
     storage_store_id: payload.storage_scope === 'store' ? payload.storage_store_id : null,

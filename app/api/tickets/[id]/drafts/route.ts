@@ -13,7 +13,7 @@ export async function GET(
 ) {
   const authError = authorizeApiRoute(req, { tier: 'internal' });
   if (authError) return authError;
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data, error } = await sb
     .from('ticket_drafts')
     .select('id, body, source, created_at, updated_at')
@@ -51,7 +51,7 @@ export async function POST(
     );
   }
 
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
 
   // ticket 存在確認
   const { data: ticket } = await sb

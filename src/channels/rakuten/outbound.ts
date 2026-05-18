@@ -63,7 +63,7 @@ async function loadApprovedDrafts(
   channelId: string,
   limit: number,
 ): Promise<DraftWithTicket[]> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { data, error } = await supa
     .from('ticket_drafts')
     .select('id, body, ticket_id, ticket:tickets!inner(id, external_id, channel_id)')
@@ -96,7 +96,7 @@ async function markDraftSent(
   externalMessageId: string,
   sentAt: string,
 ): Promise<void> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { error } = await supa
     .from('ticket_drafts')
     .update({
@@ -113,7 +113,7 @@ async function updateDraftExternalMessageId(
   draftId: string,
   externalMessageId: string,
 ): Promise<void> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { error } = await supa
     .from('ticket_drafts')
     .update({ external_message_id: externalMessageId })
@@ -122,7 +122,7 @@ async function updateDraftExternalMessageId(
 }
 
 async function recordDraftError(draftId: string, message: string): Promise<void> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { error } = await supa
     .from('ticket_drafts')
     .update({ last_error: message.slice(0, 1000) })
@@ -137,7 +137,7 @@ async function upsertOutboundMessage(
   body: string,
   sentAt: string,
 ): Promise<void> {
-  const supa = getSupabaseAdmin();
+  const supa = await getSupabaseAdmin();
   const { error } = await supa.from('messages').upsert(
     {
       ticket_id: ticketId,

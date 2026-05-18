@@ -27,7 +27,7 @@ interface Params {
 
 export default async function TicketDetailPage({ params }: { params: Params }) {
   noStore();
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
 
   const { data: ticket } = await sb
     .from('tickets')

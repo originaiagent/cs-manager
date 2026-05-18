@@ -42,7 +42,7 @@ export default async function KnowledgePage({
   searchParams: SearchParams;
 }) {
   noStore();
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const mode = resolveMode(searchParams);
 
   // 全件カウント (タブ件数バッジ用)
@@ -147,7 +147,7 @@ async function FlatList({
   searchParams: SearchParams;
   storeDisplayMap: Record<string, string>;
 }) {
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   let q = sb
     .from('knowledge_articles')
     .select(
@@ -195,7 +195,7 @@ async function FlatList({
 // product-grid
 // ---------------------------------------------------------------------------
 async function ProductGrid({ searchParams }: { searchParams: SearchParams }) {
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   // storage_scope=product のすべての記事を取得 → product_id 単位で集約
   const { data: articles } = await sb
     .from('knowledge_articles')
@@ -313,7 +313,7 @@ async function ProductDetail({
   searchParams: SearchParams;
   storeDisplayMap: Record<string, string>;
 }) {
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   let q = sb
     .from('knowledge_articles')
     .select(
@@ -386,7 +386,7 @@ async function StoreGrid({
   storeDisplayMap: Record<string, string>;
   channels: Array<{ code: string; display_name: string }>;
 }) {
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   const { data: articles } = await sb
     .from('knowledge_articles')
     .select('id, storage_store_id, tags, reference_count, updated_at')
@@ -478,7 +478,7 @@ async function StoreDetail({
   searchParams: SearchParams;
   storeDisplayMap: Record<string, string>;
 }) {
-  const sb = getSupabaseAdmin();
+  const sb = await getSupabaseAdmin();
   let q = sb
     .from('knowledge_articles')
     .select(
