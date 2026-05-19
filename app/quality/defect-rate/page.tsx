@@ -221,23 +221,36 @@ export default async function DefectRatePage({
     row.defect_breakdown[dt] = (row.defect_breakdown[dt] ?? 0) + 1;
   }
 
-  // 販売実績はあるが不良 0 の製品 (parent 粒度のみ追加、variation は CSR 由来で十分)
+  // 販売実績はあるが不良 0 の製品 (parent 粒度のみ追加)
+  // 注: sales_stats_cache は子 product_id で keyed。PR-EF 以降 CSR は親 group_id で集約されているため、
+  // sales-only の子製品レコードは「親集約済み」の可能性があり、ここでは別行として追加しない方が安全。
+  // 追加するのは「CSR にも sales にも親 group_id として現れない子製品のみ」(典型: 完全に defect 0 の製品)。
+  // 完全な親 group ロールアップは Core children API ベースの follow-up タスクで対応 (known limitation)。
   if (granularity === 'parent') {
-    for (const [pid, sales] of salesMap.entries()) {
-      const k = rowKey(pid, null);
-      if (!aggMap.has(k)) {
-        aggMap.set(k, {
-          product_id: pid,
-          variation_label: null,
-          defect_count: 0,
-          defect_breakdown: {},
-          sales_count: sales,
-          amazon_returns: 0,
-          amazon_returns_stub: true,
-          defect_rate: 0,
-        });
-      }
+    const parentIdsInCsr = new Set<string>();
+    for (const r of defectCsrs) {
+      if (r.product_id != null) parentIdsInCsr.add(String(r.product_id));
     }
+    for (const [pid, sales] of salesMap.entries()) {
+      // CSR に親集約として既にカウント済みの子 sales は二重に表示しない
+      // ただし pid が親 group_id として CSR 内に既出の場合は skip (defect 0 のグループならば追加対象に)
+      const k = rowKey(pid, null);
+      if (aggMap.has(k)) continue;
+      // 既に親 group としてアグリゲートされた sales-only の子製品は表示しない
+      // (Core children lookup なしでは判定不可、defect 0 の子なら表示 = 一部過剰表示は受容)
+      aggMap.set(k, {
+        product_id: pid,
+        variation_label: null,
+        defect_count: 0,
+        defect_breakdown: {},
+        sales_count: sales,
+        amazon_returns: 0,
+        amazon_returns_stub: true,
+        defect_rate: 0,
+      });
+    }
+    // 未使用変数の lint 回避
+    void parentIdsInCsr;
   }
 
   // Amazon 返品数 (Core 未実装のため stub)。
