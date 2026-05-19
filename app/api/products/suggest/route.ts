@@ -13,7 +13,8 @@ interface CacheEntry {
 }
 const cache = new Map<string, CacheEntry>();
 const TTL_MS = 60_000;
-const LIMIT = 20;
+const LIMIT = 20;            // 候補表示の上限
+const FETCH_LIMIT = 500;     // Core が q を honor しない環境への防御: 大きめに取得して local filter
 const FIELDS = 'id,product_name,variation';
 
 export async function GET(req: NextRequest) {
@@ -38,7 +39,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/products?q=${encodeURIComponent(q)}&limit=${LIMIT}&fields=${encodeURIComponent(FIELDS)}`;
+  const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/products?q=${encodeURIComponent(q)}&limit=${FETCH_LIMIT}&fields=${encodeURIComponent(FIELDS)}`;
   try {
     const res = await fetch(url, {
       method: 'GET',
@@ -66,6 +67,7 @@ export async function GET(req: NextRequest) {
         const idStr = String(p?.id ?? '').toLowerCase();
         return name.includes(ql) || variation.includes(ql) || idStr === ql;
       })
+      .slice(0, LIMIT)
       .map((p) => ({
         id: String(p.id),
         product_name: p.product_name ?? '(no name)',
