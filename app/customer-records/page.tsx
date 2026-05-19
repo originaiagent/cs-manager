@@ -20,7 +20,9 @@ export const revalidate = 0;
 export default async function CustomerRecordsListPage({
   searchParams,
 }: {
-  searchParams: Record<string, string | undefined>;
+  // Next.js App Router の searchParams は string | string[] | undefined を返すため
+  // 配列形式 (?key=a&key=b) も型として受け入れる。helper 側で先頭値を採用。
+  searchParams: Record<string, string | string[] | undefined>;
 }) {
   noStore();
   const sb = await getSupabaseAdmin();
@@ -44,6 +46,11 @@ export default async function CustomerRecordsListPage({
 
   const hasSearch =
     !!(search.product || search.recipient || search.order || search.date_from || search.date_to);
+  // page が範囲外 (page > totalPages) で records が空のとき、空テーブルだけ表示する
+  // と何が起きたか分からないため、明示的に「ページ範囲外」状態として扱い 1 ページ目への
+  // 案内を出す。totalCount === 0 の純粋な空とは別の文言にする。
+  const totalPages = totalCount > 0 ? Math.ceil(totalCount / pageSize) : 0;
+  const isOutOfRange = totalCount > 0 && page > totalPages;
 
   return (
     <div className="max-w-6xl">
@@ -72,6 +79,27 @@ export default async function CustomerRecordsListPage({
               : '右上の「新規登録」から最初の記録を作成してください'
           }
         />
+      ) : isOutOfRange ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-6 text-sm text-amber-900">
+          <p className="font-medium">指定ページは範囲外です</p>
+          <p className="mt-1 text-xs">
+            合計 {totalCount} 件 / 全 {totalPages} ページ。
+            <Link
+              href={`/customer-records?${new URLSearchParams({
+                ...(search.product ? { product: search.product } : {}),
+                ...(search.recipient ? { recipient: search.recipient } : {}),
+                ...(search.order ? { order: search.order } : {}),
+                ...(search.date_from ? { date_from: search.date_from } : {}),
+                ...(search.date_to ? { date_to: search.date_to } : {}),
+                page: '1',
+                page_size: String(pageSize),
+              }).toString()}`}
+              className="ml-2 text-brand-700 underline hover:text-brand-800"
+            >
+              1 ページ目に戻る
+            </Link>
+          </p>
+        </div>
       ) : (
         <>
           <RecordsTableClient records={records} />

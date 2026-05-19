@@ -64,13 +64,21 @@ export function applySearchFilters<T extends {
   return q;
 }
 
-type SearchParamSource = URLSearchParams | Record<string, string | undefined>;
+// Next.js App Router の searchParams は `string | string[] | undefined` を返すため
+// 配列形式 (?product=a&product=b) も受け入れる型に拡張する。
+type SearchParamValue = string | string[] | undefined;
+type SearchParamSource = URLSearchParams | Record<string, SearchParamValue>;
 
 function getParam(sp: SearchParamSource, key: string): string | undefined {
   if (sp instanceof URLSearchParams) {
     return sp.get(key) ?? undefined;
   }
-  return sp[key];
+  const v = sp[key];
+  if (v == null) return undefined;
+  // 同じ key が複数回指定された場合 (e.g. ?product=a&product=b) は先頭値を採用。
+  // これにより配列値に対する .trim() で TypeError が出るのを防ぐ。
+  if (Array.isArray(v)) return v[0];
+  return v;
 }
 
 /**

@@ -2,7 +2,7 @@
 
 import { Search, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useState, useTransition, type FormEvent } from 'react';
+import { useEffect, useState, useTransition, type FormEvent } from 'react';
 import type { RecordSearchParams } from '../_lib/build-search-query';
 
 interface Props {
@@ -23,6 +23,17 @@ export default function SearchForm({ initial }: Props) {
   const [order, setOrder] = useState(initial.order ?? '');
   const [dateFrom, setDateFrom] = useState(initial.date_from ?? '');
   const [dateTo, setDateTo] = useState(initial.date_to ?? '');
+
+  // ブラウザバック/フォワード等で URL が変わり initial が更新された場合、
+  // フォームの local state を同期させる。これがないと「URL ≠ フォーム表示」になり
+  // 検索条件のリセット表示や直接遷移時のずれが発生する。
+  useEffect(() => {
+    setProduct(initial.product ?? '');
+    setRecipient(initial.recipient ?? '');
+    setOrder(initial.order ?? '');
+    setDateFrom(initial.date_from ?? '');
+    setDateTo(initial.date_to ?? '');
+  }, [initial.product, initial.recipient, initial.order, initial.date_from, initial.date_to]);
 
   function submit(e: FormEvent) {
     e.preventDefault();
