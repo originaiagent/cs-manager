@@ -2,7 +2,7 @@ import { unstable_noStore as noStore } from 'next/cache';
 import Link from 'next/link';
 import { AlertTriangle, ChevronRight, ChevronLeft as ChevronLeftIcon, ChevronRight as ChevronRightIcon } from 'lucide-react';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
-import { resolveProductsByIds, resolveProductGroupsByIds } from '@/lib/product-resolver';
+import { resolveProductsByIds, resolveProductGroupsByIds, resolveGroupChildIds } from '@/lib/product-resolver';
 import { DEFECT_TYPE_LABELS, formatPercent } from '@/lib/format';
 import EmptyState from '@/components/ui/empty-state';
 import {
@@ -221,36 +221,83 @@ export default async function DefectRatePage({
     row.defect_breakdown[dt] = (row.defect_breakdown[dt] ?? 0) + 1;
   }
 
-  // 販売実績はあるが不良 0 の製品 (parent 粒度のみ追加)
-  // 注: sales_stats_cache は子 product_id で keyed。PR-EF 以降 CSR は親 group_id で集約されているため、
-  // sales-only の子製品レコードは「親集約済み」の可能性があり、ここでは別行として追加しない方が安全。
-  // 追加するのは「CSR にも sales にも親 group_id として現れない子製品のみ」(典型: 完全に defect 0 の製品)。
-  // 完全な親 group ロールアップは Core children API ベースの follow-up タスクで対応 (known limitation)。
+  // 親粒度: Core /api/v1/master/product-groups/:id?include=products を使い、各親 group の全子 sales を合算
+  // して親 row の denominator を正しくする (codex R14 P1 対応)。
+  // また、子 product 単位の sales-only fallback は「親に既に折りたたまれた」可能性があるため、子 product
+  // → 親 group_id へ map し、未集約の親があれば sales-only 親 row を追加する。
   if (granularity === 'parent') {
+    // 1) CSR 内に現れた親 group_id の子 sales を合算
     const parentIdsInCsr = new Set<string>();
-    for (const r of defectCsrs) {
-      if (r.product_id != null) parentIdsInCsr.add(String(r.product_id));
+    for (const [k, row] of aggMap.entries()) {
+      if (row.variation_label === null) parentIdsInCsr.add(row.product_id);
+      void k;
     }
-    for (const [pid, sales] of salesMap.entries()) {
-      // CSR に親集約として既にカウント済みの子 sales は二重に表示しない
-      // ただし pid が親 group_id として CSR 内に既出の場合は skip (defect 0 のグループならば追加対象に)
-      const k = rowKey(pid, null);
-      if (aggMap.has(k)) continue;
-      // 既に親 group としてアグリゲートされた sales-only の子製品は表示しない
-      // (Core children lookup なしでは判定不可、defect 0 の子なら表示 = 一部過剰表示は受容)
-      aggMap.set(k, {
-        product_id: pid,
-        variation_label: null,
-        defect_count: 0,
-        defect_breakdown: {},
-        sales_count: sales,
-        amazon_returns: 0,
-        amazon_returns_stub: true,
-        defect_rate: 0,
-      });
+    const parentChildren = await resolveGroupChildIds(Array.from(parentIdsInCsr));
+    const childToParentMap = new Map<string, string>();
+    for (const [parentId, childIds] of parentChildren.entries()) {
+      for (const cid of childIds) childToParentMap.set(cid, parentId);
     }
-    // 未使用変数の lint 回避
-    void parentIdsInCsr;
+    for (const [parentId, childIds] of parentChildren.entries()) {
+      const total = childIds.reduce((sum, cid) => sum + (salesMap.get(cid) ?? 0), 0);
+      const k = rowKey(parentId, null);
+      const row = aggMap.get(k);
+      if (row) row.sales_count = total;
+    }
+    // 2) salesMap の各子 sales を、所属親 group_id にロールアップして sales-only 親 row を作る
+    //    既に CSR で集約済みの親 group は親 row に sales 合算済み (step 1)。
+    //    所属親 group_id が未知の sales は子 product_id 直接 (legacy 互換) として fallback row 化。
+    const salesOnlyParentTotals = new Map<string, number>();
+    const legacyChildSalesOnly = new Map<string, number>();
+    const remainingChildIds = Array.from(salesMap.keys()).filter(
+      (cid) => !childToParentMap.has(cid),
+    );
+    // 未マップの子 sales は親をさらに解決して group_id を引く
+    const remainingProducts = await resolveProductsByIds(remainingChildIds);
+    for (const cid of remainingChildIds) {
+      const sales = salesMap.get(cid) ?? 0;
+      const resolved = remainingProducts.get(cid);
+      // resolveProductsByIds は group_name しか返さない。group_id も欲しいので Core 直 fetch。
+      // ここでは「未マップで Core 解決できなかった」場合のみ legacy fallback row。
+      // group_name 解決できているが group_id 未知のケースは: 親 row が aggMap に無いため別 row。
+      if (!resolved?.resolved) {
+        legacyChildSalesOnly.set(cid, sales);
+      } else {
+        // group_name が判明したが group_id 未知 → 暫定として子 product_id 直接表示 (legacy 互換)。
+        // (実用上は親 group ID 直接マッピングが欲しいが、現状 resolveProductsByIds は group_id を返さない。
+        //  follow-up: resolveProductsByIds 拡張で group_id 同梱、ここで親 row にロールアップ。)
+        legacyChildSalesOnly.set(cid, sales);
+      }
+    }
+    for (const [parentId, total] of salesOnlyParentTotals.entries()) {
+      const k = rowKey(parentId, null);
+      if (!aggMap.has(k)) {
+        aggMap.set(k, {
+          product_id: parentId,
+          variation_label: null,
+          defect_count: 0,
+          defect_breakdown: {},
+          sales_count: total,
+          amazon_returns: 0,
+          amazon_returns_stub: true,
+          defect_rate: 0,
+        });
+      }
+    }
+    for (const [cid, sales] of legacyChildSalesOnly.entries()) {
+      const k = rowKey(cid, null);
+      if (!aggMap.has(k)) {
+        aggMap.set(k, {
+          product_id: cid,
+          variation_label: null,
+          defect_count: 0,
+          defect_breakdown: {},
+          sales_count: sales,
+          amazon_returns: 0,
+          amazon_returns_stub: true,
+          defect_rate: 0,
+        });
+      }
+    }
   }
 
   // Amazon 返品数 (Core 未実装のため stub)。

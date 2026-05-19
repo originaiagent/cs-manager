@@ -140,6 +140,58 @@ async function fetchProductGroupById(
   }
 }
 
+/**
+ * 親 group ID 配下の子 products.id 一覧を解決 (Core API ?include=products)。
+ * defect-rate などで「親 group 全体の sales 集約」用に使う。
+ * 60 秒キャッシュ。失敗時は空配列 fallback。
+ */
+const groupChildrenCache = new Map<string, { ts: number; childIds: string[] }>();
+
+export async function resolveGroupChildIds(parentIds: string[]): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  const uniq = Array.from(new Set(parentIds.filter(Boolean)));
+  const now = Date.now();
+  const toFetch: string[] = [];
+  for (const id of uniq) {
+    const cached = groupChildrenCache.get(id);
+    if (cached && now - cached.ts < CACHE_TTL_MS) {
+      result.set(id, cached.childIds);
+    } else {
+      toFetch.push(id);
+    }
+  }
+  if (toFetch.length === 0) return result;
+  if (!CORE_API_URL || !INTERNAL_API_KEY) {
+    for (const id of toFetch) result.set(id, []);
+    return result;
+  }
+  const fetched = await Promise.all(
+    toFetch.map(async (id) => {
+      const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/product-groups/${encodeURIComponent(id)}?include=products&productFields=${encodeURIComponent('id')}`;
+      try {
+        const r = await fetch(url, {
+          method: 'GET',
+          headers: { 'X-Internal-API-Key': INTERNAL_API_KEY, Accept: 'application/json' },
+          cache: 'no-store',
+          signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
+        });
+        if (!r.ok) return { id, childIds: [] };
+        const j = await r.json();
+        const group = j?.data ?? j;
+        const products = Array.isArray(group?.products) ? group.products : [];
+        return { id, childIds: products.map((p: any) => String(p.id)) };
+      } catch {
+        return { id, childIds: [] };
+      }
+    }),
+  );
+  for (const { id, childIds } of fetched) {
+    groupChildrenCache.set(id, { ts: Date.now(), childIds });
+    result.set(id, childIds);
+  }
+  return result;
+}
+
 export async function resolveProductGroupsByIds(
   ids: string[],
 ): Promise<Map<string, ResolvedProductGroup>> {
