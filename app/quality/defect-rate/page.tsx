@@ -101,9 +101,11 @@ export default async function DefectRatePage({
   const { data: defectTickets } = await tq;
 
   // 2) customer_service_records 不良判定行
+  //    PR-EF 以降 product_id は親 group_id を指し、変動 (子) 情報は variation_id に格納される。
+  //    sales_stats_cache は子 product_id で keyed のため、サブクエリ用 sales_key は variation_id 優先。
   let cq = sb
     .from('customer_service_records')
-    .select('product_id, variation_text, action_type, defect_type, record_date');
+    .select('product_id, variation_id, variation_text, action_type, defect_type, record_date');
   if (period === 'monthly' && monthKey) {
     cq = cq.gte('record_date', `${monthKey}-01`);
     // 翌月 1 日 (record_date は date 型なので JST/UTC 関係なく文字列比較で OK)
@@ -165,9 +167,15 @@ export default async function DefectRatePage({
   // CSR 不良判定の集計
   //   parent: (product_id, null) で集約 (variation_text は無視して合算)
   //   variation: (product_id, variation_text or VARIATION_UNKNOWN_LABEL)
+  //   sales_count: variation_id (子 products.id) を sales_stats_cache の key として優先利用。
+  //     - PR-EF 以降の新規データ: variation_id あり → 子 sales を正しく取得
+  //     - 旧 legacy CSR (variation_id なし): product_id が child product.id だった可能性 → fallback
+  //     - parent-only 新規データ (variation_id NULL, product_id=group_id): sales=0 (known limitation)
   for (const r of defectCsrs) {
     const pid = r.product_id != null ? String(r.product_id) : null;
     if (!pid) continue;
+    const salesKey =
+      (r as any).variation_id != null ? String((r as any).variation_id) : pid;
     let variationLabel: string | null;
     if (granularity === 'variation') {
       const vt = (r.variation_text ?? '').toString().trim();
@@ -183,7 +191,7 @@ export default async function DefectRatePage({
         variation_label: variationLabel,
         defect_count: 0,
         defect_breakdown: {},
-        sales_count: salesMap.get(pid) ?? 0,
+        sales_count: salesMap.get(salesKey) ?? 0,
         amazon_returns: 0,
         amazon_returns_stub: true,
         defect_rate: 0,
