@@ -6,6 +6,7 @@ import EmptyState from '@/components/ui/empty-state';
 import Breadcrumb from '@/components/ui/breadcrumb';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { resolveProductsByIds } from '@/lib/product-resolver';
+import { listCoreProducts } from '@/lib/core-products-list';
 import ScopeTabs from './_components/scope-tabs';
 import SearchBar, { type SearchMode } from './_components/search-bar';
 import ArticleCard from './_components/article-card';
@@ -34,6 +35,21 @@ function resolveMode(sp: SearchParams): Mode {
   if (sp.scope === 'product') return sp.product_id ? 'product-detail' : 'product-grid';
   if (sp.scope === 'store') return sp.store_id ? 'store-detail' : 'store-grid';
   return 'flat';
+}
+
+function buildNewHref(sp: SearchParams): string {
+  const params = new URLSearchParams();
+  if (sp.scope === 'product' && sp.product_id) {
+    params.set('scope', 'product');
+    params.set('product_id', sp.product_id);
+  } else if (sp.scope === 'store' && sp.store_id) {
+    params.set('scope', 'store');
+    params.set('store_id', sp.store_id);
+  } else if (sp.scope === 'company') {
+    params.set('scope', 'company');
+  }
+  const qs = params.toString();
+  return qs ? `/knowledge/new?${qs}` : '/knowledge/new';
 }
 
 export default async function KnowledgePage({
@@ -72,7 +88,7 @@ export default async function KnowledgePage({
         description="会社共通・店舗共通・商品別の3階層で運用するCSナレッジベース"
         rightSlot={
           <Link
-            href="/knowledge/new"
+            href={buildNewHref(searchParams)}
             className="inline-flex items-center gap-2 rounded-lg bg-brand-500 px-3 py-2 text-sm font-medium text-white hover:bg-brand-600"
           >
             <Plus size={14} />
@@ -196,16 +212,13 @@ async function FlatList({
 // ---------------------------------------------------------------------------
 async function ProductGrid({ searchParams }: { searchParams: SearchParams }) {
   const sb = await getSupabaseAdmin();
-  // storage_scope=product のすべての記事を取得 → product_id 単位で集約
+  // 1) knowledge_articles 集約 (記事側)
   const { data: articles } = await sb
     .from('knowledge_articles')
-    .select(
-      'id, storage_product_id, tags, status, reference_count, updated_at',
-    )
+    .select('id, storage_product_id, tags, status, reference_count, updated_at')
     .eq('storage_scope', 'product');
 
   type ProductAgg = {
-    product_id: string;
     article_count: number;
     total_reference_count: number;
     latest_updated_at: string | null;
@@ -215,7 +228,6 @@ async function ProductGrid({ searchParams }: { searchParams: SearchParams }) {
   for (const a of articles ?? []) {
     if (!a.storage_product_id) continue;
     const agg = aggMap.get(a.storage_product_id) ?? {
-      product_id: a.storage_product_id,
       article_count: 0,
       total_reference_count: 0,
       latest_updated_at: null,
@@ -232,69 +244,84 @@ async function ProductGrid({ searchParams }: { searchParams: SearchParams }) {
     aggMap.set(a.storage_product_id, agg);
   }
 
-  // Core から名寄せ
-  const products = await resolveProductsByIds(Array.from(aggMap.keys()));
+  // 2) Core 商品マスタ全件
+  const coreRes = await listCoreProducts({ fields: ['id', 'product_name', 'variation', 'group_name'] });
 
-  // 検索フィルタ (商品名)
+  // 3) Core 商品をベースに集約をleft join (記事0件の商品もカード表示)
+  type Card = {
+    product_id: string;
+    product_name: string;
+    variation: string | null;
+    article_count: number;
+    total_reference_count: number;
+    latest_updated_at: string | null;
+    top_tags: string[];
+  };
+  const cards: Card[] = (coreRes.items ?? []).map((p) => {
+    const agg = aggMap.get(p.id);
+    return {
+      product_id: p.id,
+      product_name: p.product_name,
+      variation: p.variation,
+      article_count: agg?.article_count ?? 0,
+      total_reference_count: agg?.total_reference_count ?? 0,
+      latest_updated_at: agg?.latest_updated_at ?? null,
+      top_tags: agg
+        ? Array.from(agg.tag_counts.entries()).sort((x, y) => y[1] - x[1]).map(([t]) => t)
+        : [],
+    };
+  });
+
+  // 検索フィルタ (商品名 / variation)
   const qStr = searchParams.q?.trim().toLowerCase() ?? '';
-  let aggs = Array.from(aggMap.values());
+  let filtered = cards;
   if (qStr) {
-    aggs = aggs.filter((a) => {
-      const p = products.get(a.product_id);
-      const name = (p?.name ?? '').toLowerCase();
-      const variation = (p?.variation ?? '').toLowerCase();
-      return (
-        name.includes(qStr) ||
-        variation.includes(qStr) ||
-        a.product_id.toLowerCase() === qStr
-      );
-    });
+    filtered = cards.filter((c) =>
+      c.product_name.toLowerCase().includes(qStr) ||
+      (c.variation ?? '').toLowerCase().includes(qStr) ||
+      c.product_id.toLowerCase() === qStr,
+    );
   }
-  // ソート: 件数 desc → 製品名 asc
-  aggs.sort((a, b) => {
+  // ソート: article_count desc → product_name asc (既存挙動)
+  filtered.sort((a, b) => {
     if (b.article_count !== a.article_count) return b.article_count - a.article_count;
-    const an = products.get(a.product_id)?.name ?? a.product_id;
-    const bn = products.get(b.product_id)?.name ?? b.product_id;
-    return an.localeCompare(bn);
+    return a.product_name.localeCompare(b.product_name);
   });
 
   return (
     <>
-      <Breadcrumb
-        items={[{ label: 'ナレッジ', href: '/knowledge' }, { label: '商品別' }]}
-      />
+      <Breadcrumb items={[{ label: 'ナレッジ', href: '/knowledge' }, { label: '商品別' }]} />
       <SearchBar searchMode="product-name" />
-
-      {aggs.length === 0 ? (
+      {!coreRes.ok && (
+        <p className="text-xs text-rose-600 rounded-lg bg-rose-50 border border-rose-200 px-3 py-2 mb-3">
+          Core 商品マスタから一覧を取得できませんでした: {coreRes.error}
+        </p>
+      )}
+      {coreRes.truncated && (
+        <p className="text-xs text-amber-700 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 mb-3">
+          商品数が多いため先頭 5000 件のみ表示しています
+        </p>
+      )}
+      {filtered.length === 0 ? (
         <EmptyState
           title="該当する商品がありません"
-          description={
-            qStr
-              ? `"${searchParams.q}" に一致する商品 (ナレッジが紐付いているもの) は見つかりませんでした`
-              : '商品別ナレッジがまだ作成されていません'
-          }
+          description={qStr ? `"${searchParams.q}" に一致する商品は見つかりませんでした` : '商品マスタが空です'}
         />
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {aggs.map((a) => {
-            const p = products.get(a.product_id);
-            const topTags = Array.from(a.tag_counts.entries())
-              .sort((x, y) => y[1] - x[1])
-              .map(([t]) => t);
-            return (
-              <ProductGridCard
-                key={a.product_id}
-                productId={a.product_id}
-                productName={p?.name ?? `id=${a.product_id}`}
-                variation={p?.variation ?? null}
-                resolved={!!p?.resolved}
-                articleCount={a.article_count}
-                totalReferenceCount={a.total_reference_count}
-                latestUpdatedAt={a.latest_updated_at}
-                topTags={topTags}
-              />
-            );
-          })}
+          {filtered.map((c) => (
+            <ProductGridCard
+              key={c.product_id}
+              productId={c.product_id}
+              productName={c.product_name}
+              variation={c.variation}
+              resolved={true}
+              articleCount={c.article_count}
+              totalReferenceCount={c.total_reference_count}
+              latestUpdatedAt={c.latest_updated_at}
+              topTags={c.top_tags}
+            />
+          ))}
         </div>
       )}
     </>
