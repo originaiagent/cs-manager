@@ -53,7 +53,9 @@ export async function GET(req: NextRequest) {
       );
     }
     const data = await res.json();
-    const arr: any[] = data?.data ?? [];
+    const arr: any[] = Array.isArray(data)
+      ? data
+      : (data?.data ?? data?.products ?? []);
     const items = arr.map((p) => ({
       id: String(p.id),
       product_name: p.product_name ?? '(no name)',
