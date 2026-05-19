@@ -286,6 +286,8 @@ export default function ProductPicker({
                   parent_group_id: null,
                   variation_id: null,
                   variation_name: e.target.value,
+                  // 手入力モードでは variation_text を UI 表示しないため、変更時に stale 値を clear する
+                  variation_text: null,
                 })
               }
               placeholder="商品名 (必須)"
