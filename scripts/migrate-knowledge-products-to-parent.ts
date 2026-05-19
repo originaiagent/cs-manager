@@ -2,12 +2,19 @@
 /**
  * knowledge_articles の storage_product_id (旧子 products.id) を親 product_groups.id に正規化。
  *
- * - WHERE storage_scope='product' AND storage_product_id IS NOT NULL AND deleted_at IS NULL のみ対象 (idempotent)
- * - child-first 判定: products と product_groups の ID 名前空間は別なので、まず child products として照会する。
- *   - child products でヒット → legacy 子 ID。parent group_id に置換 + applies_to_products に元 id を append (重複防止)
- *   - child products で 404 → 次に parent product-groups として照会
- *     - 親としてヒット → 既に migrated 済み (skip)
- *     - 親としても 404 → Core から削除済み (skip + warn)
+ * ## 重要: ID 名前空間衝突への対応
+ * products テーブルと product_groups テーブルは ID 名前空間が分離しており、numeric overlap が起きうる。
+ * 一度 migration を走らせると storage_product_id は parent group_id になるが、その値が同時に child products.id
+ * と numeric match する可能性がある。そのため child-first 判定だと再実行で破損する。
+ *
+ * 本スクリプトは「parent-first + ambiguous skip」アプローチで idempotent を担保:
+ *   - parent product-groups/:id でヒット → 既に migrated 済み or 新スキーマ。skip (--force-rerun でも skip 維持)
+ *   - parent で 404 → child products/:id を照会
+ *     - child でヒット → legacy 子 ID。parent group_id に置換 + applies_to_products に元 id を append (重複防止)
+ *     - child でも 404 → Core から削除済み (skip + warn)
+ *
+ * トレードオフ: 「legacy child ID と parent group ID が numeric overlap」の rare ケースは under-migrate (skip + warn)。
+ * 手動で SQL UPDATE 推奨。corrupt するよりは under-migrate の方が安全。
  *
  * dry-run: --dry-run
  */
@@ -61,40 +68,40 @@ async function main() {
   let notFound = 0;
   for (const r of rows ?? []) {
     const id = String(r.storage_product_id);
-    // child-first: products テーブルとして照会
-    const product = await getProduct(id);
-    if (product) {
-      const parentId = product.product_group_id;
-      if (parentId == null) {
-        notFound += 1;
-        console.warn(`  row=${r.id} child=${id} has null product_group_id -> skip`);
-        continue;
-      }
-      // applies_to_products 重複防止
-      const existing: string[] = Array.isArray(r.applies_to_products) ? r.applies_to_products : [];
-      const newApplies = existing.includes(id) ? existing : [...existing, id];
-      if (!isDryRun) {
-        const { error: upErr } = await sb
-          .from('knowledge_articles')
-          .update({ storage_product_id: String(parentId), applies_to_products: newApplies })
-          .eq('id', r.id);
-        if (upErr) {
-          console.error(`UPDATE ${r.id} error:`, upErr.message);
-          continue;
-        }
-      }
-      migrated += 1;
-      console.log(`  row=${r.id} child=${id} -> parent=${parentId}, applies_to_products+=${id}`);
-      continue;
-    }
-    // child でヒットしなかった → parent group として照会
+    // parent-first: parent product-groups として照会 (idempotent 担保)
     if (await isParentGroup(id)) {
       alreadyParent += 1;
-      console.log(`  row=${r.id} storage_product_id=${id} -> already parent group, skip`);
+      console.log(`  row=${r.id} storage_product_id=${id} -> parent group exists, skip (already migrated or new schema)`);
       continue;
     }
-    notFound += 1;
-    console.warn(`  row=${r.id} storage_product_id=${id} NOT FOUND in Core (neither child nor group) -> skip`);
+    // parent で 404 → child products として照会
+    const product = await getProduct(id);
+    if (!product) {
+      notFound += 1;
+      console.warn(`  row=${r.id} storage_product_id=${id} NOT FOUND in Core (neither child nor group) -> skip`);
+      continue;
+    }
+    const parentId = product.product_group_id;
+    if (parentId == null) {
+      notFound += 1;
+      console.warn(`  row=${r.id} child=${id} has null product_group_id -> skip`);
+      continue;
+    }
+    // applies_to_products 重複防止
+    const existing: string[] = Array.isArray(r.applies_to_products) ? r.applies_to_products : [];
+    const newApplies = existing.includes(id) ? existing : [...existing, id];
+    if (!isDryRun) {
+      const { error: upErr } = await sb
+        .from('knowledge_articles')
+        .update({ storage_product_id: String(parentId), applies_to_products: newApplies })
+        .eq('id', r.id);
+      if (upErr) {
+        console.error(`UPDATE ${r.id} error:`, upErr.message);
+        continue;
+      }
+    }
+    migrated += 1;
+    console.log(`  row=${r.id} child=${id} -> parent=${parentId}, applies_to_products+=${id}`);
   }
   console.log(`[migrate-knowledge] done. migrated=${migrated}, alreadyParent=${alreadyParent}, notFound=${notFound}`);
 }

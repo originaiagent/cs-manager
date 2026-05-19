@@ -127,11 +127,20 @@ export default function ProductPicker({
 
   // 親選択後の子バリエーション取得 (record context のみ)
   useEffect(() => {
-    if (manualMode) return;
+    if (manualMode) {
+      // モード切替時に in-flight な variation fetch を破棄
+      variationSeqRef.current += 1;
+      setVariations([]);
+      setLoadingVariations(false);
+      return;
+    }
     if (context !== 'record') return;
     const gid = value.parent_group_id;
     if (gid == null) {
+      // 親 clear 時に in-flight な variation fetch を破棄
+      variationSeqRef.current += 1;
       setVariations([]);
+      setLoadingVariations(false);
       return;
     }
     const mySeq = ++variationSeqRef.current;

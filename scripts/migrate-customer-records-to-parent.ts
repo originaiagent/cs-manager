@@ -2,13 +2,21 @@
 /**
  * customer_service_records の旧 product_id (子 products.id) を親 product_groups.id に正規化。
  *
- * - WHERE variation_id IS NULL AND product_id IS NOT NULL のみ対象 (idempotent)
- * - child-first 判定: products と product_groups の ID 名前空間は別なので、まず child products で照会する。
- *   - child products でヒット → legacy 子 ID。SET product_id=group_id, variation_id=old, variation_jan
- *   - child products で 404 → 次に parent product-groups として照会
- *     - 親としてヒット → 新 UI の親のみレコード (parent-only) や migration 済み。何もしない (skip)
- *     - 親としても 404 → Core から削除された child の可能性。SET product_id=NULL, variation_id=old
- * - dry-run: --dry-run flag で UPDATE をスキップ、ログのみ
+ * ## 重要: ID 名前空間衝突への対応
+ * products テーブルと product_groups テーブルは ID 名前空間が分離しており、numeric overlap が起きうる。
+ * 一度 migration を走らせると product_id は parent group_id になるが、その値が同時に child products.id と
+ * numeric match する可能性がある。そのため child-first 判定だと再実行 (または新 UI の parent-only レコード) で破損する。
+ *
+ * 本スクリプトは「parent-first + ambiguous skip」アプローチで idempotent を担保:
+ *   - parent product-groups/:id でヒット → 既に migrated 済み or 新 UI 保存の parent-only レコード。skip
+ *   - parent で 404 → child products/:id を照会
+ *     - child でヒット → legacy 子 ID。SET product_id=group_id, variation_id=old, variation_jan
+ *     - child でも 404 → Core から削除済み。SET product_id=NULL, variation_id=old
+ *
+ * トレードオフ: 「legacy child ID と parent group ID が numeric overlap」の rare ケースは under-migrate (skip)。
+ * 手動 SQL UPDATE 推奨。corrupt よりは under-migrate が安全。
+ *
+ * dry-run: --dry-run flag で UPDATE をスキップ、ログのみ
  *
  * 使用: tsx scripts/migrate-customer-records-to-parent.ts [--dry-run]
  * 必要 env: NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, CORE_API_URL, INTERNAL_API_KEY
@@ -53,7 +61,13 @@ async function main() {
   let updated = 0;
   for (const r of rows ?? []) {
     const oldProductId = r.product_id as number;
-    // child-first: products として照会
+    // parent-first: parent group として照会 (idempotent 担保 + 新 UI parent-only 保護)
+    if (await isParentGroup(oldProductId)) {
+      alreadyParent += 1;
+      console.log(`  row=${r.id} product_id=${oldProductId} -> parent group exists, skip (already migrated or new parent-only record)`);
+      continue;
+    }
+    // parent で 404 → child products として照会
     const url = `${CORE_API_URL!.replace(/\/$/, '')}/api/v1/master/products/${oldProductId}`;
     const res = await fetch(url, { headers });
     if (res.ok) {
@@ -73,12 +87,6 @@ async function main() {
       console.log(
         `  row=${r.id} oldProductId=${oldProductId} -> parent=${newParentId}, variation=${oldProductId}, jan=${janCode}`,
       );
-      continue;
-    }
-    // child でヒットしなかった → parent group として照会
-    if (await isParentGroup(oldProductId)) {
-      alreadyParent += 1;
-      console.log(`  row=${r.id} product_id=${oldProductId} -> already parent group (parent-only record), skip`);
       continue;
     }
     // どちらにも該当しない (Core から削除された child product の可能性)
