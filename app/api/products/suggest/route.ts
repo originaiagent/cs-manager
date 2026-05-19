@@ -9,19 +9,24 @@ const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
 
 interface CacheEntry {
   ts: number;
-  items: Array<{ id: string; product_name: string; variation?: string | null }>;
+  items: Array<{ id: string; product_name: string; variation: string | null }>;
 }
 const cache = new Map<string, CacheEntry>();
 const TTL_MS = 60_000;
+const LIMIT = 20;
+const FIELDS = 'id,product_name,variation';
 
 export async function GET(req: NextRequest) {
   const authError = authorizeApiRoute(req, { tier: 'internal' });
   if (authError) return authError;
+
   const q = req.nextUrl.searchParams.get('q')?.trim() ?? '';
   if (!q) return NextResponse.json({ ok: true, items: [] });
 
-  const cached = cache.get(q);
+  // cache key: q + limit + fields (将来変更耐性)
+  const cacheKey = `${q}|${LIMIT}|${FIELDS}`;
   const now = Date.now();
+  const cached = cache.get(cacheKey);
   if (cached && now - cached.ts < TTL_MS) {
     return NextResponse.json({ ok: true, items: cached.items, cached: true });
   }
@@ -33,16 +38,12 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Core: /api/v1/master/products?q= が無ければ全件取得 → クライアント側で部分一致 (ガワ妥協)
-  // Core が q=... をサポートしていない場合に備え、limit=300 で取得して部分一致をする
-  const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/products?limit=300`;
+  const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/products?q=${encodeURIComponent(q)}&limit=${LIMIT}&fields=${encodeURIComponent(FIELDS)}`;
   try {
     const res = await fetch(url, {
       method: 'GET',
-      headers: {
-        'X-Internal-API-Key': INTERNAL_API_KEY,
-        Accept: 'application/json',
-      },
+      headers: { 'X-Internal-API-Key': INTERNAL_API_KEY, Accept: 'application/json' },
+      cache: 'no-store',
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) {
@@ -52,22 +53,13 @@ export async function GET(req: NextRequest) {
       );
     }
     const data = await res.json();
-    const all: Array<any> = Array.isArray(data) ? data : data.data ?? data.products ?? [];
-    const ql = q.toLowerCase();
-    const items = all
-      .filter((p) => {
-        const name = String(p?.product_name ?? '').toLowerCase();
-        const variation = String(p?.variation ?? '').toLowerCase();
-        const idStr = String(p?.id ?? '').toLowerCase();
-        return name.includes(ql) || variation.includes(ql) || idStr === ql;
-      })
-      .slice(0, 10)
-      .map((p) => ({
-        id: String(p.id),
-        product_name: p.product_name ?? '(no name)',
-        variation: p.variation ?? null,
-      }));
-    cache.set(q, { ts: now, items });
+    const arr: any[] = data?.data ?? [];
+    const items = arr.map((p) => ({
+      id: String(p.id),
+      product_name: p.product_name ?? '(no name)',
+      variation: p.variation ?? null,
+    }));
+    cache.set(cacheKey, { ts: now, items });
     return NextResponse.json({ ok: true, items });
   } catch (e: any) {
     return NextResponse.json(
