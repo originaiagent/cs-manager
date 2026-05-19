@@ -35,19 +35,25 @@ export default async function KnowledgeDetail({
   const storeDisplayMap: Record<string, string> = {};
   for (const c of channelsRaw ?? []) storeDisplayMap[c.code] = c.display_name;
 
-  // storage_product_id は親 product_groups.id を指す (PR-EF 以降)
-  // applies_to_products[] は子 products.id を指す (互換維持)
-  const childProductIds: string[] = [];
-  for (const pid of a.applies_to_products ?? []) childProductIds.push(pid);
+  // storage_product_id は親 product_groups.id (PR-EF 以降)
+  // applies_to_products[] は新スキーマでは親 group_id を含む可能性あり (suggest が親グループ化済)、
+  // 旧データは子 products.id を含む可能性あり。両 resolver で照会し resolved=true 優先で表示。
+  const appliesIds: string[] = a.applies_to_products ?? [];
+  const allLookupIds: string[] = [];
+  if (a.storage_product_id) allLookupIds.push(a.storage_product_id);
+  for (const pid of appliesIds) allLookupIds.push(pid);
   const [products, groups] = await Promise.all([
-    resolveProductsByIds(childProductIds),
-    a.storage_product_id
-      ? resolveProductGroupsByIds([a.storage_product_id])
-      : Promise.resolve(new Map()),
+    resolveProductsByIds(allLookupIds),
+    resolveProductGroupsByIds(allLookupIds),
   ]);
-  const storageGroupName: string | null = a.storage_product_id
-    ? groups.get(a.storage_product_id)?.group_name ?? null
-    : null;
+  function pickName(id: string): string {
+    const g = groups.get(id);
+    if (g?.resolved) return g.group_name;
+    const p = products.get(id);
+    if (p?.resolved) return p.name;
+    return `id=${id}`;
+  }
+  const storageGroupName: string | null = a.storage_product_id ? pickName(a.storage_product_id) : null;
 
   return (
     <div className="max-w-3xl">
@@ -138,7 +144,7 @@ export default async function KnowledgeDetail({
                     key={p}
                     className="inline-flex items-center rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] text-violet-700"
                   >
-                    {products.get(p)?.name ?? `id=${p}`}
+                    {pickName(p)}
                   </span>
                 ))}
               </div>

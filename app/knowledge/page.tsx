@@ -186,24 +186,25 @@ async function FlatList({
   q = q.order('updated_at', { ascending: false }).limit(200);
   const { data: articles } = await q;
 
-  // storage_product_id (親 group) と applies_to_products[] (子 product) を別解決
-  const groupIds = new Set<string>();
-  const childIds = new Set<string>();
+  // storage_product_id は親 group_id、applies_to_products[] は新旧混在 (group_id / child product_id)。
+  // 両 resolver に流して resolved=true 優先で名前を決める。
+  const allIds = new Set<string>();
   for (const a of articles ?? []) {
-    if (a.storage_product_id) groupIds.add(a.storage_product_id);
-    for (const pid of a.applies_to_products ?? []) childIds.add(pid);
+    if (a.storage_product_id) allIds.add(a.storage_product_id);
+    for (const pid of a.applies_to_products ?? []) allIds.add(pid);
   }
   const [groups, products] = await Promise.all([
-    resolveProductGroupsByIds(Array.from(groupIds)),
-    resolveProductsByIds(Array.from(childIds)),
+    resolveProductGroupsByIds(Array.from(allIds)),
+    resolveProductsByIds(Array.from(allIds)),
   ]);
   const productNameMap: Record<string, string> = {};
-  Array.from(groups.entries()).forEach(([id, g]) => {
-    productNameMap[id] = g.group_name;
-  });
-  Array.from(products.entries()).forEach(([id, p]) => {
-    if (!productNameMap[id]) productNameMap[id] = p.name;
-  });
+  for (const id of allIds) {
+    const g = groups.get(id);
+    if (g?.resolved) { productNameMap[id] = g.group_name; continue; }
+    const p = products.get(id);
+    if (p?.resolved) { productNameMap[id] = p.name; continue; }
+    productNameMap[id] = `id=${id}`;
+  }
 
   return (
     <div className="space-y-3">
@@ -570,24 +571,25 @@ async function StoreDetail({
   q = q.order('updated_at', { ascending: false }).limit(200);
   const { data: articles } = await q;
 
-  // storage_product_id (親 group) と applies_to_products[] (子 product) を別解決
-  const groupIds = new Set<string>();
-  const childIds = new Set<string>();
+  // storage_product_id は親 group_id、applies_to_products[] は新旧混在 (group_id / child product_id)。
+  // 両 resolver に流して resolved=true 優先で名前を決める。
+  const allIds = new Set<string>();
   for (const a of articles ?? []) {
-    if (a.storage_product_id) groupIds.add(a.storage_product_id);
-    for (const pid of a.applies_to_products ?? []) childIds.add(pid);
+    if (a.storage_product_id) allIds.add(a.storage_product_id);
+    for (const pid of a.applies_to_products ?? []) allIds.add(pid);
   }
   const [groups, products] = await Promise.all([
-    resolveProductGroupsByIds(Array.from(groupIds)),
-    resolveProductsByIds(Array.from(childIds)),
+    resolveProductGroupsByIds(Array.from(allIds)),
+    resolveProductsByIds(Array.from(allIds)),
   ]);
   const productNameMap: Record<string, string> = {};
-  Array.from(groups.entries()).forEach(([id, g]) => {
-    productNameMap[id] = g.group_name;
-  });
-  Array.from(products.entries()).forEach(([id, p]) => {
-    if (!productNameMap[id]) productNameMap[id] = p.name;
-  });
+  for (const id of allIds) {
+    const g = groups.get(id);
+    if (g?.resolved) { productNameMap[id] = g.group_name; continue; }
+    const p = products.get(id);
+    if (p?.resolved) { productNameMap[id] = p.name; continue; }
+    productNameMap[id] = `id=${id}`;
+  }
 
   return (
     <>

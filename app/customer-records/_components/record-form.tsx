@@ -85,8 +85,11 @@ export default function RecordForm({
       };
     }
     if (initial?.product_id != null) {
+      // 親 group のみ保存 (子バリエーション未選択) OR 旧スキーマ。
+      // 新スキーマ運用では product_id = 親 group_id。Core が解決できなければ picker が「id=X」fallback 表示。
+      // 旧スキーマ (child product.id) のレコードは scripts/migrate-customer-records-to-parent.ts で正規化想定。
       return {
-        parent_group_id: null,
+        parent_group_id: initial.product_id,
         parent_group_name: '',
         variation_id: null,
         variation_name: initial.product_name_text ?? '',
