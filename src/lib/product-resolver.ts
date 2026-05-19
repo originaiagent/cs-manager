@@ -26,6 +26,7 @@ interface ProductCacheEntry {
   name: string;
   variation?: string | null;
   group_name?: string | null;
+  group_id?: string | null;
 }
 
 const productCache = new Map<string, ProductCacheEntry>();
@@ -35,6 +36,7 @@ export interface ResolvedProduct {
   name: string;
   variation?: string | null;
   group_name?: string | null;
+  group_id?: string | null;
   resolved: boolean;
 }
 
@@ -55,6 +57,7 @@ export async function resolveProductsByIds(
         name: entry.name,
         variation: entry.variation,
         group_name: entry.group_name,
+        group_id: entry.group_id,
         resolved: true,
       });
     } else {
@@ -72,14 +75,24 @@ export async function resolveProductsByIds(
     for (const { id, r } of fetched) {
       if (r.ok && r.product) {
         const name = r.product.product_name ?? `id=${id}`;
+        const groupId =
+          r.product.product_group_id != null ? String(r.product.product_group_id) : null;
         const entry: ProductCacheEntry = {
           ts: Date.now(),
           name,
           variation: r.product.variation ?? null,
           group_name: r.product.group_name ?? null,
+          group_id: groupId,
         };
         productCache.set(id, entry);
-        result.set(id, { id, name, variation: entry.variation, group_name: entry.group_name, resolved: true });
+        result.set(id, {
+          id,
+          name,
+          variation: entry.variation,
+          group_name: entry.group_name,
+          group_id: groupId,
+          resolved: true,
+        });
       } else {
         result.set(id, { id, name: `id=${id}`, resolved: false });
       }

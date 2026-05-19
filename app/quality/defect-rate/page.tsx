@@ -253,20 +253,18 @@ export default async function DefectRatePage({
     const remainingChildIds = Array.from(salesMap.keys()).filter(
       (cid) => !childToParentMap.has(cid),
     );
-    // 未マップの子 sales は親をさらに解決して group_id を引く
+    // 未マップの子 sales は Core から group_id を引いて親 row に rollup する。
+    // resolveProductsByIds に group_id を含めるよう拡張済 (R17 P2 対応)。
     const remainingProducts = await resolveProductsByIds(remainingChildIds);
     for (const cid of remainingChildIds) {
       const sales = salesMap.get(cid) ?? 0;
       const resolved = remainingProducts.get(cid);
-      // resolveProductsByIds は group_name しか返さない。group_id も欲しいので Core 直 fetch。
-      // ここでは「未マップで Core 解決できなかった」場合のみ legacy fallback row。
-      // group_name 解決できているが group_id 未知のケースは: 親 row が aggMap に無いため別 row。
-      if (!resolved?.resolved) {
-        legacyChildSalesOnly.set(cid, sales);
+      if (resolved?.resolved && resolved.group_id) {
+        // 親 group_id にロールアップ
+        const parentId = resolved.group_id;
+        salesOnlyParentTotals.set(parentId, (salesOnlyParentTotals.get(parentId) ?? 0) + sales);
       } else {
-        // group_name が判明したが group_id 未知 → 暫定として子 product_id 直接表示 (legacy 互換)。
-        // (実用上は親 group ID 直接マッピングが欲しいが、現状 resolveProductsByIds は group_id を返さない。
-        //  follow-up: resolveProductsByIds 拡張で group_id 同梱、ここで親 row にロールアップ。)
+        // Core 未解決 or 子product だが group_id 取得不可 → legacy 子 row として fallback
         legacyChildSalesOnly.set(cid, sales);
       }
     }
