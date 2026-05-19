@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authorizeApiRoute } from '@/lib/auth/api-auth';
 
+/**
+ * 親グループ検索エンドポイント (PR-EF: Core 親子構造に厳密準拠)。
+ *
+ * - Core GET /api/v1/master/product-groups?q=<term>&limit=500&fields=id,group_name,developer
+ * - 上位 LIMIT=20 を返す
+ * - Core が q を honor 前提だが防御で local filter
+ * - shape 防御 (Array / data / products)
+ */
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
@@ -9,13 +18,13 @@ const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
 
 interface CacheEntry {
   ts: number;
-  items: Array<{ id: string; product_name: string; variation: string | null }>;
+  items: Array<{ id: string; group_name: string; developer: string | null }>;
 }
 const cache = new Map<string, CacheEntry>();
 const TTL_MS = 60_000;
 const LIMIT = 20;            // 候補表示の上限
 const FETCH_LIMIT = 500;     // Core が q を honor しない環境への防御: 大きめに取得して local filter
-const FIELDS = 'id,product_name,variation';
+const FIELDS = 'id,group_name,developer';
 
 export async function GET(req: NextRequest) {
   const authError = authorizeApiRoute(req, { tier: 'internal' });
@@ -39,7 +48,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/products?q=${encodeURIComponent(q)}&limit=${FETCH_LIMIT}&fields=${encodeURIComponent(FIELDS)}`;
+  const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/product-groups?q=${encodeURIComponent(q)}&limit=${FETCH_LIMIT}&fields=${encodeURIComponent(FIELDS)}`;
   try {
     const res = await fetch(url, {
       method: 'GET',
@@ -58,20 +67,19 @@ export async function GET(req: NextRequest) {
       ? data
       : (data?.data ?? data?.products ?? []);
     // Core が q= を honor しない環境への防御: ローカルでも部分一致フィルタを通す
-    // (Core が honor していれば no-op、honor していなければ無関係商品の誤候補を防ぐ)
     const ql = q.toLowerCase();
     const items = arr
       .filter((p) => {
-        const name = String(p?.product_name ?? '').toLowerCase();
-        const variation = String(p?.variation ?? '').toLowerCase();
+        const name = String(p?.group_name ?? '').toLowerCase();
+        const developer = String(p?.developer ?? '').toLowerCase();
         const idStr = String(p?.id ?? '').toLowerCase();
-        return name.includes(ql) || variation.includes(ql) || idStr === ql;
+        return name.includes(ql) || developer.includes(ql) || idStr === ql;
       })
       .slice(0, LIMIT)
       .map((p) => ({
         id: String(p.id),
-        product_name: p.product_name ?? '(no name)',
-        variation: p.variation ?? null,
+        group_name: p.group_name ?? '(no name)',
+        developer: p.developer ?? null,
       }));
     cache.set(cacheKey, { ts: now, items });
     return NextResponse.json({ ok: true, items });

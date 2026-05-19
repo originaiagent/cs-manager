@@ -5,8 +5,8 @@ import PageHeader from '@/components/ui/page-header';
 import EmptyState from '@/components/ui/empty-state';
 import Breadcrumb from '@/components/ui/breadcrumb';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
-import { resolveProductsByIds } from '@/lib/product-resolver';
-import { listCoreProducts } from '@/lib/core-products-list';
+import { resolveProductsByIds, resolveProductGroupsByIds } from '@/lib/product-resolver';
+import { listCoreProductGroups } from '@/lib/core-products-list';
 import ScopeTabs from './_components/scope-tabs';
 import SearchBar, { type SearchMode } from './_components/search-bar';
 import ArticleCard from './_components/article-card';
@@ -62,9 +62,11 @@ export default async function KnowledgePage({
   const mode = resolveMode(searchParams);
 
   // 全件カウント (タブ件数バッジ用)
+  // deleted_at IS NULL でアーカイブ済みを除外 (PR-D 整合)
   const { data: allRaw } = await sb
     .from('knowledge_articles')
-    .select('id, storage_scope', { count: 'exact', head: false });
+    .select('id, storage_scope', { count: 'exact', head: false })
+    .is('deleted_at', null);
   const counts = {
     all: allRaw?.length ?? 0,
     company: allRaw?.filter((r) => r.storage_scope === 'company').length ?? 0,
@@ -168,7 +170,8 @@ async function FlatList({
     .from('knowledge_articles')
     .select(
       'id, title, question, answer, storage_scope, storage_store_id, storage_product_id, applies_to_stores, applies_to_products, tags, status, reference_count, updated_at',
-    );
+    )
+    .is('deleted_at', null);
 
   if (searchParams.scope && searchParams.scope !== 'all') {
     q = q.eq('storage_scope', searchParams.scope);
@@ -213,10 +216,12 @@ async function FlatList({
 async function ProductGrid({ searchParams }: { searchParams: SearchParams }) {
   const sb = await getSupabaseAdmin();
   // 1) knowledge_articles 集約 (記事側)
+  // deleted_at IS NULL でアーカイブ済みを除外 (PR-D 整合)
   const { data: articles } = await sb
     .from('knowledge_articles')
     .select('id, storage_product_id, tags, status, reference_count, updated_at')
-    .eq('storage_scope', 'product');
+    .eq('storage_scope', 'product')
+    .is('deleted_at', null);
 
   type ProductAgg = {
     article_count: number;
@@ -244,14 +249,14 @@ async function ProductGrid({ searchParams }: { searchParams: SearchParams }) {
     aggMap.set(a.storage_product_id, agg);
   }
 
-  // 2) Core 商品マスタ全件
-  const coreRes = await listCoreProducts({ fields: ['id', 'product_name', 'variation', 'group_name'] });
+  // 2) Core 親グループマスタ全件 (PR-EF: Core 親子構造に厳密準拠)
+  const coreRes = await listCoreProductGroups({ fields: ['id', 'group_name', 'developer', 'category'] });
 
-  // 3) Core 商品をベースに集約をleft join (記事0件の商品もカード表示)
+  // 3) Core 親グループをベースに集約を left join (記事0件のグループもカード表示)
   type Card = {
-    product_id: string;
-    product_name: string;
-    variation: string | null;
+    product_id: string;        // 親 group_id
+    product_name: string;       // group_name
+    variation: string | null;   // 親階層なので常に null
     article_count: number;
     total_reference_count: number;
     latest_updated_at: string | null;
@@ -261,8 +266,8 @@ async function ProductGrid({ searchParams }: { searchParams: SearchParams }) {
     const agg = aggMap.get(p.id);
     return {
       product_id: p.id,
-      product_name: p.product_name,
-      variation: p.variation,
+      product_name: p.group_name,
+      variation: null,
       article_count: agg?.article_count ?? 0,
       total_reference_count: agg?.total_reference_count ?? 0,
       latest_updated_at: agg?.latest_updated_at ?? null,
@@ -272,19 +277,30 @@ async function ProductGrid({ searchParams }: { searchParams: SearchParams }) {
     };
   });
 
-  // Core 一覧に含まれない (取得失敗 / 削除 / truncated) が、記事が紐付いている孤児 product_id は
-  // 既存ナレッジへの導線を維持するため fallback row として追加 (product_name 解決不能なら id=... 表示)
+  // Core 一覧に含まれない (取得失敗 / 削除 / truncated) が、記事が紐付いている孤児 storage_product_id は
+  // 既存ナレッジへの導線を維持するため fallback row として追加。
+  // 親 group としても /products/:id (旧 子 product) としても見つかれば追加する。
   const coveredIds = new Set(cards.map((c) => c.product_id));
   const orphanIds = Array.from(aggMap.keys()).filter((id) => !coveredIds.has(id));
   if (orphanIds.length > 0) {
-    const orphanResolved = await resolveProductsByIds(orphanIds);
+    const [groupResolved, productResolved] = await Promise.all([
+      resolveProductGroupsByIds(orphanIds),
+      resolveProductsByIds(orphanIds),
+    ]);
     for (const id of orphanIds) {
       const agg = aggMap.get(id)!;
-      const resolved = orphanResolved.get(id);
+      const g = groupResolved.get(id);
+      const p = productResolved.get(id);
+      const name =
+        g && g.resolved
+          ? g.group_name
+          : p && p.resolved
+            ? p.name
+            : `id=${id}`;
       cards.push({
         product_id: id,
-        product_name: resolved?.name ?? `id=${id}`,
-        variation: resolved?.variation ?? null,
+        product_name: name,
+        variation: null,
         article_count: agg.article_count,
         total_reference_count: agg.total_reference_count,
         latest_updated_at: agg.latest_updated_at,
@@ -368,19 +384,23 @@ async function ProductDetail({
       'id, title, question, answer, storage_scope, storage_store_id, storage_product_id, applies_to_stores, applies_to_products, tags, status, reference_count, updated_at',
     )
     .eq('storage_scope', 'product')
-    .eq('storage_product_id', productId);
+    .eq('storage_product_id', productId)
+    .is('deleted_at', null);
   if (searchParams.q && searchParams.q.trim()) {
     const pat = `%${searchParams.q.trim()}%`;
     q = q.or(`title.ilike.${pat},question.ilike.${pat},answer.ilike.${pat}`);
   }
   q = q.order('updated_at', { ascending: false }).limit(200);
 
-  const [{ data: articles }, products] = await Promise.all([
+  // 親 group を優先で resolve、見つからなければ子 product fallback
+  const [{ data: articles }, groups, productsMap] = await Promise.all([
     q,
+    resolveProductGroupsByIds([productId]),
     resolveProductsByIds([productId]),
   ]);
-  const product = products.get(productId);
-  const productName = product?.name ?? `id=${productId}`;
+  const g = groups.get(productId);
+  const p = productsMap.get(productId);
+  const productName = g && g.resolved ? g.group_name : (p && p.resolved ? p.name : `id=${productId}`);
 
   // applies_to_products にも紐づく可能性があるが、ここでは storage_product_id 一致のみ表示
   const productNameMap: Record<string, string> = { [productId]: productName };
@@ -402,9 +422,6 @@ async function ProductDetail({
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-sm font-medium text-gray-700">
           {productName} のナレッジ {(articles ?? []).length}件
-          {product?.variation && (
-            <span className="ml-2 text-xs text-gray-500">({product.variation})</span>
-          )}
         </h2>
         <Link
           href="/knowledge?scope=product"
@@ -440,7 +457,8 @@ async function StoreGrid({
   const { data: articles } = await sb
     .from('knowledge_articles')
     .select('id, storage_store_id, tags, reference_count, updated_at')
-    .eq('storage_scope', 'store');
+    .eq('storage_scope', 'store')
+    .is('deleted_at', null);
 
   type StoreAgg = {
     store_id: string;
@@ -535,7 +553,8 @@ async function StoreDetail({
       'id, title, question, answer, storage_scope, storage_store_id, storage_product_id, applies_to_stores, applies_to_products, tags, status, reference_count, updated_at',
     )
     .eq('storage_scope', 'store')
-    .eq('storage_store_id', storeCode);
+    .eq('storage_store_id', storeCode)
+    .is('deleted_at', null);
   if (searchParams.q && searchParams.q.trim()) {
     const pat = `%${searchParams.q.trim()}%`;
     q = q.or(`title.ilike.${pat},question.ilike.${pat},answer.ilike.${pat}`);

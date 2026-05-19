@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useState, useTransition, type FormEvent } from 'react';
 import { Save, Loader2 } from 'lucide-react';
 import ProductSuggest from './product-suggest';
+import ProductPicker, { type ProductPickerValue } from '@/app/_components/product-picker';
 import { createArticle } from '../_actions/create-article';
 import { updateArticle } from '../_actions/update-article';
 
@@ -28,6 +29,7 @@ interface InitialValues {
   tags: string[];
   status: 'draft' | 'published' | 'archived';
   resolved_product_name?: string | null;
+  resolved_product_group_name?: string | null;
 }
 
 interface Props {
@@ -54,6 +56,14 @@ export default function ArticleForm({ channels, initial, mode }: Props) {
   );
   const [storeId, setStoreId] = useState(initial?.storage_store_id ?? '');
   const [productId, setProductId] = useState(initial?.storage_product_id ?? '');
+  // 親グループ picker 用 value (scope='product' のとき使用)
+  const [productPickerValue, setProductPickerValue] = useState<ProductPickerValue>(() => ({
+    parent_group_id: initial?.storage_product_id ? Number(initial.storage_product_id) || null : null,
+    parent_group_name: initial?.resolved_product_group_name ?? '',
+    variation_id: null,
+    variation_name: initial?.resolved_product_group_name ?? '',
+    variation_jan: null,
+  }));
   const [appliesStores, setAppliesStores] = useState<string[]>(
     initial?.applies_to_stores ?? [],
   );
@@ -170,15 +180,16 @@ export default function ArticleForm({ channels, initial, mode }: Props) {
           </select>
         )}
         {scope === 'product' && (
-          <ProductSuggest
-            label="所有 製品 (1つ)"
-            selected={productId ? [productId] : []}
-            onChange={(ids) => setProductId(ids[0] ?? '')}
-            initialNames={
-              initial?.resolved_product_name && initial?.storage_product_id
-                ? { [initial.storage_product_id]: initial.resolved_product_name }
-                : undefined
-            }
+          <ProductPicker
+            value={productPickerValue}
+            onChange={(v) => {
+              setProductPickerValue(v);
+              setProductId(v.parent_group_id != null ? String(v.parent_group_id) : '');
+            }}
+            context="knowledge"
+            label="所有 商品グループ (1つ)"
+            required
+            allowManualInput={false}
           />
         )}
       </section>

@@ -32,6 +32,8 @@ export interface RecordFormInitial {
   product_id?: number | null;
   product_name_text?: string;
   variation_text?: string | null;
+  variation_id?: number | null;
+  variation_jan?: string | null;
   recipient_name?: string;
   recipient_honorific?: string;
   order_number?: string | null;
@@ -67,11 +69,37 @@ export default function RecordForm({
   defaultProductName,
 }: Props) {
   const router = useRouter();
-  const [productPickerValue, setProductPickerValue] = useState<ProductPickerValue>(() => ({
-    id: initial?.product_id ?? null,
-    product_name: initial?.product_name_text ?? defaultProductName ?? '',
-    variation: initial?.variation_text ?? null,
-  }));
+  const [productPickerValue, setProductPickerValue] = useState<ProductPickerValue>(() => {
+    // 既存編集互換:
+    //   variation_id あり: 検索モード+選択済み (親 group_id も Core で動的解決)
+    //   product_id (旧) のみ: 手入力モードで開く (product_name_text スナップショット表示)
+    //   完全に空 (新規): 検索モード+検索 box
+    if (initial?.variation_id != null) {
+      return {
+        parent_group_id: initial.product_id ?? null,
+        parent_group_name: '',
+        variation_id: initial.variation_id,
+        variation_name: initial.product_name_text ?? '',
+        variation_jan: initial.variation_jan ?? null,
+      };
+    }
+    if (initial?.product_id != null) {
+      return {
+        parent_group_id: null,
+        parent_group_name: '',
+        variation_id: null,
+        variation_name: initial.product_name_text ?? '',
+        variation_jan: null,
+      };
+    }
+    return {
+      parent_group_id: null,
+      parent_group_name: '',
+      variation_id: null,
+      variation_name: initial?.product_name_text ?? defaultProductName ?? '',
+      variation_jan: null,
+    };
+  });
   const [recipientName, setRecipientName] = useState(
     initial?.recipient_name ?? defaultRecipientName ?? '',
   );
@@ -108,16 +136,18 @@ export default function RecordForm({
     setSubmitting(true);
     setError(null);
 
-    if (!productPickerValue.product_name.trim()) {
+    if (!productPickerValue.variation_name.trim()) {
       setError('商品名は必須です');
       setSubmitting(false);
       return;
     }
 
     const payload: CreateRecordPayload = {
-      product_id: productPickerValue.id,
-      product_name_text: productPickerValue.product_name,
-      variation_text: productPickerValue.variation,
+      product_id: productPickerValue.parent_group_id,        // 親 group_id
+      product_name_text: productPickerValue.variation_name,   // 子 product_name または手入力名
+      variation_text: null,                                    // 既存温存 (UI 露出なし、API は受付可)
+      variation_id: productPickerValue.variation_id,
+      variation_jan: productPickerValue.variation_jan,
       recipient_name: recipientName,
       recipient_honorific: recipientHonorific || '様',
       order_number: orderNumber || null,
@@ -179,6 +209,7 @@ export default function RecordForm({
         <ProductPicker
           value={productPickerValue}
           onChange={setProductPickerValue}
+          context="record"
           label="商品"
           required
           allowManualInput

@@ -1,9 +1,13 @@
 /**
- * Core 商品マスタ一覧取得 (全件)。
- * - エンドポイント: GET /api/v1/master/products?limit=1000&offset=N&fields=...
- * - meta.total ベース pagination, MAX=5000 (10万件規模は別タスク)
+ * Core 親グループマスタ一覧取得 (全件)。
+ * - エンドポイント: GET /api/v1/master/product-groups?limit=N&offset=N&fields=...
+ * - meta.total ベース pagination, MAX_GROUPS_FOR_GRID=5000
  * - process メモリ TTL Map で 600秒キャッシュ
+ * - shape 防御 (Array / data / products)
  * - サーバ専用
+ *
+ * 旧 listCoreProducts (子 products 一覧取得) は廃止し、本ファイルで
+ * 親階層 product_groups 取得に統一する (PR-EF: Core 親子構造に厳密準拠)。
  */
 import 'server-only';
 
@@ -14,19 +18,20 @@ const CORE_API_TIMEOUT_MS = process.env.CORE_API_TIMEOUT_MS
   : 10_000;
 
 const PAGE_LIMIT = 1000;
-const MAX_PRODUCTS_FOR_GRID = 5000;
+const MAX_GROUPS_FOR_GRID = 5000;
 const TTL_MS = 10 * 60 * 1000;
 
-export interface CoreProductListItem {
+export interface CoreProductGroupItem {
   id: string; // 文字列で統一 (knowledge_articles.storage_product_id が text のため)
-  product_name: string;
-  variation: string | null;
-  group_name?: string | null;
+  group_name: string;
+  developer?: string | null;
+  category?: string | null;
+  product_count?: number;
 }
 
 interface CacheEntry {
   ts: number;
-  items: CoreProductListItem[];
+  items: CoreProductGroupItem[];
   truncated: boolean;
 }
 
@@ -36,9 +41,9 @@ interface ListOpts {
   fields?: string[];
 }
 
-export async function listCoreProducts(
+export async function listCoreProductGroups(
   opts: ListOpts = {},
-): Promise<{ ok: boolean; items: CoreProductListItem[]; truncated: boolean; error?: string }> {
+): Promise<{ ok: boolean; items: CoreProductGroupItem[]; truncated: boolean; error?: string }> {
   if (!CORE_API_URL || !INTERNAL_API_KEY) {
     return {
       ok: false,
@@ -47,7 +52,7 @@ export async function listCoreProducts(
       error: 'CORE_API_URL / INTERNAL_API_KEY not configured',
     };
   }
-  const fields = (opts.fields ?? ['id', 'product_name', 'variation', 'group_name']).join(',');
+  const fields = (opts.fields ?? ['id', 'group_name', 'developer', 'category']).join(',');
   const cacheKey = `fields:${fields}`;
   const now = Date.now();
   const cached = cache.get(cacheKey);
@@ -55,9 +60,8 @@ export async function listCoreProducts(
     return { ok: true, items: cached.items, truncated: cached.truncated };
   }
   try {
-    // 1回目
     const base = CORE_API_URL.replace(/\/$/, '');
-    const firstUrl = `${base}/api/v1/master/products?limit=${PAGE_LIMIT}&offset=0&fields=${encodeURIComponent(fields)}`;
+    const firstUrl = `${base}/api/v1/master/product-groups?limit=${PAGE_LIMIT}&offset=0&fields=${encodeURIComponent(fields)}`;
     const first = await fetch(firstUrl, {
       method: 'GET',
       headers: { 'X-Internal-API-Key': INTERNAL_API_KEY, Accept: 'application/json' },
@@ -81,12 +85,12 @@ export async function listCoreProducts(
     let all: any[] = [...firstData];
     let truncated = false;
     if (total > PAGE_LIMIT) {
-      const maxTarget = Math.min(total, MAX_PRODUCTS_FOR_GRID);
+      const maxTarget = Math.min(total, MAX_GROUPS_FOR_GRID);
       const offsets: number[] = [];
       for (let off = PAGE_LIMIT; off < maxTarget; off += PAGE_LIMIT) offsets.push(off);
       const pages = await Promise.all(
         offsets.map(async (off): Promise<{ ok: boolean; rows: any[]; error?: string }> => {
-          const url = `${base}/api/v1/master/products?limit=${PAGE_LIMIT}&offset=${off}&fields=${encodeURIComponent(fields)}`;
+          const url = `${base}/api/v1/master/product-groups?limit=${PAGE_LIMIT}&offset=${off}&fields=${encodeURIComponent(fields)}`;
           const r = await fetch(url, {
             method: 'GET',
             headers: { 'X-Internal-API-Key': INTERNAL_API_KEY, Accept: 'application/json' },
@@ -108,17 +112,18 @@ export async function listCoreProducts(
         return { ok: false, items: [], truncated: false, error: `paginated fetch failed: ${failed.error}` };
       }
       for (const p of pages) all = all.concat(p.rows);
-      if (total > MAX_PRODUCTS_FOR_GRID) {
+      if (total > MAX_GROUPS_FOR_GRID) {
         truncated = true;
         // TODO: 10万件規模になったら Core 側 q= サーバ検索 + virtualized list に切替
-        console.warn(`[listCoreProducts] truncated: total=${total} > MAX=${MAX_PRODUCTS_FOR_GRID}`);
+        console.warn(`[listCoreProductGroups] truncated: total=${total} > MAX=${MAX_GROUPS_FOR_GRID}`);
       }
     }
-    const items: CoreProductListItem[] = all.map((p) => ({
+    const items: CoreProductGroupItem[] = all.map((p) => ({
       id: String(p.id),
-      product_name: p.product_name ?? `id=${p.id}`,
-      variation: p.variation ?? null,
-      group_name: p.group_name ?? null,
+      group_name: p.group_name ?? `id=${p.id}`,
+      developer: p.developer ?? null,
+      category: p.category ?? null,
+      product_count: typeof p.product_count === 'number' ? p.product_count : undefined,
     }));
     cache.set(cacheKey, { ts: now, items, truncated });
     return { ok: true, items, truncated };

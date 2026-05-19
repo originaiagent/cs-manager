@@ -113,7 +113,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'invalid order_channel' }, { status: 400 });
   }
 
-  // product_id は integer or null
+  // product_id は integer or null (親 group_id)
   let productId: number | null = null;
   if (payload.product_id != null && payload.product_id !== '') {
     const n = Number(payload.product_id);
@@ -121,6 +121,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'product_id must be integer' }, { status: 400 });
     }
     productId = n;
+  }
+
+  // variation_id は integer or null (子 product_id)
+  let variationId: number | null = null;
+  if (payload.variation_id != null && payload.variation_id !== '') {
+    const n = Number(payload.variation_id);
+    if (!Number.isFinite(n) || !Number.isInteger(n)) {
+      return NextResponse.json({ ok: false, error: 'variation_id must be integer' }, { status: 400 });
+    }
+    variationId = n;
   }
 
   // amazon_gift_amount は numeric or null
@@ -147,6 +157,8 @@ export async function POST(req: NextRequest) {
     product_id: productId,
     product_name_text: productNameText,
     variation_text: normalize(payload.variation_text),
+    variation_id: variationId,
+    variation_jan: normalize(payload.variation_jan),
     recipient_name: recipientName,
     recipient_honorific: recipientHonorific,
     order_number: normalize(payload.order_number),
