@@ -27,6 +27,7 @@ interface InitialValues {
   body_markdown: string | null;
   tags: string[];
   status: 'draft' | 'published' | 'archived';
+  resolved_product_name?: string | null;
 }
 
 interface Props {
@@ -173,6 +174,11 @@ export default function ArticleForm({ channels, initial, mode }: Props) {
             label="所有 製品 (1つ)"
             selected={productId ? [productId] : []}
             onChange={(ids) => setProductId(ids[0] ?? '')}
+            initialNames={
+              initial?.resolved_product_name && initial?.storage_product_id
+                ? { [initial.storage_product_id]: initial.resolved_product_name }
+                : undefined
+            }
           />
         )}
       </section>

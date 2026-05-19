@@ -14,15 +14,18 @@ interface Props {
   selected: string[];  // product ids
   onChange: (ids: string[]) => void;
   label?: string;
+  initialNames?: Record<string, string>;
 }
 
-export default function ProductSuggest({ selected, onChange, label = '製品 (Core)' }: Props) {
+export default function ProductSuggest({ selected, onChange, label = '製品 (Core)', initialNames }: Props) {
   const [q, setQ] = useState('');
   const [items, setItems] = useState<SuggestItem[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [resolvedNames, setResolvedNames] = useState<Record<string, string>>({});
+  const [resolvedNames, setResolvedNames] = useState<Record<string, string>>(
+    () => ({ ...(initialNames ?? {}) }),
+  );
   const debounceRef = useRef<any>(null);
   const seqRef = useRef(0);
 
