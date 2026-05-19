@@ -24,7 +24,7 @@ export default async function CustomerRecordsListPage() {
   const { data: rows } = await sb
     .from('customer_service_records')
     .select(
-      'id, product_id, product_name_text, variation_text, recipient_name, recipient_honorific, action_type, defect_type, record_date, memo, ticket_id, created_at',
+      'id, product_id, product_name_text, variation_text, variation_id, variation_jan, recipient_name, recipient_honorific, action_type, defect_type, record_date, memo, ticket_id, created_at',
     )
     .order('record_date', { ascending: false })
     .order('created_at', { ascending: false })
@@ -79,10 +79,16 @@ export default async function CustomerRecordsListPage() {
                     {r.variation_text && (
                       <div className="text-[11px] text-gray-500 mt-0.5">{r.variation_text}</div>
                     )}
-                    {r.product_id != null && (
+                    {r.variation_jan && (
+                      <div className="text-[10px] text-gray-400 mt-0.5">JAN: {r.variation_jan}</div>
+                    )}
+                    {(r.product_id != null || r.variation_id != null) && (
                       <div className="text-[10px] text-gray-400 mt-0.5 inline-flex items-center gap-1">
                         <Hash size={10} />
-                        {r.product_id}
+                        {r.product_id != null && <span>group={r.product_id}</span>}
+                        {r.variation_id != null && (
+                          <span>/variation={r.variation_id}</span>
+                        )}
                       </div>
                     )}
                   </td>

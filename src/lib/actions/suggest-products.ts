@@ -2,11 +2,15 @@
 
 import { internalFetch } from '@/lib/auth/internal-fetch';
 
+/**
+ * 親グループ検索 Server Action (PR-EF: Core 親子構造に厳密準拠)。
+ * /api/products/suggest (親グループ検索) を叩く薄いラッパー。
+ */
 export async function suggestProducts(
   q: string,
 ): Promise<{
   ok: boolean;
-  items?: Array<{ id: string; product_name: string; variation?: string | null }>;
+  items?: Array<{ id: string; group_name: string; developer?: string | null }>;
   error?: string;
 }> {
   try {

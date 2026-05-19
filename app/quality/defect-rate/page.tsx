@@ -2,7 +2,7 @@ import { unstable_noStore as noStore } from 'next/cache';
 import Link from 'next/link';
 import { AlertTriangle, ChevronRight, ChevronLeft as ChevronLeftIcon, ChevronRight as ChevronRightIcon } from 'lucide-react';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
-import { resolveProductsByIds } from '@/lib/product-resolver';
+import { resolveProductsByIds, resolveProductGroupsByIds, resolveGroupChildIds } from '@/lib/product-resolver';
 import { DEFECT_TYPE_LABELS, formatPercent } from '@/lib/format';
 import EmptyState from '@/components/ui/empty-state';
 import {
@@ -101,9 +101,11 @@ export default async function DefectRatePage({
   const { data: defectTickets } = await tq;
 
   // 2) customer_service_records 不良判定行
+  //    PR-EF 以降 product_id は親 group_id を指し、変動 (子) 情報は variation_id に格納される。
+  //    sales_stats_cache は子 product_id で keyed のため、サブクエリ用 sales_key は variation_id 優先。
   let cq = sb
     .from('customer_service_records')
-    .select('product_id, variation_text, action_type, defect_type, record_date');
+    .select('product_id, variation_id, variation_text, action_type, defect_type, record_date');
   if (period === 'monthly' && monthKey) {
     cq = cq.gte('record_date', `${monthKey}-01`);
     // 翌月 1 日 (record_date は date 型なので JST/UTC 関係なく文字列比較で OK)
@@ -165,9 +167,17 @@ export default async function DefectRatePage({
   // CSR 不良判定の集計
   //   parent: (product_id, null) で集約 (variation_text は無視して合算)
   //   variation: (product_id, variation_text or VARIATION_UNKNOWN_LABEL)
+  //   sales_count: variation_id (子 products.id) を sales_stats_cache の key として優先利用。
+  //     - variation 粒度: 個々の variation_id sales を採用
+  //     - parent 粒度: 同 parent_id 配下の全 variation_id sales を合算 (parentSalesAcc)
+  //     - 旧 legacy CSR (variation_id なし): product_id を直接 sales key として使用
+  //     - parent-only 新規データ (variation_id NULL, product_id=group_id): sales=0 (known limitation)
+  const parentSalesAcc = new Map<string, Set<string>>(); // parent_id -> 含めた sales key の Set (重複加算防止)
   for (const r of defectCsrs) {
     const pid = r.product_id != null ? String(r.product_id) : null;
     if (!pid) continue;
+    const variationId = (r as any).variation_id != null ? String((r as any).variation_id) : null;
+    const salesKey = variationId ?? pid;
     let variationLabel: string | null;
     if (granularity === 'variation') {
       const vt = (r.variation_text ?? '').toString().trim();
@@ -176,31 +186,110 @@ export default async function DefectRatePage({
       variationLabel = null;
     }
     const k = rowKey(pid, variationLabel);
-    const row =
-      aggMap.get(k) ??
-      ({
+    let row = aggMap.get(k);
+    if (!row) {
+      row = {
         product_id: pid,
         variation_label: variationLabel,
         defect_count: 0,
         defect_breakdown: {},
-        sales_count: salesMap.get(pid) ?? 0,
+        sales_count: 0,
         amazon_returns: 0,
         amazon_returns_stub: true,
         defect_rate: 0,
-      } as AggRow);
+      } as AggRow;
+      aggMap.set(k, row);
+    }
+    // sales_count 計上:
+    //   variation 粒度: row の sales_count に variation_id の sales を一度だけ加算
+    //   parent 粒度: 同 parent (pid) で複数 variation を順に加算 (重複防止 Set)
+    if (granularity === 'parent') {
+      const acc = parentSalesAcc.get(pid) ?? new Set<string>();
+      if (!acc.has(salesKey)) {
+        row.sales_count += salesMap.get(salesKey) ?? 0;
+        acc.add(salesKey);
+        parentSalesAcc.set(pid, acc);
+      }
+    } else {
+      // variation 粒度: 行毎の variation_id 単位、初回のみセット
+      if (row.defect_count === 0) {
+        row.sales_count = salesMap.get(salesKey) ?? 0;
+      }
+    }
     row.defect_count += 1;
     const dt = (r.defect_type ?? 'other').toString().trim() || 'other';
     row.defect_breakdown[dt] = (row.defect_breakdown[dt] ?? 0) + 1;
-    aggMap.set(k, row);
   }
 
-  // 販売実績はあるが不良 0 の製品 (parent 粒度のみ追加、variation は CSR 由来で十分)
+  // 親粒度: Core /api/v1/master/product-groups/:id?include=products を使い、各親 group の全子 sales を合算
+  // して親 row の denominator を正しくする (codex R14 P1 対応)。
+  // また、子 product 単位の sales-only fallback は「親に既に折りたたまれた」可能性があるため、子 product
+  // → 親 group_id へ map し、未集約の親があれば sales-only 親 row を追加する。
   if (granularity === 'parent') {
-    for (const [pid, sales] of salesMap.entries()) {
-      const k = rowKey(pid, null);
+    // 1) CSR 内に現れた親 group_id の子 sales を合算
+    //    注: tickets テーブルは child product_id を保持しているため (PR-EF 以降も未移行)、
+    //    aggMap 全体ではなく defectCsrs (PR-EF 以降は親 group_id を保存) からのみ rollup 対象を抽出する。
+    //    ticket 由来 row は child product_id → child sales lookup で従来通り正しく動く。
+    const parentIdsInCsr = new Set<string>();
+    for (const r of defectCsrs) {
+      if (r.product_id != null) parentIdsInCsr.add(String(r.product_id));
+    }
+    const parentChildren = await resolveGroupChildIds(Array.from(parentIdsInCsr));
+    const childToParentMap = new Map<string, string>();
+    for (const [parentId, childIds] of parentChildren.entries()) {
+      for (const cid of childIds) childToParentMap.set(cid, parentId);
+    }
+    for (const [parentId, childIds] of parentChildren.entries()) {
+      // childIds が空 = Core group ヒットせず (legacy child id 等)。row.sales_count を 0 に上書きしない。
+      if (childIds.length === 0) continue;
+      const total = childIds.reduce((sum, cid) => sum + (salesMap.get(cid) ?? 0), 0);
+      const k = rowKey(parentId, null);
+      const row = aggMap.get(k);
+      if (row) row.sales_count = total;
+    }
+    // 2) salesMap の各子 sales を、所属親 group_id にロールアップして sales-only 親 row を作る
+    //    既に CSR で集約済みの親 group は親 row に sales 合算済み (step 1)。
+    //    所属親 group_id が未知の sales は子 product_id 直接 (legacy 互換) として fallback row 化。
+    const salesOnlyParentTotals = new Map<string, number>();
+    const legacyChildSalesOnly = new Map<string, number>();
+    const remainingChildIds = Array.from(salesMap.keys()).filter(
+      (cid) => !childToParentMap.has(cid),
+    );
+    // 未マップの子 sales は Core から group_id を引いて親 row に rollup する。
+    // resolveProductsByIds に group_id を含めるよう拡張済 (R17 P2 対応)。
+    const remainingProducts = await resolveProductsByIds(remainingChildIds);
+    for (const cid of remainingChildIds) {
+      const sales = salesMap.get(cid) ?? 0;
+      const resolved = remainingProducts.get(cid);
+      if (resolved?.resolved && resolved.group_id) {
+        // 親 group_id にロールアップ
+        const parentId = resolved.group_id;
+        salesOnlyParentTotals.set(parentId, (salesOnlyParentTotals.get(parentId) ?? 0) + sales);
+      } else {
+        // Core 未解決 or 子product だが group_id 取得不可 → legacy 子 row として fallback
+        legacyChildSalesOnly.set(cid, sales);
+      }
+    }
+    for (const [parentId, total] of salesOnlyParentTotals.entries()) {
+      const k = rowKey(parentId, null);
       if (!aggMap.has(k)) {
         aggMap.set(k, {
-          product_id: pid,
+          product_id: parentId,
+          variation_label: null,
+          defect_count: 0,
+          defect_breakdown: {},
+          sales_count: total,
+          amazon_returns: 0,
+          amazon_returns_stub: true,
+          defect_rate: 0,
+        });
+      }
+    }
+    for (const [cid, sales] of legacyChildSalesOnly.entries()) {
+      const k = rowKey(cid, null);
+      if (!aggMap.has(k)) {
+        aggMap.set(k, {
+          product_id: cid,
           variation_label: null,
           defect_count: 0,
           defect_breakdown: {},
@@ -290,7 +379,19 @@ export default async function DefectRatePage({
     return av.localeCompare(bv);
   });
 
-  const products = await resolveProductsByIds(uniqProductIds);
+  // PR-EF 以降 customer_service_records.product_id は親 product_groups.id を指す。
+  // 旧データ (child products.id) との互換のため両 resolver で照会し resolved=true 優先で表示。
+  const [products, groups] = await Promise.all([
+    resolveProductsByIds(uniqProductIds),
+    resolveProductGroupsByIds(uniqProductIds),
+  ]);
+  function pickProductName(id: string): string {
+    const g = groups.get(id);
+    if (g?.resolved) return g.group_name;
+    const p = products.get(id);
+    if (p?.resolved) return p.name;
+    return `id=${id}`;
+  }
   const overThreshold = aggs.filter(
     (a) => a.sales_count > 0 && a.defect_rate >= DEFAULT_THRESHOLD,
   );
@@ -405,8 +506,7 @@ export default async function DefectRatePage({
             <p className="text-xs text-rose-600 mt-1">
               {overThreshold
                 .map((a) => {
-                  const product = products.get(a.product_id);
-                  const name = product?.name ?? a.product_id;
+                  const name = pickProductName(a.product_id);
                   const label =
                     granularity === 'variation' && a.variation_label
                       ? `${name} / ${a.variation_label}`
@@ -451,7 +551,11 @@ export default async function DefectRatePage({
             <tbody>
               {aggs.map((a) => {
                 const over = a.sales_count > 0 && a.defect_rate >= DEFAULT_THRESHOLD;
-                const product = products.get(a.product_id);
+                const childProduct = products.get(a.product_id);
+                const groupItem = groups.get(a.product_id);
+                const name = pickProductName(a.product_id);
+                // variation サブラベル: 旧データ child resolver の variation を継承表示 (互換)
+                const subVariation = childProduct?.resolved ? childProduct.variation : null;
                 const key = rowKey(a.product_id, a.variation_label);
                 return (
                   <tr
@@ -460,11 +564,9 @@ export default async function DefectRatePage({
                     className={`border-t border-gray-100 ${over ? 'bg-rose-50/40' : ''}`}
                   >
                     <td className="px-4 py-3">
-                      <div className="font-medium text-gray-900">
-                        {product?.name ?? `id=${a.product_id}`}
-                      </div>
-                      {granularity === 'parent' && product?.variation && (
-                        <div className="text-[11px] text-gray-500">{product.variation}</div>
+                      <div className="font-medium text-gray-900">{name}</div>
+                      {granularity === 'parent' && subVariation && !groupItem?.resolved && (
+                        <div className="text-[11px] text-gray-500">{subVariation}</div>
                       )}
                       <div className="text-[10px] text-gray-400 mt-0.5">
                         product_id: {a.product_id}

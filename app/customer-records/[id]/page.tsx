@@ -25,6 +25,8 @@ export default async function EditCustomerRecordPage({
     product_id: data.product_id ?? null,
     product_name_text: data.product_name_text ?? '',
     variation_text: data.variation_text ?? '',
+    variation_id: data.variation_id ?? null,
+    variation_jan: data.variation_jan ?? null,
     recipient_name: data.recipient_name ?? '',
     recipient_honorific: data.recipient_honorific ?? '様',
     order_number: data.order_number ?? '',

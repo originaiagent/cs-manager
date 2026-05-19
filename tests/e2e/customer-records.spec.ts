@@ -63,6 +63,8 @@ test('customer-records: 作成 → 編集 → 削除の 1 サイクル smoke', a
   // React hydration を確実に待つ (controlled input が動くまで)
   await page.waitForLoadState('networkidle');
 
+  // ProductPicker (PR-EF): 手入力モードに切替 → 商品名入力
+  await page.getByRole('button', { name: /手入力モードに切替/ }).click();
   await page.locator('input[name="product_name_text"]').fill(productName);
   await page.locator('input[name="recipient_name"]').fill(recipient);
   await page.locator('select[name="action_type"]').selectOption('reply_only');

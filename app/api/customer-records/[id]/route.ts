@@ -110,6 +110,20 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       update.product_id = n;
     }
   }
+  if ('variation_id' in payload) {
+    if (payload.variation_id == null || payload.variation_id === '') {
+      update.variation_id = null;
+    } else {
+      const n = Number(payload.variation_id);
+      if (!Number.isFinite(n) || !Number.isInteger(n)) {
+        return NextResponse.json({ ok: false, error: 'variation_id must be integer' }, { status: 400 });
+      }
+      update.variation_id = n;
+    }
+  }
+  if ('variation_jan' in payload) {
+    update.variation_jan = normalize(payload.variation_jan);
+  }
   if ('amazon_gift_amount' in payload) {
     if (payload.amazon_gift_amount == null || payload.amazon_gift_amount === '') {
       update.amazon_gift_amount = null;

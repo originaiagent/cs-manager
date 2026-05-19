@@ -6,6 +6,8 @@ export interface CreateRecordPayload {
   product_id?: number | string | null;
   product_name_text: string;
   variation_text?: string | null;
+  variation_id?: number | null;
+  variation_jan?: string | null;
   recipient_name: string;
   recipient_honorific?: string | null;
   order_number?: string | null;
