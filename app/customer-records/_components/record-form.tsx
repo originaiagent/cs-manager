@@ -7,6 +7,7 @@ import { createRecord, type CreateRecordPayload } from '../_actions/create-recor
 import { updateRecord } from '../_actions/update-record';
 import { deleteRecord } from '../_actions/delete-record';
 import { listDefectTypes } from '../_actions/list-defect-types';
+import ProductPicker, { type ProductPickerValue } from '@/app/_components/product-picker';
 
 const ACTION_TYPE_OPTIONS = [
   { value: 'reply_only', label: '返信のみ' },
@@ -66,13 +67,11 @@ export default function RecordForm({
   defaultProductName,
 }: Props) {
   const router = useRouter();
-  const [productId, setProductId] = useState<string>(
-    initial?.product_id != null ? String(initial.product_id) : '',
-  );
-  const [productNameText, setProductNameText] = useState(
-    initial?.product_name_text ?? defaultProductName ?? '',
-  );
-  const [variationText, setVariationText] = useState(initial?.variation_text ?? '');
+  const [productPickerValue, setProductPickerValue] = useState<ProductPickerValue>(() => ({
+    id: initial?.product_id ?? null,
+    product_name: initial?.product_name_text ?? defaultProductName ?? '',
+    variation: initial?.variation_text ?? null,
+  }));
   const [recipientName, setRecipientName] = useState(
     initial?.recipient_name ?? defaultRecipientName ?? '',
   );
@@ -109,10 +108,16 @@ export default function RecordForm({
     setSubmitting(true);
     setError(null);
 
+    if (!productPickerValue.product_name.trim()) {
+      setError('商品名は必須です');
+      setSubmitting(false);
+      return;
+    }
+
     const payload: CreateRecordPayload = {
-      product_id: productId.trim() ? Number(productId.trim()) : null,
-      product_name_text: productNameText,
-      variation_text: variationText || null,
+      product_id: productPickerValue.id,
+      product_name_text: productPickerValue.product_name,
+      variation_text: productPickerValue.variation,
       recipient_name: recipientName,
       recipient_honorific: recipientHonorific || '様',
       order_number: orderNumber || null,
@@ -170,36 +175,14 @@ export default function RecordForm({
         </div>
       )}
 
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <Field label="商品ID (Core)" hint="数値のみ。空でも可">
-          <input
-            type="text"
-            inputMode="numeric"
-            name="product_id"
-            value={productId}
-            onChange={(e) => setProductId(e.target.value.replace(/[^0-9]/g, ''))}
-            className={inputCls}
-          />
-        </Field>
-        <Field label="商品名 *">
-          <input
-            type="text"
-            name="product_name_text"
-            value={productNameText}
-            onChange={(e) => setProductNameText(e.target.value)}
-            required
-            className={inputCls}
-          />
-        </Field>
-        <Field label="バリエーション">
-          <input
-            type="text"
-            name="variation_text"
-            value={variationText}
-            onChange={(e) => setVariationText(e.target.value)}
-            className={inputCls}
-          />
-        </Field>
+      <section>
+        <ProductPicker
+          value={productPickerValue}
+          onChange={setProductPickerValue}
+          label="商品"
+          required
+          allowManualInput
+        />
       </section>
 
       <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
