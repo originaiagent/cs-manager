@@ -64,7 +64,8 @@ export default async function KnowledgePage({
   // 全件カウント (タブ件数バッジ用)
   const { data: allRaw } = await sb
     .from('knowledge_articles')
-    .select('id, storage_scope', { count: 'exact', head: false });
+    .select('id, storage_scope', { count: 'exact', head: false })
+    .is('deleted_at', null);
   const counts = {
     all: allRaw?.length ?? 0,
     company: allRaw?.filter((r) => r.storage_scope === 'company').length ?? 0,
@@ -168,7 +169,8 @@ async function FlatList({
     .from('knowledge_articles')
     .select(
       'id, title, question, answer, storage_scope, storage_store_id, storage_product_id, applies_to_stores, applies_to_products, tags, status, reference_count, updated_at',
-    );
+    )
+    .is('deleted_at', null);
 
   if (searchParams.scope && searchParams.scope !== 'all') {
     q = q.eq('storage_scope', searchParams.scope);
@@ -216,7 +218,8 @@ async function ProductGrid({ searchParams }: { searchParams: SearchParams }) {
   const { data: articles } = await sb
     .from('knowledge_articles')
     .select('id, storage_product_id, tags, status, reference_count, updated_at')
-    .eq('storage_scope', 'product');
+    .eq('storage_scope', 'product')
+    .is('deleted_at', null);
 
   type ProductAgg = {
     article_count: number;
@@ -368,7 +371,8 @@ async function ProductDetail({
       'id, title, question, answer, storage_scope, storage_store_id, storage_product_id, applies_to_stores, applies_to_products, tags, status, reference_count, updated_at',
     )
     .eq('storage_scope', 'product')
-    .eq('storage_product_id', productId);
+    .eq('storage_product_id', productId)
+    .is('deleted_at', null);
   if (searchParams.q && searchParams.q.trim()) {
     const pat = `%${searchParams.q.trim()}%`;
     q = q.or(`title.ilike.${pat},question.ilike.${pat},answer.ilike.${pat}`);
@@ -440,7 +444,8 @@ async function StoreGrid({
   const { data: articles } = await sb
     .from('knowledge_articles')
     .select('id, storage_store_id, tags, reference_count, updated_at')
-    .eq('storage_scope', 'store');
+    .eq('storage_scope', 'store')
+    .is('deleted_at', null);
 
   type StoreAgg = {
     store_id: string;
@@ -535,7 +540,8 @@ async function StoreDetail({
       'id, title, question, answer, storage_scope, storage_store_id, storage_product_id, applies_to_stores, applies_to_products, tags, status, reference_count, updated_at',
     )
     .eq('storage_scope', 'store')
-    .eq('storage_store_id', storeCode);
+    .eq('storage_store_id', storeCode)
+    .is('deleted_at', null);
   if (searchParams.q && searchParams.q.trim()) {
     const pat = `%${searchParams.q.trim()}%`;
     q = q.or(`title.ilike.${pat},question.ilike.${pat},answer.ilike.${pat}`);

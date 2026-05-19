@@ -2,24 +2,20 @@
 
 import { internalFetch } from '@/lib/auth/internal-fetch';
 
-export async function updateArticleStatus(
+export async function deleteArticle(
   id: string,
-  status: string,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const res = await internalFetch(
       `/api/knowledge/${encodeURIComponent(id)}`,
-      {
-        method: 'PATCH',
-        body: JSON.stringify({ status }),
-      },
+      { method: 'DELETE' },
     );
     const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok || !j.ok) {
+    if (!res.ok || j.ok !== true) {
       return {
         ok: false,
         error:
-          (typeof j.error === 'string' && j.error) || `update failed: ${res.status}`,
+          (typeof j.error === 'string' && j.error) || `delete failed: ${res.status}`,
       };
     }
     return { ok: true };

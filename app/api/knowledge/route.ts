@@ -6,7 +6,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const ALLOWED_SCOPES = ['company', 'store', 'product'] as const;
-const ALLOWED_STATUSES = ['draft', 'published', 'archived'] as const;
+const ALLOWED_STATUSES = ['draft', 'published'] as const;
 
 export async function GET(req: NextRequest) {
   const authError = authorizeApiRoute(req, { tier: 'internal' });
@@ -15,7 +15,8 @@ export async function GET(req: NextRequest) {
   const sb = await getSupabaseAdmin();
   let q = sb
     .from('knowledge_articles')
-    .select('*');
+    .select('*')
+    .is('deleted_at', null);
   const scope = sp.get('scope');
   if (scope && ALLOWED_SCOPES.includes(scope as any)) q = q.eq('storage_scope', scope);
   const status = sp.get('status');
@@ -55,6 +56,9 @@ export async function POST(req: NextRequest) {
   }
   if (payload.storage_scope === 'product' && !payload.storage_product_id) {
     return NextResponse.json({ ok: false, error: 'storage_product_id required for product scope' }, { status: 400 });
+  }
+  if (payload.status !== undefined && !ALLOWED_STATUSES.includes(payload.status)) {
+    return NextResponse.json({ ok: false, error: 'invalid status' }, { status: 400 });
   }
   const sb = await getSupabaseAdmin();
   const insert = {

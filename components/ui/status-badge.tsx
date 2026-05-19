@@ -6,7 +6,6 @@ interface Props {
 const COMMON_LABELS: Record<string, string> = {
   draft: '下書き',
   published: '公開中',
-  archived: 'アーカイブ',
   accepted: '採用',
   rejected: '却下',
   editing: '編集中',
@@ -20,7 +19,6 @@ const COMMON_LABELS: Record<string, string> = {
 const COMMON_CLASSES: Record<string, string> = {
   draft: 'bg-gray-50 text-gray-600 border-gray-200',
   published: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-  archived: 'bg-zinc-50 text-zinc-500 border-zinc-200',
   accepted: 'bg-emerald-50 text-emerald-700 border-emerald-200',
   rejected: 'bg-rose-50 text-rose-700 border-rose-200',
   editing: 'bg-amber-50 text-amber-700 border-amber-200',
