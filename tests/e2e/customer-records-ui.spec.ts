@@ -35,14 +35,13 @@ test.describe('customer-records UI improvements', () => {
     const totalText = await page.getByText(/合計\s*\d+\s*件/).textContent();
     expect(totalText).toMatch(/合計\s*\d+\s*件/);
 
-    // 次へボタンがあれば押せること
+    // 次へボタンがあれば押せること (useTransition による URL 反映に
+    // 本番デプロイ環境では時間がかかるため timeout 長め)
     const nextBtn = page.getByRole('button', { name: /次へ/ });
     const nextDisabled = await nextBtn.isDisabled().catch(() => true);
     if (!nextDisabled) {
       await nextBtn.click();
-      await page.waitForLoadState('networkidle');
-      // page=2 になっているはず
-      await expect(page).toHaveURL(/page=2/);
+      await expect(page).toHaveURL(/page=2/, { timeout: 15000 });
     }
 
     expect(buckets.consoleErrors).toEqual([]);
