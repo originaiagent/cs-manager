@@ -15,3 +15,7 @@ tsconfig.tsbuildinfo
 /playwright-report/
 /playwright/.cache/
 tests/e2e/screenshots/
+
+# CSV import / backfill tooling (one-time scripts and artifacts)
+tmp/
+.DS_Store

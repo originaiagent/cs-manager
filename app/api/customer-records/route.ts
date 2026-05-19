@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { authorizeApiRoute } from '@/lib/auth/api-auth';
+import {
+  applySearchFilters,
+  isIsoDate,
+  parsePagination,
+  parseSearchParams,
+} from '@/app/customer-records/_lib/build-search-query';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -25,21 +31,6 @@ function normalize(s: string | null | undefined): string | null {
   return t === '' ? null : t;
 }
 
-/**
- * `YYYY-MM-DD` の正規表現一致 + 実在日付チェック。
- * Date() で組み立てて Y/M/D が一致するか確認 (2026-99-99 を弾く)。
- */
-function isIsoDate(v: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
-  const [y, m, d] = v.split('-').map((s) => parseInt(s, 10));
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  return (
-    dt.getUTCFullYear() === y &&
-    dt.getUTCMonth() === m - 1 &&
-    dt.getUTCDate() === d
-  );
-}
-
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function isUuid(v: string): boolean {
   return UUID_RE.test(v);
@@ -51,8 +42,9 @@ export async function GET(req: NextRequest) {
 
   const sp = req.nextUrl.searchParams;
   const sb = await getSupabaseAdmin();
-  let q = sb.from('customer_service_records').select('*');
+  let q = sb.from('customer_service_records').select('*', { count: 'exact' });
 
+  // 既存 (後方互換): product_id / action_type / ticket_id / date_from / date_to
   const productId = sp.get('product_id');
   if (productId) {
     const n = Number(productId);
@@ -62,20 +54,31 @@ export async function GET(req: NextRequest) {
   if (actionType && (ALLOWED_ACTION_TYPES as readonly string[]).includes(actionType)) {
     q = q.eq('action_type', actionType);
   }
-  const dateFrom = sp.get('date_from');
-  if (dateFrom && isIsoDate(dateFrom)) q = q.gte('record_date', dateFrom);
-  const dateTo = sp.get('date_to');
-  if (dateTo && isIsoDate(dateTo)) q = q.lte('record_date', dateTo);
   const ticketId = sp.get('ticket_id');
   if (ticketId) q = q.eq('ticket_id', ticketId);
 
-  const limitRaw = sp.get('limit');
-  const limit = Math.min(Math.max(Number(limitRaw) || 200, 1), 1000);
-  q = q.order('record_date', { ascending: false }).order('created_at', { ascending: false }).limit(limit);
+  // 新規: product / recipient / order の ILIKE + date_from / date_to (helper 経由)
+  // date_from / date_to は helper 内で isIsoDate チェック済み、不正値は無視される。
+  const search = parseSearchParams(sp);
+  q = applySearchFilters(q, search);
 
-  const { data, error } = await q;
+  // pagination: `limit` 指定があれば後方互換でそれを優先、無ければ page / page_size
+  const limitRaw = sp.get('limit');
+  q = q.order('record_date', { ascending: false }).order('created_at', { ascending: false });
+
+  if (limitRaw != null && limitRaw !== '') {
+    // 後方互換: limit を尊重 (offset 無し、最大 1000)
+    const limit = Math.min(Math.max(Number(limitRaw) || 200, 1), 1000);
+    q = q.limit(limit);
+  } else {
+    const { page, pageSize } = parsePagination(sp);
+    const offset = (page - 1) * pageSize;
+    q = q.range(offset, offset + pageSize - 1);
+  }
+
+  const { data, error, count } = await q;
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true, records: data });
+  return NextResponse.json({ ok: true, records: data, count: count ?? 0 });
 }
 
 export async function POST(req: NextRequest) {
