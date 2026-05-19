@@ -27,6 +27,7 @@ export interface ProductPickerValue {
   parent_group_name: string;
   variation_id: number | null;
   variation_name: string;          // 表示用: product_name + (variation あれば付加)
+  variation_text: string | null;   // Core products.variation 単体 (defect-rate 分析用)
   variation_jan: string | null;
 }
 
@@ -157,6 +158,7 @@ export default function ProductPicker({
             parent_group_name: value.parent_group_name,
             variation_id: vid,
             variation_name: formatVariationName(v),
+            variation_text: v.variation,
             variation_jan: v.jan_code,
           });
         }
@@ -176,6 +178,7 @@ export default function ProductPicker({
         parent_group_name: '',
         variation_id: null,
         variation_name: item.group_name,
+        variation_text: null,
         variation_jan: null,
       });
       setManualMode(true);
@@ -184,11 +187,15 @@ export default function ProductPicker({
       setOpen(false);
       return;
     }
+    // 子バリエーション選択前の暫定 variation_name は親 group_name にフォールバック。
+    // 子 0 件のグループでも record-form の product_name_text NOT NULL を満たして保存できる。
+    // 子を picker で選択した時点で pickVariation() が上書きする。
     onChange({
       parent_group_id: intId,
       parent_group_name: item.group_name,
       variation_id: null,
-      variation_name: context === 'knowledge' ? item.group_name : '',
+      variation_name: item.group_name,
+      variation_text: null,
       variation_jan: null,
     });
     setQ('');
@@ -204,6 +211,7 @@ export default function ProductPicker({
       parent_group_name: value.parent_group_name,
       variation_id: vid,
       variation_name: formatVariationName(v),
+      variation_text: v.variation,
       variation_jan: v.jan_code,
     });
   }
@@ -214,6 +222,7 @@ export default function ProductPicker({
       parent_group_name: '',
       variation_id: null,
       variation_name: '',
+      variation_text: null,
       variation_jan: null,
     });
     setQ('');
@@ -235,6 +244,7 @@ export default function ProductPicker({
       parent_group_name: '',
       variation_id: null,
       variation_name: '',
+      variation_text: null,
       variation_jan: null,
     });
   }

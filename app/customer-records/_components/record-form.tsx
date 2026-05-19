@@ -80,6 +80,7 @@ export default function RecordForm({
         parent_group_name: '',
         variation_id: initial.variation_id,
         variation_name: initial.product_name_text ?? '',
+        variation_text: initial.variation_text ?? null,
         variation_jan: initial.variation_jan ?? null,
       };
     }
@@ -89,6 +90,7 @@ export default function RecordForm({
         parent_group_name: '',
         variation_id: null,
         variation_name: initial.product_name_text ?? '',
+        variation_text: initial.variation_text ?? null,
         variation_jan: null,
       };
     }
@@ -97,6 +99,7 @@ export default function RecordForm({
       parent_group_name: '',
       variation_id: null,
       variation_name: initial?.product_name_text ?? defaultProductName ?? '',
+      variation_text: initial?.variation_text ?? null,
       variation_jan: null,
     };
   });
@@ -145,7 +148,7 @@ export default function RecordForm({
     const payload: CreateRecordPayload = {
       product_id: productPickerValue.parent_group_id,        // 親 group_id
       product_name_text: productPickerValue.variation_name,   // 子 product_name または手入力名
-      variation_text: null,                                    // 既存温存 (UI 露出なし、API は受付可)
+      variation_text: productPickerValue.variation_text,      // 子 variation 文字列 (defect-rate 分析用)
       variation_id: productPickerValue.variation_id,
       variation_jan: productPickerValue.variation_jan,
       recipient_name: recipientName,

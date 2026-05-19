@@ -186,15 +186,23 @@ async function FlatList({
   q = q.order('updated_at', { ascending: false }).limit(200);
   const { data: articles } = await q;
 
-  const productIds = new Set<string>();
+  // storage_product_id (親 group) と applies_to_products[] (子 product) を別解決
+  const groupIds = new Set<string>();
+  const childIds = new Set<string>();
   for (const a of articles ?? []) {
-    if (a.storage_product_id) productIds.add(a.storage_product_id);
-    for (const pid of a.applies_to_products ?? []) productIds.add(pid);
+    if (a.storage_product_id) groupIds.add(a.storage_product_id);
+    for (const pid of a.applies_to_products ?? []) childIds.add(pid);
   }
-  const products = await resolveProductsByIds(Array.from(productIds));
+  const [groups, products] = await Promise.all([
+    resolveProductGroupsByIds(Array.from(groupIds)),
+    resolveProductsByIds(Array.from(childIds)),
+  ]);
   const productNameMap: Record<string, string> = {};
+  Array.from(groups.entries()).forEach(([id, g]) => {
+    productNameMap[id] = g.group_name;
+  });
   Array.from(products.entries()).forEach(([id, p]) => {
-    productNameMap[id] = p.name;
+    if (!productNameMap[id]) productNameMap[id] = p.name;
   });
 
   return (
@@ -562,15 +570,23 @@ async function StoreDetail({
   q = q.order('updated_at', { ascending: false }).limit(200);
   const { data: articles } = await q;
 
-  const productIds = new Set<string>();
+  // storage_product_id (親 group) と applies_to_products[] (子 product) を別解決
+  const groupIds = new Set<string>();
+  const childIds = new Set<string>();
   for (const a of articles ?? []) {
-    if (a.storage_product_id) productIds.add(a.storage_product_id);
-    for (const pid of a.applies_to_products ?? []) productIds.add(pid);
+    if (a.storage_product_id) groupIds.add(a.storage_product_id);
+    for (const pid of a.applies_to_products ?? []) childIds.add(pid);
   }
-  const products = await resolveProductsByIds(Array.from(productIds));
+  const [groups, products] = await Promise.all([
+    resolveProductGroupsByIds(Array.from(groupIds)),
+    resolveProductsByIds(Array.from(childIds)),
+  ]);
   const productNameMap: Record<string, string> = {};
+  Array.from(groups.entries()).forEach(([id, g]) => {
+    productNameMap[id] = g.group_name;
+  });
   Array.from(products.entries()).forEach(([id, p]) => {
-    productNameMap[id] = p.name;
+    if (!productNameMap[id]) productNameMap[id] = p.name;
   });
 
   return (

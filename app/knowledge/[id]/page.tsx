@@ -7,7 +7,7 @@ import ScopeBadge from '@/components/ui/scope-badge';
 import StatusBadge from '@/components/ui/status-badge';
 import ChannelBadge from '@/components/ui/channel-badge';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
-import { resolveProductsByIds } from '@/lib/product-resolver';
+import { resolveProductsByIds, resolveProductGroupsByIds } from '@/lib/product-resolver';
 import { CASE_CATEGORY_LABELS, DEFECT_TYPE_LABELS, formatDateTime } from '@/lib/format';
 import ArchiveButton from './_components/archive-button';
 
@@ -35,10 +35,19 @@ export default async function KnowledgeDetail({
   const storeDisplayMap: Record<string, string> = {};
   for (const c of channelsRaw ?? []) storeDisplayMap[c.code] = c.display_name;
 
-  const productIds = new Set<string>();
-  if (a.storage_product_id) productIds.add(a.storage_product_id);
-  for (const pid of a.applies_to_products ?? []) productIds.add(pid);
-  const products = await resolveProductsByIds(Array.from(productIds));
+  // storage_product_id は親 product_groups.id を指す (PR-EF 以降)
+  // applies_to_products[] は子 products.id を指す (互換維持)
+  const childProductIds: string[] = [];
+  for (const pid of a.applies_to_products ?? []) childProductIds.push(pid);
+  const [products, groups] = await Promise.all([
+    resolveProductsByIds(childProductIds),
+    a.storage_product_id
+      ? resolveProductGroupsByIds([a.storage_product_id])
+      : Promise.resolve(new Map()),
+  ]);
+  const storageGroupName: string | null = a.storage_product_id
+    ? groups.get(a.storage_product_id)?.group_name ?? null
+    : null;
 
   return (
     <div className="max-w-3xl">
@@ -73,9 +82,7 @@ export default async function KnowledgeDetail({
             a.storage_store_id ? storeDisplayMap[a.storage_store_id] : null
           }
           productId={a.storage_product_id}
-          productName={
-            a.storage_product_id ? products.get(a.storage_product_id)?.name : null
-          }
+          productName={storageGroupName}
         />
         <StatusBadge status={a.status} variant="knowledge" />
         {a.tags?.map((t: string) => (

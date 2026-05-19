@@ -62,6 +62,7 @@ export default function ArticleForm({ channels, initial, mode }: Props) {
     parent_group_name: initial?.resolved_product_group_name ?? '',
     variation_id: null,
     variation_name: initial?.resolved_product_group_name ?? '',
+    variation_text: null,
     variation_jan: null,
   }));
   const [appliesStores, setAppliesStores] = useState<string[]>(
