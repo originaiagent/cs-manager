@@ -156,9 +156,9 @@ export default function ProductPicker({
         }
         const arr = r.variations ?? [];
         setVariations(arr);
-        // 0 件: variation_id=null のまま
+        // 0 件: variation_id=null のまま (親のみ保存可、provisional な variation_name=group_name を維持)
         // 1 件: 自動選択
-        // 2 件以上: ユーザー選択待ち
+        // 2 件以上: ユーザー選択を要求。variation_name を空にして submit を弾く (form 側で required チェック)
         if (arr.length === 1 && value.variation_id == null) {
           const v = arr[0];
           const vid = toIntId(v.id);
@@ -169,6 +169,16 @@ export default function ProductPicker({
             variation_name: formatVariationName(v),
             variation_text: v.variation,
             variation_jan: v.jan_code,
+          });
+        } else if (arr.length >= 2 && value.variation_id == null) {
+          // 既に provisional な variation_name=group_name が入っているのを空に戻し、submit を強制的に拒否させる
+          onChange({
+            parent_group_id: value.parent_group_id,
+            parent_group_name: value.parent_group_name,
+            variation_id: null,
+            variation_name: '',
+            variation_text: null,
+            variation_jan: null,
           });
         }
       })

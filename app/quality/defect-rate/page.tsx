@@ -2,7 +2,7 @@ import { unstable_noStore as noStore } from 'next/cache';
 import Link from 'next/link';
 import { AlertTriangle, ChevronRight, ChevronLeft as ChevronLeftIcon, ChevronRight as ChevronRightIcon } from 'lucide-react';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
-import { resolveProductsByIds } from '@/lib/product-resolver';
+import { resolveProductsByIds, resolveProductGroupsByIds } from '@/lib/product-resolver';
 import { DEFECT_TYPE_LABELS, formatPercent } from '@/lib/format';
 import EmptyState from '@/components/ui/empty-state';
 import {
@@ -290,7 +290,19 @@ export default async function DefectRatePage({
     return av.localeCompare(bv);
   });
 
-  const products = await resolveProductsByIds(uniqProductIds);
+  // PR-EF 以降 customer_service_records.product_id は親 product_groups.id を指す。
+  // 旧データ (child products.id) との互換のため両 resolver で照会し resolved=true 優先で表示。
+  const [products, groups] = await Promise.all([
+    resolveProductsByIds(uniqProductIds),
+    resolveProductGroupsByIds(uniqProductIds),
+  ]);
+  function pickProductName(id: string): string {
+    const g = groups.get(id);
+    if (g?.resolved) return g.group_name;
+    const p = products.get(id);
+    if (p?.resolved) return p.name;
+    return `id=${id}`;
+  }
   const overThreshold = aggs.filter(
     (a) => a.sales_count > 0 && a.defect_rate >= DEFAULT_THRESHOLD,
   );
@@ -405,8 +417,7 @@ export default async function DefectRatePage({
             <p className="text-xs text-rose-600 mt-1">
               {overThreshold
                 .map((a) => {
-                  const product = products.get(a.product_id);
-                  const name = product?.name ?? a.product_id;
+                  const name = pickProductName(a.product_id);
                   const label =
                     granularity === 'variation' && a.variation_label
                       ? `${name} / ${a.variation_label}`
@@ -451,7 +462,11 @@ export default async function DefectRatePage({
             <tbody>
               {aggs.map((a) => {
                 const over = a.sales_count > 0 && a.defect_rate >= DEFAULT_THRESHOLD;
-                const product = products.get(a.product_id);
+                const childProduct = products.get(a.product_id);
+                const groupItem = groups.get(a.product_id);
+                const name = pickProductName(a.product_id);
+                // variation サブラベル: 旧データ child resolver の variation を継承表示 (互換)
+                const subVariation = childProduct?.resolved ? childProduct.variation : null;
                 const key = rowKey(a.product_id, a.variation_label);
                 return (
                   <tr
@@ -460,11 +475,9 @@ export default async function DefectRatePage({
                     className={`border-t border-gray-100 ${over ? 'bg-rose-50/40' : ''}`}
                   >
                     <td className="px-4 py-3">
-                      <div className="font-medium text-gray-900">
-                        {product?.name ?? `id=${a.product_id}`}
-                      </div>
-                      {granularity === 'parent' && product?.variation && (
-                        <div className="text-[11px] text-gray-500">{product.variation}</div>
+                      <div className="font-medium text-gray-900">{name}</div>
+                      {granularity === 'parent' && subVariation && !groupItem?.resolved && (
+                        <div className="text-[11px] text-gray-500">{subVariation}</div>
                       )}
                       <div className="text-[10px] text-gray-400 mt-0.5">
                         product_id: {a.product_id}
