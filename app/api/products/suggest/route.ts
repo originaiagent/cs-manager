@@ -56,11 +56,21 @@ export async function GET(req: NextRequest) {
     const arr: any[] = Array.isArray(data)
       ? data
       : (data?.data ?? data?.products ?? []);
-    const items = arr.map((p) => ({
-      id: String(p.id),
-      product_name: p.product_name ?? '(no name)',
-      variation: p.variation ?? null,
-    }));
+    // Core が q= を honor しない環境への防御: ローカルでも部分一致フィルタを通す
+    // (Core が honor していれば no-op、honor していなければ無関係商品の誤候補を防ぐ)
+    const ql = q.toLowerCase();
+    const items = arr
+      .filter((p) => {
+        const name = String(p?.product_name ?? '').toLowerCase();
+        const variation = String(p?.variation ?? '').toLowerCase();
+        const idStr = String(p?.id ?? '').toLowerCase();
+        return name.includes(ql) || variation.includes(ql) || idStr === ql;
+      })
+      .map((p) => ({
+        id: String(p.id),
+        product_name: p.product_name ?? '(no name)',
+        variation: p.variation ?? null,
+      }));
     cache.set(cacheKey, { ts: now, items });
     return NextResponse.json({ ok: true, items });
   } catch (e: any) {

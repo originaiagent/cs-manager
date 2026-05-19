@@ -52,7 +52,10 @@ export default function ProductPicker({
   useEffect(() => {
     if (manualMode) return;
     if (!q.trim()) {
+      // 検索中の in-flight レスポンスが古い結果でドロップダウンを再開しないよう seq を進める
+      seqRef.current += 1;
       setItems([]);
+      setLoading(false);
       return;
     }
     if (debounceRef.current) clearTimeout(debounceRef.current);
