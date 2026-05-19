@@ -9,7 +9,7 @@ import ChannelBadge from '@/components/ui/channel-badge';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { resolveProductsByIds } from '@/lib/product-resolver';
 import { CASE_CATEGORY_LABELS, DEFECT_TYPE_LABELS, formatDateTime } from '@/lib/format';
-import ArchiveButton from './_components/archive-button';
+import DeleteButton from './_components/delete-button';
 
 export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
@@ -26,6 +26,7 @@ export default async function KnowledgeDetail({
     .from('knowledge_articles')
     .select('*')
     .eq('id', params.id)
+    .is('deleted_at', null)
     .maybeSingle();
   if (!a) notFound();
 
@@ -60,7 +61,7 @@ export default async function KnowledgeDetail({
             >
               <Pencil size={14} /> 編集
             </Link>
-            <ArchiveButton id={a.id} status={a.status} />
+            <DeleteButton articleId={a.id} articleTitle={a.title} />
           </div>
         }
       />

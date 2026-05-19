@@ -6,7 +6,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const ALLOWED_SCOPES = ['company', 'store', 'product'] as const;
-const ALLOWED_STATUSES = ['draft', 'published', 'archived'] as const;
+const ALLOWED_STATUSES = ['draft', 'published'] as const;
 
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
   const authError = authorizeApiRoute(req, { tier: 'internal' });
@@ -16,6 +16,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     .from('knowledge_articles')
     .select('*')
     .eq('id', params.id)
+    .is('deleted_at', null)
     .maybeSingle();
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   if (!data) return NextResponse.json({ ok: false, error: 'not found' }, { status: 404 });
@@ -62,6 +63,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     .from('knowledge_articles')
     .update(update)
     .eq('id', params.id)
+    .is('deleted_at', null)
     .select('*')
     .maybeSingle();
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
@@ -73,7 +75,14 @@ export async function DELETE(req: NextRequest, { params }: { params: { id: strin
   const authError = authorizeApiRoute(req, { tier: 'internal' });
   if (authError) return authError;
   const sb = await getSupabaseAdmin();
-  const { error } = await sb.from('knowledge_articles').delete().eq('id', params.id);
+  const { data, error } = await sb
+    .from('knowledge_articles')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', params.id)
+    .is('deleted_at', null)
+    .select('id')
+    .maybeSingle();
   if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  if (!data) return NextResponse.json({ ok: false, error: 'not found' }, { status: 404 });
   return NextResponse.json({ ok: true });
 }

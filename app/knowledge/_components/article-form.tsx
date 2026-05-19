@@ -26,7 +26,7 @@ interface InitialValues {
   answer: string | null;
   body_markdown: string | null;
   tags: string[];
-  status: 'draft' | 'published' | 'archived';
+  status: 'draft' | 'published';
   resolved_product_name?: string | null;
 }
 
@@ -72,8 +72,8 @@ export default function ArticleForm({ channels, initial, mode }: Props) {
   const [answer, setAnswer] = useState(initial?.answer ?? '');
   const [bodyMd, setBodyMd] = useState(initial?.body_markdown ?? '');
   const [tagsText, setTagsText] = useState((initial?.tags ?? []).join(', '));
-  const [status, setStatus] = useState<'draft' | 'published' | 'archived'>(
-    (initial?.status as any) ?? 'draft',
+  const [status, setStatus] = useState<'draft' | 'published'>(
+    initial?.status === 'published' ? 'published' : 'draft',
   );
 
   const [saving, setSaving] = useState(false);
@@ -323,12 +323,11 @@ export default function ArticleForm({ channels, initial, mode }: Props) {
           <label className="block text-xs font-medium text-gray-600 mb-1">ステータス</label>
           <select
             value={status}
-            onChange={(e) => setStatus(e.target.value as any)}
+            onChange={(e) => setStatus(e.target.value as 'draft' | 'published')}
             className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
           >
             <option value="draft">下書き</option>
             <option value="published">公開中</option>
-            <option value="archived">アーカイブ</option>
           </select>
         </div>
       </section>
