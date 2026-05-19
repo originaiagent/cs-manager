@@ -168,14 +168,16 @@ export default async function DefectRatePage({
   //   parent: (product_id, null) で集約 (variation_text は無視して合算)
   //   variation: (product_id, variation_text or VARIATION_UNKNOWN_LABEL)
   //   sales_count: variation_id (子 products.id) を sales_stats_cache の key として優先利用。
-  //     - PR-EF 以降の新規データ: variation_id あり → 子 sales を正しく取得
-  //     - 旧 legacy CSR (variation_id なし): product_id が child product.id だった可能性 → fallback
+  //     - variation 粒度: 個々の variation_id sales を採用
+  //     - parent 粒度: 同 parent_id 配下の全 variation_id sales を合算 (parentSalesAcc)
+  //     - 旧 legacy CSR (variation_id なし): product_id を直接 sales key として使用
   //     - parent-only 新規データ (variation_id NULL, product_id=group_id): sales=0 (known limitation)
+  const parentSalesAcc = new Map<string, Set<string>>(); // parent_id -> 含めた sales key の Set (重複加算防止)
   for (const r of defectCsrs) {
     const pid = r.product_id != null ? String(r.product_id) : null;
     if (!pid) continue;
-    const salesKey =
-      (r as any).variation_id != null ? String((r as any).variation_id) : pid;
+    const variationId = (r as any).variation_id != null ? String((r as any).variation_id) : null;
+    const salesKey = variationId ?? pid;
     let variationLabel: string | null;
     if (granularity === 'variation') {
       const vt = (r.variation_text ?? '').toString().trim();
@@ -184,22 +186,39 @@ export default async function DefectRatePage({
       variationLabel = null;
     }
     const k = rowKey(pid, variationLabel);
-    const row =
-      aggMap.get(k) ??
-      ({
+    let row = aggMap.get(k);
+    if (!row) {
+      row = {
         product_id: pid,
         variation_label: variationLabel,
         defect_count: 0,
         defect_breakdown: {},
-        sales_count: salesMap.get(salesKey) ?? 0,
+        sales_count: 0,
         amazon_returns: 0,
         amazon_returns_stub: true,
         defect_rate: 0,
-      } as AggRow);
+      } as AggRow;
+      aggMap.set(k, row);
+    }
+    // sales_count 計上:
+    //   variation 粒度: row の sales_count に variation_id の sales を一度だけ加算
+    //   parent 粒度: 同 parent (pid) で複数 variation を順に加算 (重複防止 Set)
+    if (granularity === 'parent') {
+      const acc = parentSalesAcc.get(pid) ?? new Set<string>();
+      if (!acc.has(salesKey)) {
+        row.sales_count += salesMap.get(salesKey) ?? 0;
+        acc.add(salesKey);
+        parentSalesAcc.set(pid, acc);
+      }
+    } else {
+      // variation 粒度: 行毎の variation_id 単位、初回のみセット
+      if (row.defect_count === 0) {
+        row.sales_count = salesMap.get(salesKey) ?? 0;
+      }
+    }
     row.defect_count += 1;
     const dt = (r.defect_type ?? 'other').toString().trim() || 'other';
     row.defect_breakdown[dt] = (row.defect_breakdown[dt] ?? 0) + 1;
-    aggMap.set(k, row);
   }
 
   // 販売実績はあるが不良 0 の製品 (parent 粒度のみ追加、variation は CSR 由来で十分)
