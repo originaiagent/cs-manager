@@ -227,10 +227,12 @@ export default async function DefectRatePage({
   // → 親 group_id へ map し、未集約の親があれば sales-only 親 row を追加する。
   if (granularity === 'parent') {
     // 1) CSR 内に現れた親 group_id の子 sales を合算
+    //    注: tickets テーブルは child product_id を保持しているため (PR-EF 以降も未移行)、
+    //    aggMap 全体ではなく defectCsrs (PR-EF 以降は親 group_id を保存) からのみ rollup 対象を抽出する。
+    //    ticket 由来 row は child product_id → child sales lookup で従来通り正しく動く。
     const parentIdsInCsr = new Set<string>();
-    for (const [k, row] of aggMap.entries()) {
-      if (row.variation_label === null) parentIdsInCsr.add(row.product_id);
-      void k;
+    for (const r of defectCsrs) {
+      if (r.product_id != null) parentIdsInCsr.add(String(r.product_id));
     }
     const parentChildren = await resolveGroupChildIds(Array.from(parentIdsInCsr));
     const childToParentMap = new Map<string, string>();
