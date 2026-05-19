@@ -238,6 +238,8 @@ export default async function DefectRatePage({
       for (const cid of childIds) childToParentMap.set(cid, parentId);
     }
     for (const [parentId, childIds] of parentChildren.entries()) {
+      // childIds が空 = Core group ヒットせず (legacy child id 等)。row.sales_count を 0 に上書きしない。
+      if (childIds.length === 0) continue;
       const total = childIds.reduce((sum, cid) => sum + (salesMap.get(cid) ?? 0), 0);
       const k = rowKey(parentId, null);
       const row = aggMap.get(k);
