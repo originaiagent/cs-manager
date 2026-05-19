@@ -27,6 +27,7 @@ export interface CoreProductListItem {
 interface CacheEntry {
   ts: number;
   items: CoreProductListItem[];
+  truncated: boolean;
 }
 
 const cache = new Map<string, CacheEntry>();
@@ -51,7 +52,7 @@ export async function listCoreProducts(
   const now = Date.now();
   const cached = cache.get(cacheKey);
   if (cached && now - cached.ts < TTL_MS) {
-    return { ok: true, items: cached.items, truncated: false };
+    return { ok: true, items: cached.items, truncated: cached.truncated };
   }
   try {
     // 1回目
@@ -110,7 +111,7 @@ export async function listCoreProducts(
       variation: p.variation ?? null,
       group_name: p.group_name ?? null,
     }));
-    cache.set(cacheKey, { ts: now, items });
+    cache.set(cacheKey, { ts: now, items, truncated });
     return { ok: true, items, truncated };
   } catch (e: any) {
     return { ok: false, items: [], truncated: false, error: e?.message ?? 'unknown' };
