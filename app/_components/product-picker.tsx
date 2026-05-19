@@ -156,10 +156,19 @@ export default function ProductPicker({
         }
         const arr = r.variations ?? [];
         setVariations(arr);
-        // 0 件: variation_id=null のまま (親のみ保存可、provisional な variation_name=group_name を維持)
+        // 0 件: variation_name = group_name (親のみ保存可)
         // 1 件: 自動選択
-        // 2 件以上: ユーザー選択を要求。variation_name を空にして submit を弾く (form 側で required チェック)
-        if (arr.length === 1 && value.variation_id == null) {
+        // 2 件以上: variation_name='' のまま (ユーザー選択を待つ、form は required で弾く)
+        if (arr.length === 0 && value.variation_id == null && value.variation_name === '') {
+          onChange({
+            parent_group_id: value.parent_group_id,
+            parent_group_name: value.parent_group_name,
+            variation_id: null,
+            variation_name: value.parent_group_name,
+            variation_text: null,
+            variation_jan: null,
+          });
+        } else if (arr.length === 1 && value.variation_id == null) {
           const v = arr[0];
           const vid = toIntId(v.id);
           onChange({
@@ -169,16 +178,6 @@ export default function ProductPicker({
             variation_name: formatVariationName(v),
             variation_text: v.variation,
             variation_jan: v.jan_code,
-          });
-        } else if (arr.length >= 2 && value.variation_id == null) {
-          // 既に provisional な variation_name=group_name が入っているのを空に戻し、submit を強制的に拒否させる
-          onChange({
-            parent_group_id: value.parent_group_id,
-            parent_group_name: value.parent_group_name,
-            variation_id: null,
-            variation_name: '',
-            variation_text: null,
-            variation_jan: null,
           });
         }
       })
@@ -206,14 +205,14 @@ export default function ProductPicker({
       setOpen(false);
       return;
     }
-    // 子バリエーション選択前の暫定 variation_name は親 group_name にフォールバック。
-    // 子 0 件のグループでも record-form の product_name_text NOT NULL を満たして保存できる。
-    // 子を picker で選択した時点で pickVariation() が上書きする。
+    // 子バリエーション選択前は variation_name='' にして submit を強制的に弾く (record + knowledge 両方)。
+    // - record: fetchVariations 完了後に 0件→group_name、1件→auto-select、2+件→空のまま (ユーザー選択待ち)
+    // - knowledge: fetchVariations は呼ばれないので useEffect 内で context='knowledge' 時に group_name を入れる
     onChange({
       parent_group_id: intId,
       parent_group_name: item.group_name,
       variation_id: null,
-      variation_name: item.group_name,
+      variation_name: context === 'knowledge' ? item.group_name : '',
       variation_text: null,
       variation_jan: null,
     });
