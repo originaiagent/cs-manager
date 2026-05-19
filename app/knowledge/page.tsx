@@ -272,6 +272,27 @@ async function ProductGrid({ searchParams }: { searchParams: SearchParams }) {
     };
   });
 
+  // Core 一覧に含まれない (取得失敗 / 削除 / truncated) が、記事が紐付いている孤児 product_id は
+  // 既存ナレッジへの導線を維持するため fallback row として追加 (product_name 解決不能なら id=... 表示)
+  const coveredIds = new Set(cards.map((c) => c.product_id));
+  const orphanIds = Array.from(aggMap.keys()).filter((id) => !coveredIds.has(id));
+  if (orphanIds.length > 0) {
+    const orphanResolved = await resolveProductsByIds(orphanIds);
+    for (const id of orphanIds) {
+      const agg = aggMap.get(id)!;
+      const resolved = orphanResolved.get(id);
+      cards.push({
+        product_id: id,
+        product_name: resolved?.name ?? `id=${id}`,
+        variation: resolved?.variation ?? null,
+        article_count: agg.article_count,
+        total_reference_count: agg.total_reference_count,
+        latest_updated_at: agg.latest_updated_at,
+        top_tags: Array.from(agg.tag_counts.entries()).sort((x, y) => y[1] - x[1]).map(([t]) => t),
+      });
+    }
+  }
+
   // 検索フィルタ (商品名 / variation)
   const qStr = searchParams.q?.trim().toLowerCase() ?? '';
   let filtered = cards;

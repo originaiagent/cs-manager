@@ -73,7 +73,9 @@ export async function listCoreProducts(
       };
     }
     const firstJson = await first.json();
-    const firstData: any[] = firstJson?.data ?? [];
+    const firstData: any[] = Array.isArray(firstJson)
+      ? firstJson
+      : (firstJson?.data ?? firstJson?.products ?? []);
     const total: number = firstJson?.meta?.total ?? firstData.length;
     let all: any[] = [...firstData];
     let truncated = false;
@@ -92,7 +94,7 @@ export async function listCoreProducts(
           });
           if (!r.ok) return [];
           const j = await r.json();
-          return j?.data ?? [];
+          return Array.isArray(j) ? j : (j?.data ?? j?.products ?? []);
         }),
       );
       for (const p of pages) all = all.concat(p);
