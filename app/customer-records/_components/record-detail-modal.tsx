@@ -62,10 +62,14 @@ export default function RecordDetailModal({ record, onClose }: Props) {
       {record.variation_text && (
         <div className="text-[11px] text-gray-500 mt-0.5">{record.variation_text}</div>
       )}
-      {record.product_id != null && (
+      {record.variation_jan && (
+        <div className="text-[10px] text-gray-400 mt-0.5">JAN: {record.variation_jan}</div>
+      )}
+      {(record.product_id != null || record.variation_id != null) && (
         <div className="text-[10px] text-gray-400 mt-0.5 inline-flex items-center gap-1">
           <Hash size={10} />
-          {record.product_id}
+          {record.product_id != null && <span>group={record.product_id}</span>}
+          {record.variation_id != null && <span>/variation={record.variation_id}</span>}
         </div>
       )}
     </div>

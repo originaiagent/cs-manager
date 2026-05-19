@@ -3,25 +3,54 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Search, Edit3, RotateCcw } from 'lucide-react';
 import { suggestProducts } from '@/lib/actions/suggest-products';
+import { fetchVariations } from '@/app/customer-records/_actions/fetch-variations';
+
+/**
+ * 親 + 子バリエーション選択用 Picker (PR-EF: Core 親子構造に厳密準拠)。
+ *
+ * I/F:
+ *   parent_group_id: 親 product_groups.id (Core)
+ *   variation_id:    子 products.id (Core) - record context のみ
+ *   variation_name:  表示用商品名 (record では子 product_name、knowledge では親 group_name)
+ *   variation_jan:   子バリエーション JAN スナップショット
+ *
+ * 動作:
+ *   - 通常モード (search): 親グループ検索 → 親選択 → (record context のみ) 子取得
+ *     - 子 0 件: variation_id=null のまま (親のみ保存可)
+ *     - 子 1 件: 自動選択
+ *     - 子 2 件以上: プルダウン
+ *   - 手入力モード (manual): allowManualInput=true 時のみトグル可
+ */
 
 export interface ProductPickerValue {
-  id: number | null;       // Core product_id (手入力時は null)
-  product_name: string;     // 必須 (DB product_name_text)
-  variation: string | null; // DB variation_text
+  parent_group_id: number | null;
+  parent_group_name: string;
+  variation_id: number | null;
+  variation_name: string;          // 表示用: product_name + (variation あれば付加)
+  variation_text: string | null;   // Core products.variation 単体 (defect-rate 分析用)
+  variation_jan: string | null;
 }
 
-interface SuggestItem {
+interface SuggestGroupItem {
+  id: string;
+  group_name: string;
+  developer?: string | null;
+}
+
+interface VariationItem {
   id: string;
   product_name: string;
-  variation?: string | null;
+  variation: string | null;
+  jan_code: string | null;
 }
 
 interface Props {
   value: ProductPickerValue;
   onChange: (v: ProductPickerValue) => void;
+  context: 'knowledge' | 'record';  // knowledge: 親のみ / record: 親+子バリエーション
   label?: string;
   required?: boolean;
-  allowManualInput?: boolean; // default true
+  allowManualInput?: boolean;
 }
 
 function toIntId(s: string): number | null {
@@ -29,30 +58,44 @@ function toIntId(s: string): number | null {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
+function formatVariationName(p: { product_name: string; variation: string | null }): string {
+  if (!p.variation) return p.product_name;
+  return `${p.product_name} / ${p.variation}`;
+}
+
 export default function ProductPicker({
   value,
   onChange,
+  context,
   label = '商品',
   required = false,
   allowManualInput = true,
 }: Props) {
-  // 初期モード判定: id=null かつ product_name あり → 手入力モード
-  const initialManual = value.id == null && value.product_name.length > 0;
+  // 初期モード判定:
+  //   parent_group_id == null かつ variation_name あり → 手入力モード (旧データ含む)
+  //   parent_group_id あり → 検索モード(選択済み表示)
+  const initialManual = value.parent_group_id == null && value.variation_name.length > 0;
   const [manualMode, setManualMode] = useState(initialManual);
 
   // 検索モード state
   const [q, setQ] = useState('');
-  const [items, setItems] = useState<SuggestItem[]>([]);
+  const [items, setItems] = useState<SuggestGroupItem[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seqRef = useRef(0);
 
+  // 子バリエーション state
+  const [variations, setVariations] = useState<VariationItem[]>([]);
+  const [loadingVariations, setLoadingVariations] = useState(false);
+  const [variationError, setVariationError] = useState<string | null>(null);
+  const variationSeqRef = useRef(0);
+
+  // 検索 debounce
   useEffect(() => {
     if (manualMode) return;
     if (!q.trim()) {
-      // 検索中の in-flight レスポンスが古い結果でドロップダウンを再開しないよう seq を進める
       seqRef.current += 1;
       setItems([]);
       setLoading(false);
@@ -67,7 +110,7 @@ export default function ProductPicker({
         const result = await suggestProducts(q.trim());
         if (mySeq !== seqRef.current) return;
         if (!result.ok) throw new Error(result.error ?? 'サジェスト取得失敗');
-        setItems(result.items ?? []);
+        setItems((result.items ?? []) as SuggestGroupItem[]);
         setOpen(true);
       } catch (e: any) {
         if (mySeq !== seqRef.current) return;
@@ -82,24 +125,127 @@ export default function ProductPicker({
     };
   }, [q, manualMode]);
 
-  function pick(item: SuggestItem) {
+  // 親選択後の子バリエーション取得 (record context のみ)
+  useEffect(() => {
+    if (manualMode) {
+      // モード切替時に in-flight な variation fetch を破棄
+      variationSeqRef.current += 1;
+      setVariations([]);
+      setLoadingVariations(false);
+      return;
+    }
+    if (context !== 'record') return;
+    const gid = value.parent_group_id;
+    if (gid == null) {
+      // 親 clear 時に in-flight な variation fetch を破棄
+      variationSeqRef.current += 1;
+      setVariations([]);
+      setLoadingVariations(false);
+      return;
+    }
+    const mySeq = ++variationSeqRef.current;
+    setLoadingVariations(true);
+    setVariationError(null);
+    fetchVariations(String(gid))
+      .then((r) => {
+        if (mySeq !== variationSeqRef.current) return;
+        if (!r.ok) {
+          setVariationError(r.error ?? '取得失敗');
+          setVariations([]);
+          return;
+        }
+        const arr = r.variations ?? [];
+        setVariations(arr);
+        // 0 件: variation_name = group_name (親のみ保存可)
+        // 1 件: 自動選択
+        // 2 件以上: variation_name='' のまま (ユーザー選択を待つ、form は required で弾く)
+        if (arr.length === 0 && value.variation_id == null && value.variation_name === '') {
+          onChange({
+            parent_group_id: value.parent_group_id,
+            parent_group_name: value.parent_group_name,
+            variation_id: null,
+            variation_name: value.parent_group_name,
+            variation_text: null,
+            variation_jan: null,
+          });
+        } else if (arr.length === 1 && value.variation_id == null) {
+          const v = arr[0];
+          const vid = toIntId(v.id);
+          onChange({
+            parent_group_id: value.parent_group_id,
+            parent_group_name: value.parent_group_name,
+            variation_id: vid,
+            variation_name: formatVariationName(v),
+            variation_text: v.variation,
+            variation_jan: v.jan_code,
+          });
+        }
+      })
+      .finally(() => {
+        if (mySeq === variationSeqRef.current) setLoadingVariations(false);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value.parent_group_id, context, manualMode]);
+
+  function pickGroup(item: SuggestGroupItem) {
     const intId = toIntId(item.id);
     if (intId == null) {
-      // 数値化失敗 → 手入力扱い (product_name のみ採用)
-      onChange({ id: null, product_name: item.product_name, variation: item.variation ?? null });
+      // 数値化失敗 → 手入力扱い
+      onChange({
+        parent_group_id: null,
+        parent_group_name: '',
+        variation_id: null,
+        variation_name: item.group_name,
+        variation_text: null,
+        variation_jan: null,
+      });
       setManualMode(true);
-    } else {
-      onChange({ id: intId, product_name: item.product_name, variation: item.variation ?? null });
+      setQ('');
+      setItems([]);
+      setOpen(false);
+      return;
     }
+    // 子バリエーション選択前は variation_name='' にして submit を強制的に弾く (record + knowledge 両方)。
+    // - record: fetchVariations 完了後に 0件→group_name、1件→auto-select、2+件→空のまま (ユーザー選択待ち)
+    // - knowledge: fetchVariations は呼ばれないので useEffect 内で context='knowledge' 時に group_name を入れる
+    onChange({
+      parent_group_id: intId,
+      parent_group_name: item.group_name,
+      variation_id: null,
+      variation_name: context === 'knowledge' ? item.group_name : '',
+      variation_text: null,
+      variation_jan: null,
+    });
     setQ('');
     setItems([]);
     setOpen(false);
+    setVariations([]);
+  }
+
+  function pickVariation(v: VariationItem) {
+    const vid = toIntId(v.id);
+    onChange({
+      parent_group_id: value.parent_group_id,
+      parent_group_name: value.parent_group_name,
+      variation_id: vid,
+      variation_name: formatVariationName(v),
+      variation_text: v.variation,
+      variation_jan: v.jan_code,
+    });
   }
 
   function clearSelection() {
-    onChange({ id: null, product_name: '', variation: null });
+    onChange({
+      parent_group_id: null,
+      parent_group_name: '',
+      variation_id: null,
+      variation_name: '',
+      variation_text: null,
+      variation_jan: null,
+    });
     setQ('');
     setItems([]);
+    setVariations([]);
   }
 
   function enterManual() {
@@ -111,7 +257,14 @@ export default function ProductPicker({
 
   function backToSearch() {
     setManualMode(false);
-    onChange({ id: null, product_name: '', variation: null });
+    onChange({
+      parent_group_id: null,
+      parent_group_name: '',
+      variation_id: null,
+      variation_name: '',
+      variation_text: null,
+      variation_jan: null,
+    });
   }
 
   // ---- 手入力モード ----
@@ -130,23 +283,55 @@ export default function ProductPicker({
             <RotateCcw size={11} /> Core 検索に戻る
           </button>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        {context === 'record' ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            <input
+              type="text"
+              name="product_name_text"
+              value={value.variation_name}
+              onChange={(e) =>
+                onChange({
+                  ...value,
+                  parent_group_id: null,
+                  variation_id: null,
+                  variation_name: e.target.value,
+                  // 手入力モードでは variation_text を UI 表示しないため、変更時に stale 値を clear する
+                  variation_text: null,
+                })
+              }
+              placeholder="商品名 (必須)"
+              required={required}
+              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+            />
+            <input
+              type="text"
+              name="variation_jan"
+              value={value.variation_jan ?? ''}
+              onChange={(e) =>
+                onChange({ ...value, variation_jan: e.target.value || null })
+              }
+              placeholder="JAN (任意)"
+              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+            />
+          </div>
+        ) : (
           <input
             type="text"
-            value={value.product_name}
-            onChange={(e) => onChange({ ...value, id: null, product_name: e.target.value })}
+            name="product_name_text"
+            value={value.variation_name}
+            onChange={(e) =>
+              onChange({
+                ...value,
+                parent_group_id: null,
+                variation_id: null,
+                variation_name: e.target.value,
+              })
+            }
             placeholder="商品名 (必須)"
             required={required}
             className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
           />
-          <input
-            type="text"
-            value={value.variation ?? ''}
-            onChange={(e) => onChange({ ...value, variation: e.target.value || null })}
-            placeholder="バリエーション (任意)"
-            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
-          />
-        </div>
+        )}
         <p className="text-[10px] text-gray-400">
           Core 商品マスタに存在しない商品を入力する場合のみ使用してください
         </p>
@@ -155,28 +340,84 @@ export default function ProductPicker({
   }
 
   // ---- 検索モード ----
-  const hasSelection = value.id != null;
+  const hasParent = value.parent_group_id != null;
 
   return (
     <div className="space-y-2">
       <label className="block text-xs font-medium text-gray-600">
         {label}{required && <span className="text-rose-600 ml-1">*</span>}
       </label>
-      {hasSelection ? (
-        <div className="flex flex-wrap gap-1.5 items-center">
-          <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-xs text-violet-700">
-            <span className="font-medium">{value.product_name}</span>
-            {value.variation && <span className="text-violet-500 ml-1">/ {value.variation}</span>}
-            <span className="text-violet-400 ml-1">id={value.id}</span>
-            <button
-              type="button"
-              onClick={clearSelection}
-              className="hover:text-violet-900"
-              aria-label="選択解除"
-            >
-              <X size={12} />
-            </button>
-          </span>
+      {hasParent ? (
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-1.5 items-center">
+            <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-xs text-violet-700">
+              <span className="font-medium">{value.parent_group_name || `id=${value.parent_group_id}`}</span>
+              {value.variation_id != null && value.variation_name && (
+                <span className="text-violet-500 ml-1">/ {value.variation_name}</span>
+              )}
+              {value.variation_jan && (
+                <span className="text-violet-400 ml-1">JAN={value.variation_jan}</span>
+              )}
+              <span className="text-violet-400 ml-1">group_id={value.parent_group_id}</span>
+              {value.variation_id != null && (
+                <span className="text-violet-400 ml-0.5">/variation_id={value.variation_id}</span>
+              )}
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="hover:text-violet-900"
+                aria-label="選択解除"
+              >
+                <X size={12} />
+              </button>
+            </span>
+          </div>
+          {context === 'record' && (
+            <div>
+              {loadingVariations && (
+                <p className="text-[11px] text-gray-500">バリエーション取得中…</p>
+              )}
+              {variationError && (
+                <p className="text-[11px] text-rose-600">バリエーション取得失敗: {variationError}</p>
+              )}
+              {!loadingVariations && !variationError && variations.length === 0 && (
+                <p className="text-[11px] text-gray-400">バリエーション無し (親のみ)</p>
+              )}
+              {!loadingVariations && !variationError && variations.length >= 2 && (
+                <div>
+                  <label className="block text-[11px] text-gray-500 mb-1">バリエーション選択</label>
+                  <select
+                    value={value.variation_id != null ? String(value.variation_id) : ''}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      if (!id) {
+                        onChange({
+                          ...value,
+                          variation_id: null,
+                          variation_name: '',
+                          variation_jan: null,
+                        });
+                        return;
+                      }
+                      const v = variations.find((x) => x.id === id);
+                      if (v) pickVariation(v);
+                    }}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
+                  >
+                    <option value="">(選択してください)</option>
+                    {variations.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {formatVariationName(v)}{v.jan_code ? ` (JAN: ${v.jan_code})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {!loadingVariations && !variationError && variations.length === 1 && value.variation_id != null && (
+                <p className="text-[11px] text-gray-400">バリエーション 1 件 (自動選択済み)</p>
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <div className="relative">
@@ -187,7 +428,7 @@ export default function ProductPicker({
             onChange={(e) => setQ(e.target.value)}
             onFocus={() => items.length > 0 && setOpen(true)}
             onBlur={() => setTimeout(() => setOpen(false), 150)}
-            placeholder="商品名で検索 (Core商品マスタ)"
+            placeholder="商品名で検索 (Core 親グループマスタ)"
             className="w-full rounded-lg border border-gray-200 pl-9 pr-3 py-2 text-sm focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
           />
           {open && (items.length > 0 || loading || error) && (
@@ -198,11 +439,13 @@ export default function ProductPicker({
                 <button
                   type="button"
                   key={item.id}
-                  onMouseDown={() => pick(item)}
+                  onMouseDown={() => pickGroup(item)}
                   className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 border-b border-gray-100 last:border-b-0"
                 >
-                  <span className="text-gray-900">{item.product_name}</span>
-                  {item.variation && <span className="text-gray-500 ml-1">/ {item.variation}</span>}
+                  <span className="text-gray-900">{item.group_name}</span>
+                  {item.developer && (
+                    <span className="text-gray-500 ml-1">/ {item.developer}</span>
+                  )}
                   <span className="text-gray-400 ml-2">id={item.id}</span>
                 </button>
               ))}
@@ -210,7 +453,7 @@ export default function ProductPicker({
           )}
         </div>
       )}
-      {allowManualInput && !hasSelection && (
+      {allowManualInput && !hasParent && (
         <button
           type="button"
           onClick={enterManual}

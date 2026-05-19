@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import PageHeader from '@/components/ui/page-header';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
-import { resolveProductsByIds } from '@/lib/product-resolver';
+import { resolveProductGroupsByIds } from '@/lib/product-resolver';
 import ArticleForm from '../_components/article-form';
 
 export const dynamic = 'force-dynamic';
@@ -28,11 +28,11 @@ export default async function NewKnowledgePage({ searchParams }: { searchParams:
   const productId = scope === 'product' ? (searchParams.product_id ?? null) : null;
   const storeId = scope === 'store' ? (searchParams.store_id ?? null) : null;
 
-  // 商品名解決 (商品別スコープ時のみ)
-  let resolvedProductName: string | null = null;
+  // 親グループ名解決 (商品別スコープ時のみ)
+  let resolvedProductGroupName: string | null = null;
   if (productId) {
-    const m = await resolveProductsByIds([productId]);
-    resolvedProductName = m.get(productId)?.name ?? null;
+    const m = await resolveProductGroupsByIds([productId]);
+    resolvedProductGroupName = m.get(productId)?.group_name ?? null;
   }
 
   const initial = (scope === 'company' && !productId && !storeId)
@@ -41,7 +41,7 @@ export default async function NewKnowledgePage({ searchParams }: { searchParams:
         storage_scope: scope,
         storage_product_id: productId,
         storage_store_id: storeId,
-        resolved_product_name: resolvedProductName,
+        resolved_product_group_name: resolvedProductGroupName,
       };
 
   return (

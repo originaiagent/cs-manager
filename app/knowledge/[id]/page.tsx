@@ -7,7 +7,7 @@ import ScopeBadge from '@/components/ui/scope-badge';
 import StatusBadge from '@/components/ui/status-badge';
 import ChannelBadge from '@/components/ui/channel-badge';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
-import { resolveProductsByIds } from '@/lib/product-resolver';
+import { resolveProductsByIds, resolveProductGroupsByIds } from '@/lib/product-resolver';
 import { CASE_CATEGORY_LABELS, DEFECT_TYPE_LABELS, formatDateTime } from '@/lib/format';
 import DeleteButton from './_components/delete-button';
 
@@ -36,10 +36,25 @@ export default async function KnowledgeDetail({
   const storeDisplayMap: Record<string, string> = {};
   for (const c of channelsRaw ?? []) storeDisplayMap[c.code] = c.display_name;
 
-  const productIds = new Set<string>();
-  if (a.storage_product_id) productIds.add(a.storage_product_id);
-  for (const pid of a.applies_to_products ?? []) productIds.add(pid);
-  const products = await resolveProductsByIds(Array.from(productIds));
+  // storage_product_id は親 product_groups.id (PR-EF 以降)
+  // applies_to_products[] は新スキーマでは親 group_id を含む可能性あり (suggest が親グループ化済)、
+  // 旧データは子 products.id を含む可能性あり。両 resolver で照会し resolved=true 優先で表示。
+  const appliesIds: string[] = a.applies_to_products ?? [];
+  const allLookupIds: string[] = [];
+  if (a.storage_product_id) allLookupIds.push(a.storage_product_id);
+  for (const pid of appliesIds) allLookupIds.push(pid);
+  const [products, groups] = await Promise.all([
+    resolveProductsByIds(allLookupIds),
+    resolveProductGroupsByIds(allLookupIds),
+  ]);
+  function pickName(id: string): string {
+    const g = groups.get(id);
+    if (g?.resolved) return g.group_name;
+    const p = products.get(id);
+    if (p?.resolved) return p.name;
+    return `id=${id}`;
+  }
+  const storageGroupName: string | null = a.storage_product_id ? pickName(a.storage_product_id) : null;
 
   return (
     <div className="max-w-3xl">
@@ -74,9 +89,7 @@ export default async function KnowledgeDetail({
             a.storage_store_id ? storeDisplayMap[a.storage_store_id] : null
           }
           productId={a.storage_product_id}
-          productName={
-            a.storage_product_id ? products.get(a.storage_product_id)?.name : null
-          }
+          productName={storageGroupName}
         />
         <StatusBadge status={a.status} variant="knowledge" />
         {a.tags?.map((t: string) => (
@@ -132,7 +145,7 @@ export default async function KnowledgeDetail({
                     key={p}
                     className="inline-flex items-center rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] text-violet-700"
                   >
-                    {products.get(p)?.name ?? `id=${p}`}
+                    {pickName(p)}
                   </span>
                 ))}
               </div>

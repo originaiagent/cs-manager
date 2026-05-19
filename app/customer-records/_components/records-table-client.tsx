@@ -10,6 +10,8 @@ export interface CustomerRecord {
   product_id: number | null;
   product_name_text: string;
   variation_text: string | null;
+  variation_id: number | null;
+  variation_jan: string | null;
   recipient_name: string;
   recipient_honorific: string;
   order_number: string | null;
@@ -80,10 +82,14 @@ export default function RecordsTableClient({ records }: Props) {
                   {r.variation_text && (
                     <div className="text-[11px] text-gray-500 mt-0.5">{r.variation_text}</div>
                   )}
-                  {r.product_id != null && (
+                  {r.variation_jan && (
+                    <div className="text-[10px] text-gray-400 mt-0.5">JAN: {r.variation_jan}</div>
+                  )}
+                  {(r.product_id != null || r.variation_id != null) && (
                     <div className="text-[10px] text-gray-400 mt-0.5 inline-flex items-center gap-1">
                       <Hash size={10} />
-                      {r.product_id}
+                      {r.product_id != null && <span>group={r.product_id}</span>}
+                      {r.variation_id != null && <span>/variation={r.variation_id}</span>}
                     </div>
                   )}
                 </td>
