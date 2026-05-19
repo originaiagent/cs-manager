@@ -85,7 +85,7 @@ export async function listCoreProducts(
       const offsets: number[] = [];
       for (let off = PAGE_LIMIT; off < maxTarget; off += PAGE_LIMIT) offsets.push(off);
       const pages = await Promise.all(
-        offsets.map(async (off) => {
+        offsets.map(async (off): Promise<{ ok: boolean; rows: any[]; error?: string }> => {
           const url = `${base}/api/v1/master/products?limit=${PAGE_LIMIT}&offset=${off}&fields=${encodeURIComponent(fields)}`;
           const r = await fetch(url, {
             method: 'GET',
@@ -93,12 +93,21 @@ export async function listCoreProducts(
             cache: 'no-store',
             signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
           });
-          if (!r.ok) return [];
+          if (!r.ok) {
+            const txt = await r.text().catch(() => '');
+            return { ok: false, rows: [], error: `offset=${off} ${r.status}: ${txt.slice(0, 120)}` };
+          }
           const j = await r.json();
-          return Array.isArray(j) ? j : (j?.data ?? j?.products ?? []);
+          const rows = Array.isArray(j) ? j : (j?.data ?? j?.products ?? []);
+          return { ok: true, rows };
         }),
       );
-      for (const p of pages) all = all.concat(p);
+      const failed = pages.find((p) => !p.ok);
+      if (failed) {
+        // 部分結果は cache せず、UI でエラー表示できるよう ok:false を返す
+        return { ok: false, items: [], truncated: false, error: `paginated fetch failed: ${failed.error}` };
+      }
+      for (const p of pages) all = all.concat(p.rows);
       if (total > MAX_PRODUCTS_FOR_GRID) {
         truncated = true;
         // TODO: 10万件規模になったら Core 側 q= サーバ検索 + virtualized list に切替
