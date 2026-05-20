@@ -36,6 +36,7 @@ const ACTION_LABEL: Record<string, string> = {
   reship_defect: '不良で再送',
   refund_defect: '不良で返金',
   reship_customer: '客都合で再送',
+  refund_customer: '客都合で返金',
   addon_send: '追加発送',
   relation_send: '関係性発送',
 };
