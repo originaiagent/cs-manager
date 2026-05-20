@@ -14,6 +14,7 @@ const ACTION_TYPE_OPTIONS = [
   { value: 'reship_defect', label: '不良で再送' },
   { value: 'refund_defect', label: '不良で返金' },
   { value: 'reship_customer', label: 'お客様都合で再送' },
+  { value: 'refund_customer', label: 'お客様都合で返金' },
   { value: 'addon_send', label: '追加発送' },
   { value: 'relation_send', label: '関係性発送' },
 ];

@@ -16,6 +16,7 @@ const ALLOWED_ACTION_TYPES = [
   'reship_defect',
   'refund_defect',
   'reship_customer',
+  'refund_customer',
   'addon_send',
   'relation_send',
 ] as const;
