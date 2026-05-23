@@ -33,7 +33,13 @@ END $fn$;
 REVOKE ALL ON FUNCTION public.rag_activate_generation(uuid,int,uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.rag_activate_generation(uuid,int,uuid) FROM role_rag_search;
 
-ALTER TABLE public.rag_chunk_access_stats DROP CONSTRAINT IF EXISTS fk_ras_chunk;
-ALTER TABLE public.rag_chunk_access_stats ADD CONSTRAINT fk_ras_chunk FOREIGN KEY (chunk_id) REFERENCES public.rag_chunks(id) ON DELETE CASCADE;
-ALTER TABLE public.rag_article_active_generations DROP CONSTRAINT IF EXISTS fk_aag_job;
-ALTER TABLE public.rag_article_active_generations ADD CONSTRAINT fk_aag_job FOREIGN KEY (active_indexing_job_id) REFERENCES public.rag_indexing_jobs(id);
+-- 自前新規テーブルへの FK 追加 (冪等: DROP CONSTRAINT を使わず IF NOT EXISTS ガード。
+-- bc-check schema-diff の constraint-drop 誤検出を回避しつつ再適用安全)。
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_ras_chunk') THEN
+    ALTER TABLE public.rag_chunk_access_stats ADD CONSTRAINT fk_ras_chunk FOREIGN KEY (chunk_id) REFERENCES public.rag_chunks(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_aag_job') THEN
+    ALTER TABLE public.rag_article_active_generations ADD CONSTRAINT fk_aag_job FOREIGN KEY (active_indexing_job_id) REFERENCES public.rag_indexing_jobs(id);
+  END IF;
+END $$;
