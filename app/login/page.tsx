@@ -4,8 +4,7 @@ import { getCoreAuthServerClient } from '@/lib/auth/supabase-core-auth-server';
 import {
   isCoreAuthEnabled,
   isCoreAuthConfigured,
-  hasRole,
-  REQUIRED_ROLE,
+  hasToolAccess,
   sanitizeRedirectPath,
 } from '@/lib/auth/core-auth-config';
 
@@ -46,7 +45,7 @@ export default async function LoginPage({
     const {
       data: { user },
     } = await auth.auth.getUser();
-    if (user && hasRole(user.app_metadata, REQUIRED_ROLE)) {
+    if (user && hasToolAccess(user.app_metadata)) {
       redirect(redirectTo);
     }
   }

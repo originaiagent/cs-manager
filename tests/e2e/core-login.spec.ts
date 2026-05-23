@@ -16,15 +16,15 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Core login (Third-Party Auth)', () => {
   test.fixme(
-    'authenticated cs_manager user can reach protected pages, others are redirected',
+    'user with tool_access[cs-manager] can reach protected pages, others are redirected',
     async ({ page }) => {
       // BLOCKED: JWKS provider not yet registered in jpnsoqzzylahpandbfcz
       // and NEXT_PUBLIC_CORE_AUTH_ENABLED is OFF. Do not fake a pass.
 
       // 想定フロー (provider 登録 + フラグ ON 後に実装):
       //   1. 未ログインで / にアクセス → /login?redirect=%2F へリダイレクト
-      //   2. Core アカウント (cs_manager ロール保有) でログイン → redirect 先へ
-      //   3. cs_manager ロール無しアカウント → /login?error=forbidden
+      //   2. Core アカウント (tool_access['cs-manager']===true) でログイン → redirect 先へ
+      //   3. tool_access['cs-manager'] 無しアカウント → /login?error=forbidden
       await page.goto('/');
       expect(page.url()).toContain('/login');
     },
