@@ -2,8 +2,21 @@
 
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { Sparkles, Save, Loader2, RefreshCw, Pencil, Check } from 'lucide-react';
+import {
+  Sparkles,
+  Save,
+  Loader2,
+  RefreshCw,
+  Pencil,
+  Check,
+  BookOpen,
+  AlertTriangle,
+} from 'lucide-react';
 import { generateAiDraft } from '../_actions/generate-ai-draft';
+import {
+  generateRagDraft,
+  type RagCitation,
+} from '../_actions/generate-rag-draft';
 import { saveDraft } from '../_actions/save-draft';
 
 interface Props {
@@ -19,6 +32,23 @@ type AiState =
   | { kind: 'preview'; draft: string; durationMs: number }
   | { kind: 'error'; error: string };
 
+type RagState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | {
+      kind: 'preview';
+      draft: string;
+      citations: RagCitation[];
+      confidence: number | null;
+      needsHuman: boolean;
+      noAnswer: boolean;
+      searchHitCount: number;
+      model: string | null;
+      withinBusinessHours: boolean | null;
+      durationMs: number;
+    }
+  | { kind: 'error'; error: string };
+
 export default function ReplyForm({
   ticketId,
   initialBody,
@@ -32,6 +62,7 @@ export default function ReplyForm({
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [ai, setAi] = useState<AiState>({ kind: 'idle' });
+  const [rag, setRag] = useState<RagState>({ kind: 'idle' });
   const [, startTransition] = useTransition();
 
   async function saveManual() {
@@ -94,6 +125,54 @@ export default function ReplyForm({
     setAi({ kind: 'idle' });
   }
 
+  async function generateRag() {
+    setRag({ kind: 'loading' });
+    const startedAt = Date.now();
+    const result = await generateRagDraft(ticketId);
+    if (!result.ok || typeof result.draft !== 'string') {
+      setRag({ kind: 'error', error: result.error ?? 'unknown error' });
+      return;
+    }
+    setRag({
+      kind: 'preview',
+      draft: result.draft,
+      citations: result.citations ?? [],
+      confidence: result.confidence ?? null,
+      needsHuman: result.needsHuman ?? false,
+      noAnswer: result.noAnswer ?? false,
+      searchHitCount: result.searchHitCount ?? 0,
+      model: result.model ?? null,
+      withinBusinessHours: result.withinBusinessHours ?? null,
+      durationMs: result.durationMs ?? Date.now() - startedAt,
+    });
+  }
+
+  async function adoptRagDraft() {
+    if (rag.kind !== 'preview') return;
+    setBody(rag.draft);
+    setSource('rag');
+    setRag({ kind: 'idle' });
+    // 採用 = source='rag' で永続化
+    try {
+      const r = await saveDraft(ticketId, rag.draft, 'rag');
+      if (!r.ok) {
+        setSaveError(r.error ?? '保存に失敗しました');
+        return;
+      }
+      setSavedAt(new Date().toISOString());
+      startTransition(() => router.refresh());
+    } catch (e: any) {
+      setSaveError(e?.message ?? '保存に失敗しました');
+    }
+  }
+
+  function editRagDraft() {
+    if (rag.kind !== 'preview') return;
+    setBody(rag.draft);
+    setSource('rag');
+    setRag({ kind: 'idle' });
+  }
+
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4">
       <div className="flex items-center justify-between mb-3">
@@ -101,7 +180,12 @@ export default function ReplyForm({
         <div className="flex items-center gap-2">
           {source && (
             <span className="text-[10px] text-gray-400">
-              下書きソース: {source === 'ai_draft' ? 'AI生成' : '手動'}
+              下書きソース:{' '}
+              {source === 'ai_draft'
+                ? 'AI生成'
+                : source === 'rag'
+                  ? 'RAG返信案'
+                  : '手動'}
             </span>
           )}
           {savedAt && (
@@ -167,6 +251,115 @@ export default function ReplyForm({
         </div>
       )}
 
+      {/* RAG 返信案プレビュー */}
+      {rag.kind === 'loading' && (
+        <div className="mb-3 rounded-lg border border-indigo-100 bg-indigo-50/50 p-4 flex items-center gap-3">
+          <Loader2 size={16} className="animate-spin text-indigo-500" />
+          <span className="text-sm text-indigo-700">
+            ナレッジを検索して返信案を生成中…
+          </span>
+        </div>
+      )}
+      {rag.kind === 'preview' && (
+        <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50/50 p-4">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-indigo-700 inline-flex items-center gap-1">
+              <BookOpen size={14} /> RAG 返信案 (引用元付き)
+            </span>
+            <span className="text-[10px] text-gray-500">
+              {rag.confidence != null &&
+                `確信度 ${Math.round(rag.confidence * 100)}% · `}
+              {rag.durationMs} ms
+            </span>
+          </div>
+
+          {/* 人間確認推奨の警告 (低 confidence / needs_human / no_answer / 引用ゼロ) */}
+          {(rag.needsHuman ||
+            rag.noAnswer ||
+            rag.citations.length === 0 ||
+            (rag.confidence != null && rag.confidence < 0.5)) && (
+            <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-800 inline-flex items-start gap-1.5 w-full">
+              <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+              <span>
+                ※自動生成、人間確認推奨
+                {rag.noAnswer && '（ナレッジで十分に回答できませんでした）'}
+                {!rag.noAnswer &&
+                  rag.citations.length === 0 &&
+                  '（引用元なし）'}
+              </span>
+            </div>
+          )}
+
+          <pre className="whitespace-pre-wrap text-sm text-gray-800 font-sans bg-white rounded-md border border-indigo-100 p-3 max-h-64 overflow-auto">
+            {rag.draft}
+          </pre>
+
+          {/* 引用元 */}
+          {rag.citations.length > 0 && (
+            <div className="mt-2">
+              <div className="text-[10px] font-semibold text-gray-500 tracking-wider mb-1">
+                引用元 ({rag.citations.length})
+              </div>
+              <ul className="space-y-1">
+                {rag.citations.map((c) => (
+                  <li
+                    key={c.chunk_id}
+                    className="rounded-md border border-indigo-100 bg-white px-2 py-1 text-[11px] text-gray-700 flex items-center justify-between gap-2"
+                  >
+                    <span className="inline-flex items-center gap-1 min-w-0">
+                      <BookOpen size={11} className="shrink-0 text-indigo-400" />
+                      <span className="truncate">
+                        {c.title || '(タイトルなし)'}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-[10px] text-gray-400">
+                      {c.rrf_score != null &&
+                        `score ${c.rrf_score.toFixed(3)} · `}
+                      chunk {c.chunk_id.slice(0, 8)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-2 mt-3">
+            <button
+              type="button"
+              onClick={generateRag}
+              className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+            >
+              <RefreshCw size={12} /> 再生成
+            </button>
+            <button
+              type="button"
+              onClick={editRagDraft}
+              className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+            >
+              <Pencil size={12} /> 編集
+            </button>
+            <button
+              type="button"
+              onClick={adoptRagDraft}
+              className="inline-flex items-center gap-1.5 rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600"
+            >
+              <Check size={12} /> 採用
+            </button>
+          </div>
+        </div>
+      )}
+      {rag.kind === 'error' && (
+        <div className="mb-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+          RAG 生成失敗: {rag.error}
+          <button
+            onClick={generateRag}
+            className="ml-2 underline hover:no-underline"
+          >
+            再試行
+          </button>
+        </div>
+      )}
+
       <textarea
         value={body}
         onChange={(e) => setBody(e.target.value)}
@@ -176,16 +369,28 @@ export default function ReplyForm({
       />
 
       <div className="flex items-center justify-between gap-3 mt-3">
-        <button
-          type="button"
-          onClick={generateAi}
-          disabled={ai.kind === 'loading'}
-          title={!productAvailable ? '製品情報なしで生成します' : undefined}
-          className="inline-flex items-center gap-2 rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <Sparkles size={14} />
-          {ai.kind === 'loading' ? '生成中…' : 'AI ドラフト生成'}
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={generateAi}
+            disabled={ai.kind === 'loading'}
+            title={!productAvailable ? '製品情報なしで生成します' : undefined}
+            className="inline-flex items-center gap-2 rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Sparkles size={14} />
+            {ai.kind === 'loading' ? '生成中…' : 'AI ドラフト生成'}
+          </button>
+          <button
+            type="button"
+            onClick={generateRag}
+            disabled={rag.kind === 'loading'}
+            title="ナレッジを検索し、引用元付きの返信案を生成します"
+            className="inline-flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <BookOpen size={14} />
+            {rag.kind === 'loading' ? '生成中…' : 'RAG 返信案生成'}
+          </button>
+        </div>
 
         <div className="flex items-center gap-2">
           {saveError && (

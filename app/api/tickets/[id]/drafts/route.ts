@@ -5,7 +5,7 @@ import { authorizeApiRoute } from '@/lib/auth/api-auth';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const ALLOWED_SOURCES = ['manual', 'ai_draft'] as const;
+const ALLOWED_SOURCES = ['manual', 'ai_draft', 'rag'] as const;
 
 export async function GET(
   req: NextRequest,
