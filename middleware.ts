@@ -2,8 +2,7 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 import {
   isCoreAuthEnabled,
-  hasRole,
-  REQUIRED_ROLE,
+  hasToolAccess,
 } from '@/lib/auth/core-auth-config';
 
 /**
@@ -15,7 +14,7 @@ import {
  *   1. Cookie の origin-core Supabase セッションを読み込む
  *   2. getUser() で origin-core 発行の JWT を検証
  *   3. 未ログイン → /login?redirect=<元パス> にリダイレクト
- *   4. ログイン済だが REQUIRED_ROLE を持たない → /login?error=forbidden
+ *   4. ログイン済だが tool_access['cs-manager'] を持たない → /login?error=forbidden
  *
  * 例外パス (USER ゲート対象外):
  *   - /login        : 認証画面そのもの
@@ -76,8 +75,8 @@ export async function middleware(req: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  // ログイン済でも cs-manager 用ロールが無ければアクセス不可。
-  if (!hasRole(user.app_metadata, REQUIRED_ROLE)) {
+  // ログイン済でも cs-manager 用 tool_access が無ければアクセス不可。
+  if (!hasToolAccess(user.app_metadata)) {
     const loginUrl = req.nextUrl.clone();
     loginUrl.pathname = '/login';
     loginUrl.search = '';

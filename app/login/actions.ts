@@ -3,10 +3,9 @@
 import { redirect } from 'next/navigation';
 import { getCoreAuthServerClient } from '@/lib/auth/supabase-core-auth-server';
 import {
-  hasRole,
+  hasToolAccess,
   isCoreAuthEnabled,
   isCoreAuthConfigured,
-  REQUIRED_ROLE,
   sanitizeRedirectPath,
 } from '@/lib/auth/core-auth-config';
 
@@ -46,9 +45,9 @@ export async function signInAction(formData: FormData): Promise<void> {
     redirectToLoginWithError(redirectTo, error.message);
   }
 
-  // cs-manager 用ロールを持たないアカウントはログインさせない
+  // cs-manager 用 tool_access を持たないアカウントはログインさせない
   // (signIn で発行された session は cookie に残らないよう signOut)。
-  if (!hasRole(data?.user?.app_metadata, REQUIRED_ROLE)) {
+  if (!hasToolAccess(data?.user?.app_metadata)) {
     await auth.auth.signOut();
     redirectToLoginWithError(redirectTo, 'このアカウントには cs-manager へのアクセス権がありません');
   }

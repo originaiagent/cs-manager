@@ -9,7 +9,7 @@
  * ユーザー認証ゲートの ON/OFF フラグ。
  *
  * - 既定 OFF: middleware は素通し = 現行 (ユーザーログイン無し) の挙動を完全維持。
- * - ON: ユーザー向けページに Core ログイン + ロール (`REQUIRED_ROLE`) を要求。
+ * - ON: ユーザー向けページに Core ログイン + tool_access (`TOOL_KEY`) を要求。
  *
  * 重要: cs-manager 側 Supabase に JWKS provider 未登録の状態で ON にすると
  * 全ユーザーがロックアウトされるため、provider 登録後にのみ ON にする運用。
@@ -33,27 +33,36 @@ export function isCoreAuthConfigured(): boolean {
 }
 
 /**
- * cs-manager へのアクセスに必要な Core ロール。
+ * cs-manager へのアクセス可否を判定する Core JWT のツールアクセスキー。
  *
- * - middleware のページゲートで `user.app_metadata.roles` に含まれることを要求する。
- * - 同じ文字列を Supabase 側 RLS の `has_role('cs_manager')` ポリシーでも使う
+ * PINNED JWT CONTRACT (core-tool-access と一致):
+ *   - `app_metadata.tool_access` は 8 個のハイフン付きツールキーを持つ object。
+ *     キーが存在しない場合は false 扱い (absent = false)。
+ *   - `app_metadata.is_admin` は boolean。
+ *
+ * - middleware のページゲートで `user.app_metadata.tool_access['cs-manager'] === true`
+ *   を要求する。
+ * - 同じキーを Supabase 側 RLS の `has_tool_access('cs-manager')` ポリシーでも使う
  *   (ページ層と DB 層の認可セマンティクスを一致させるため)。
  */
-export const REQUIRED_ROLE = 'cs_manager';
+export const TOOL_KEY = 'cs-manager';
 
 /**
- * Core の access token / user オブジェクトの app_metadata.roles から
- * 指定ロールを保持しているか判定する。
+ * Core の access token / user オブジェクトの app_metadata.tool_access から
+ * cs-manager のアクセス権を持つか判定する (fail-closed)。
  *
- * roles は string[] を期待。未定義・型不正時は false。
+ * tool_access は { [toolKey]: boolean } を期待。
+ * 厳密に `tool_access['cs-manager'] === true` のときのみ許可。
+ * 未定義・型不正 (配列含む)・欠如・true 以外の値は全て false。
  */
-export function hasRole(
+export function hasToolAccess(
   appMetadata: Record<string, unknown> | null | undefined,
-  role: string,
 ): boolean {
-  const roles = appMetadata?.roles;
-  if (!Array.isArray(roles)) return false;
-  return roles.includes(role);
+  const toolAccess = appMetadata?.tool_access;
+  if (!toolAccess || typeof toolAccess !== 'object' || Array.isArray(toolAccess)) {
+    return false;
+  }
+  return (toolAccess as Record<string, unknown>)[TOOL_KEY] === true;
 }
 
 /**
