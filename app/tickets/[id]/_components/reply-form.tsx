@@ -45,9 +45,13 @@ type RagState =
       searchHitCount: number;
       model: string | null;
       withinBusinessHours: boolean | null;
+      lowConfidenceThreshold: number;
       durationMs: number;
     }
   | { kind: 'error'; error: string };
+
+/** 低 confidence 警告の既定閾値 (サーバ rag_config 未取得時のみのフォールバック) */
+const DEFAULT_LOW_CONFIDENCE_THRESHOLD = 0.5;
 
 export default function ReplyForm({
   ticketId,
@@ -143,6 +147,8 @@ export default function ReplyForm({
       searchHitCount: result.searchHitCount ?? 0,
       model: result.model ?? null,
       withinBusinessHours: result.withinBusinessHours ?? null,
+      lowConfidenceThreshold:
+        result.lowConfidenceThreshold ?? DEFAULT_LOW_CONFIDENCE_THRESHOLD,
       durationMs: result.durationMs ?? Date.now() - startedAt,
     });
   }
@@ -277,7 +283,8 @@ export default function ReplyForm({
           {(rag.needsHuman ||
             rag.noAnswer ||
             rag.citations.length === 0 ||
-            (rag.confidence != null && rag.confidence < 0.5)) && (
+            (rag.confidence != null &&
+              rag.confidence < rag.lowConfidenceThreshold)) && (
             <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-800 inline-flex items-start gap-1.5 w-full">
               <AlertTriangle size={13} className="mt-0.5 shrink-0" />
               <span>

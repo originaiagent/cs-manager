@@ -7,6 +7,10 @@
  *     1. rag_config.rakuten_auto_send_enabled = true
  *     2. draft.source = 'first_response' かつ未送信 (status != 'sent', external_message_id 無)
  *     3. has_business_hours_defined(channel_id) = true (営業時間未定義での 24h auto-send 防止)
+ *     4. is_within_business_hours(channel_id, now) = false (codex R3 #4):
+ *        送信 POST の直前に再判定し、営業時間内なら送信を中止する。遅延実行や draft 再利用で
+ *        営業時間内に滑り込むのを防ぐ。判定が true → 'within_business_hours' で blocked、
+ *        RPC error/null → fail-closed で送信しない ('no_business_hours')。
  *
  * 冪等性: ticket_drafts.status / external_message_id で二重送信を防止 (DB の partial UNIQUE
  *   index と併せて二重生成も防止)。POST 成功直後に status='sent' を確定してから ID 解決する
@@ -14,24 +18,41 @@
  *
  * 送信経路: origin-core 経由ではなく cs-manager 直送 (既存踏襲)。R-MessE cred は
  *   getCredential('rakuten_rmesse', shopId) で Core から read のみ (origin-core DB 非書込)。
+ *
+ * エラー sanitize (codex R3 #5): last_error / 返り値 error には R-MessE/HTTP の raw body
+ *   (顧客データを含み得る) を保存しない。エラークラス名 + HTTP ステータスコードのみを残す。
  */
 
 import { getCredential } from '@/lib/credentials';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { formatChannelMessageId } from '../_lib/ids';
 import type { RakutenCredentials } from './auth';
-import { RakutenInquiryClient } from './client';
-
-const RMESSE_API_BASE_FALLBACK = 'https://api.rms.rakuten.co.jp/es/1.0/inquirymng-api';
+import { RakutenApiError, RakutenInquiryClient } from './client';
 
 export interface FirstResponseSendResult {
   /** 実際に送信したか。false の場合 reason を見る */
   sent: boolean;
-  /** 'auto_send_disabled' | 'no_business_hours' | 'already_sent' | 'not_first_response'
-   *  | 'channel_not_rakuten' | 'sent' | 'error' */
+  /** 'auto_send_disabled' | 'no_business_hours' | 'within_business_hours' | 'already_sent'
+   *  | 'not_first_response' | 'channel_not_rakuten' | 'sent' | 'error' */
   reason: string;
   externalMessageId?: string | null;
+  /** サニタイズ済みエラー文字列 (クラス名 + HTTP ステータスのみ、raw body は含めない) */
   error?: string;
+}
+
+/**
+ * 例外を PII-safe な文字列に変換する (codex R3 #5)。
+ * R-MessE/HTTP のレスポンス本文 (顧客データ含み得る) は捨て、クラス名と HTTP ステータスのみ残す。
+ */
+function sanitizeError(err: unknown): string {
+  if (err instanceof RakutenApiError) {
+    return `RakutenApiError:status=${err.status}`;
+  }
+  if (err instanceof Error) {
+    // message には外部本文が混入し得るため出さない。クラス名のみ。
+    return err.name || 'Error';
+  }
+  return 'UnknownError';
 }
 
 interface DraftRow {
@@ -134,9 +155,32 @@ export async function sendFirstResponseDraft(
     return { sent: false, reason: 'no_business_hours' };
   }
 
+  // (3') 送信直前の営業時間 再チェック (codex R3 #4, fail-closed)
+  //   営業時間内 (true) → 送信中止 (within_business_hours)。一次返信は営業時間外専用のため。
+  //   RPC error/null → 安全側に倒して送信しない (no_business_hours)。
+  const { data: withinNow, error: withinErr } = await sb.rpc('is_within_business_hours', {
+    channel_id_param: draft.ticket.channel_id,
+    check_time: new Date().toISOString(),
+  });
+  if (withinErr || withinNow == null) {
+    return { sent: false, reason: 'no_business_hours' };
+  }
+  if (withinNow === true) {
+    return { sent: false, reason: 'within_business_hours' };
+  }
+
   // (4) 送信
   const cfgObj = (channel.config ?? {}) as Record<string, unknown>;
-  const apiBase = asStr(cfgObj.api_base, RMESSE_API_BASE_FALLBACK);
+  // api_base はハードコード fallback を持たず channels.config.api_base 必須 (codex R3 #6、
+  // first_response 経路限定。adapter.ts / outbound.ts の既存運用は変更しない)。
+  const apiBase = asStr(cfgObj.api_base, '');
+  if (!apiBase) {
+    return {
+      sent: false,
+      reason: 'error',
+      error: `channels.config.api_base is required (channel_id=${channel.id})`,
+    };
+  }
   const shopId = asStr(cfgObj.shop_id, '');
   if (!shopId) {
     return {
@@ -217,11 +261,12 @@ export async function sendFirstResponseDraft(
       externalMessageId: realId ?? provisionalExternalId,
     };
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
+    // raw body (顧客データ含み得る) は保存せず、クラス名 + HTTP ステータスのみ (codex R3 #5)
+    const sanitized = sanitizeError(err);
     await sb
       .from('ticket_drafts')
-      .update({ last_error: errMsg.slice(0, 1000) })
+      .update({ last_error: sanitized })
       .eq('id', draft.id);
-    return { sent: false, reason: 'error', error: errMsg };
+    return { sent: false, reason: 'error', error: sanitized };
   }
 }

@@ -156,6 +156,27 @@ export async function runFirstResponseFlow(
   const cls = await classifyInquiry(internalKey, ticket.subject, inquiryBody, config);
   const category = cls.category;
 
+  // (a') mask_failed fail-closed (codex R3 #2, Blocker):
+  //   PII マスクに失敗した場合、外部送信の前提 (raw を外に出さない) が崩れるため、
+  //   template 選択 / draft 作成 / 送信のいずれにも進まず、blocked の audit のみ残して中断する。
+  //   raw 値は audit に残さない (error_sanitized='mask_failed' とスナップショットのみ)。
+  if (cls.maskFailed) {
+    await recordSendAudit(sb, {
+      ticketId: ticket.id,
+      channelId: ticket.channel_id,
+      category,
+      result: 'blocked',
+      errorSanitized: 'mask_failed',
+      configSnapshot: {
+        reason: 'mask_failed',
+        enabled: config.enabled,
+        autoSend: config.rakutenAutoSendEnabled,
+        classifySource: cls.source,
+      },
+    });
+    return { status: 'blocked', category };
+  }
+
   // (b) template 選択: category 一致、channel 一致優先 → 共通、active、version desc
   const { data: tpls } = await sb
     .from('first_response_templates')
@@ -270,7 +291,7 @@ export async function runFirstResponseFlow(
   }
 
   // 送信されなかった: flag/前提未充足は 'blocked'、実エラーは 'failed'
-  const blockedReasons = ['auto_send_disabled', 'no_business_hours', 'channel_not_rakuten', 'already_sent', 'not_first_response'];
+  const blockedReasons = ['auto_send_disabled', 'no_business_hours', 'within_business_hours', 'channel_not_rakuten', 'already_sent', 'not_first_response'];
   const result: SendAuditResult = blockedReasons.includes(send.reason) ? 'blocked' : 'failed';
   await recordSendAudit(sb, {
     ...baseAudit,

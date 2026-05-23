@@ -20,6 +20,8 @@ export interface GenerateRagDraftResult {
   model?: string | null;
   searchHitCount?: number;
   withinBusinessHours?: boolean | null;
+  /** 低 confidence 警告の閾値 (rag_config 駆動。UI ハードコード除去) */
+  lowConfidenceThreshold?: number | null;
   durationMs?: number;
   error?: string;
 }
@@ -65,6 +67,10 @@ export async function generateRagDraft(
       withinBusinessHours:
         typeof j.withinBusinessHours === 'boolean'
           ? j.withinBusinessHours
+          : null,
+      lowConfidenceThreshold:
+        typeof j.lowConfidenceThreshold === 'number'
+          ? j.lowConfidenceThreshold
           : null,
       durationMs: typeof j.durationMs === 'number' ? j.durationMs : undefined,
     };

@@ -56,6 +56,24 @@ export async function POST(
   const inquiryBody =
     (inbound.length > 0 ? inbound[inbound.length - 1] : recent[recent.length - 1])?.body ?? '';
 
+  // 3b. 低 confidence 警告の閾値 (codex R3 #6: UI ハードコード除去、rag_config 駆動)
+  //     キー欠落 / 不正値時は既定 0.5。UI はこの値で「人間確認推奨」警告を出す。
+  const DEFAULT_LOW_CONFIDENCE_THRESHOLD = 0.5;
+  let lowConfidenceThreshold = DEFAULT_LOW_CONFIDENCE_THRESHOLD;
+  {
+    const { data: thRow } = await sb
+      .from('rag_config')
+      .select('config_value')
+      .eq('config_key', 'rag_low_confidence_threshold')
+      .maybeSingle();
+    const v = thRow?.config_value;
+    const parsed =
+      typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) {
+      lowConfidenceThreshold = parsed;
+    }
+  }
+
   // 3. 営業時間判定 (channel_id が無い場合は判定不可 = null)
   let withinBusinessHours: boolean | null = null;
   if (ticket.channel_id) {
@@ -98,6 +116,7 @@ export async function POST(
     model: result.model ?? null,
     searchHitCount: result.searchHitCount ?? 0,
     withinBusinessHours,
+    lowConfidenceThreshold,
     durationMs: Date.now() - startedAt,
   });
 }

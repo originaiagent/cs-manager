@@ -19,19 +19,22 @@ export interface FirstResponseConfig {
   rakutenAutoSendEnabled: boolean;
   /** AI 分類失敗時の fallback category */
   defaultCategory: string;
-  /** 分類モデル (origin-ai 側 skill が解決。ここでは記録/受け渡し用) */
-  classifyModel: string | null;
+  /** AI 分類で origin-ai に渡す skill 名 (ハードコード禁止、rag_config 駆動) */
+  classifySkill: string;
   /** 末尾に付与する翌営業日連絡の定型文 */
   nextBusinessDayNote: string;
   /** send_audit body_hash 用 HMAC 鍵の Core credential service_code */
   auditHmacServiceCode: string | null;
 }
 
+/** classify skill 名の既定値 (rag_config 欠落時のみ。投入時は rag_config 必須運用) */
+const DEFAULT_CLASSIFY_SKILL = 'cs_first_response_classify';
+
 const KEYS = [
   'first_response_enabled',
   'rakuten_auto_send_enabled',
   'first_response_default_category',
-  'first_response_classify_model',
+  'first_response_classify_skill',
   'first_response_next_business_day_note',
   'first_response_audit_hmac_service_code',
 ] as const;
@@ -75,7 +78,8 @@ export async function loadFirstResponseConfig(
     enabled: asBool(map.get('first_response_enabled')),
     rakutenAutoSendEnabled: asBool(map.get('rakuten_auto_send_enabled')),
     defaultCategory: asString(map.get('first_response_default_category')) || 'general',
-    classifyModel: asString(map.get('first_response_classify_model')),
+    classifySkill:
+      asString(map.get('first_response_classify_skill')) || DEFAULT_CLASSIFY_SKILL,
     nextBusinessDayNote:
       asString(map.get('first_response_next_business_day_note')) || '',
     auditHmacServiceCode: asString(

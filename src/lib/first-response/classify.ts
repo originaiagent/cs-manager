@@ -1,11 +1,19 @@
 /**
  * 営業時間外一次返信フロー — AI カテゴリ分類
  *
- * PII boundary 厳守 (codex CONCERN #1 / design §5):
- *   - origin-ai (invokeChat) へ渡すのは **masked テキストのみ**。
- *   - raw 問い合わせ文を外部に出さない。マスクは origin-ai の rag-pii-mask skill で行う
- *     (reply-adapter.ts と同じ境界)。
+ * PII boundary 厳守 (codex R3 #1 / design ANNEX.2 / §5):
+ *   - 不変条件: classify は **必ず masked テキストのみ** を invokeChat (= 外部 LLM へ
+ *     中継される origin-ai chat) に渡す。raw 問い合わせ文を invokeChat に渡してはならない。
+ *   - マスクは origin-ai の `rag-pii-mask` skill が担う **origin-ai 内部のマスキング層**
+ *     である (origin-ai は AI 集約の内部サービスであり「外部」ではない。設計上の「外部」は
+ *     OpenAI / Anthropic / 楽天 のみ)。raw を送ってよい相手は rag-pii-mask のみ。
+ *     classify / embed / search / reply 等それ以外の経路には必ず masked を渡す。
  *   - 分類結果 (general/complaint/inquiry/urgent) のみを受け取り、raw は復元しない。
+ *
+ * 認証 (codex R3 #3): invokeChat は origin-ai の chat/sync エンドポイント (Bearer
+ *   ORIGIN_AI_API_KEY env) を叩く。これは rag skill endpoint (/api/skills/*, X-Internal-API-Key,
+ *   Core 解決) とは **別系統のエンドポイント・別認証** であり、実態 (ai-client.ts) が Bearer env
+ *   である。よって chat/sync 経路は Core resolve 対象外 (rag endpoint は mask.ts で Core 解決済)。
  *
  * cs-manager 内に LLM プロンプト本文・モデル直叩きは書かない (AI 集約原則)。
  * 分類は origin-ai の chat skill にカテゴリ判定を依頼し、structured/本文から抽出する。
@@ -18,8 +26,6 @@ import {
   normalizeCategory,
   type FirstResponseConfig,
 } from './config';
-
-const CLASSIFY_SKILL = 'cs_first_response_classify';
 
 export interface ClassifyResult {
   /** 正規化済みカテゴリ (general/complaint/inquiry/urgent) */
@@ -73,9 +79,9 @@ export async function classifyInquiry(
     };
   }
 
-  // (2) masked テキストのみを origin-ai に渡し category を取得
+  // (2) masked テキストのみを origin-ai に渡し category を取得 (skill 名は rag_config 駆動)
   const message = [
-    `[skill: ${CLASSIFY_SKILL}] 次の問い合わせ(個人情報マスク済)を 1 カテゴリに分類してください。`,
+    `[skill: ${config.classifySkill}] 次の問い合わせ(個人情報マスク済)を 1 カテゴリに分類してください。`,
     `許可カテゴリ: ${ALLOWED_CATEGORIES.join(' / ')}`,
     'JSON {"category":"..."} のみで答えてください。推測が必要な場合は general としてください。',
     '',
