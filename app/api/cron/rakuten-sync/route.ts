@@ -5,6 +5,7 @@ import type { AdapterLogger, ChannelAdapterContext } from '@/channels/_lib/adapt
 import type { NormalizedMessage, NormalizedTicketWithMessages } from '@/channels/_lib/types';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { authorizeApiRoute } from '@/lib/auth/api-auth';
+import { runFirstResponseFlow } from '@/lib/first-response/orchestrator';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -85,7 +86,7 @@ async function persistSyncState(
 async function upsertTicket(
   channelId: string,
   payload: NormalizedTicketWithMessages['ticket'],
-): Promise<string> {
+): Promise<{ id: string; isNew: boolean }> {
   // Gemini code review High 指摘: 旧 select→insert パターンは並行 cron 実行時に
   // unique 制約違反を起こすレース条件を含むため、(channel_id, external_id) UNIQUE を
   // 利用した atomic な .upsert() に切替。
@@ -119,7 +120,7 @@ async function upsertTicket(
     };
     const { error: updErr } = await supa.from('tickets').update(update).eq('id', existing.id);
     if (updErr) throw new Error(`upsertTicket(update) failed: ${updErr.message}`);
-    return existing.id as string;
+    return { id: existing.id as string, isNew: false };
   }
 
   // 競合した insert で並行 cron が同時に到達した場合のレース対策として
@@ -142,7 +143,9 @@ async function upsertTicket(
     .eq('external_id', payload.externalId)
     .single();
   if (postErr) throw new Error(`upsertTicket(post-select) failed: ${postErr.message}`);
-  return postSel.id as string;
+  // existing が無く upsert を通った = 新規 (ignoreDuplicates により別 cron が先行した
+  // 場合は実質既存だが、後段フローは DB partial UNIQUE + flag gate で冪等なので問題ない)
+  return { id: postSel.id as string, isNew: true };
 }
 
 async function upsertMessages(
@@ -200,11 +203,34 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
 
   try {
     for await (const item of rakutenAdapter.fetchInbox(ctx)) {
-      const ticketId = await upsertTicket(channel.id, item.ticket);
+      const { id: ticketId, isNew } = await upsertTicket(channel.id, item.ticket);
       const inserted = await upsertMessages(ticketId, item.messages);
       ticketsProcessed += 1;
       messagesUpserted += inserted;
       lastExternalId = item.ticket.externalId;
+
+      // 新規 ticket → 営業時間外一次返信フロー (flag-off 時は disabled で即 return)。
+      // sync 本体を絶対に壊さないため try/catch で隔離。送信可否は orchestrator 内の
+      // flag/営業時間/source ガードに委譲 (flag-off で送信されない)。
+      if (isNew) {
+        try {
+          const supa = await getSupabaseAdmin();
+          const outcome = await runFirstResponseFlow(supa, ticketId);
+          if (outcome.status !== 'disabled' && outcome.status !== 'within_hours') {
+            logger.info('first_response.outcome', {
+              ticketId,
+              status: outcome.status,
+              category: outcome.category,
+              sendResult: outcome.sendResult,
+            });
+          }
+        } catch (err) {
+          logger.warn('first_response_failed_continuing', {
+            ticketId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       try {
         await persistSyncState(channel.id, new Date(), lastExternalId);
       } catch (err) {

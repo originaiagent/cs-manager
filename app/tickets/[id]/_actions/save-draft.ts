@@ -16,7 +16,7 @@ export interface SaveDraftResult {
 export async function saveDraft(
   ticketId: string,
   body: string,
-  source: 'manual' | 'ai_draft',
+  source: 'manual' | 'ai_draft' | 'rag',
 ): Promise<SaveDraftResult> {
   try {
     const res = await internalFetch(
