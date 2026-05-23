@@ -92,5 +92,7 @@ INSERT INTO public.rag_config (config_key, config_value, description) VALUES
   ('first_response_default_category', '"general"', 'AI 分類失敗時の fallback category'),
   ('first_response_classify_model', '"claude-haiku-4-5"', '一次返信 分類モデル (origin-ai 側 skill が解決)'),
   ('first_response_next_business_day_note', '"※ 翌営業日に担当者より改めてご連絡いたします。"', '一次返信末尾に付与する翌営業日連絡の定型文'),
-  ('first_response_audit_hmac_service_code', '"first_response_audit_hmac"', 'send_audit body_hash 用 HMAC 鍵の Core credential service_code')
+  ('first_response_audit_hmac_service_code', '"first_response_audit_hmac"', 'send_audit body_hash 用 HMAC 鍵の Core credential service_code'),
+  ('first_response_classify_skill', '"cs_first_response_classify"', '営業時間外 一次返信の分類スキル(origin-ai)'),
+  ('rag_low_confidence_threshold', '0.5', 'UI で人間確認推奨を出す confidence 閾値 (codex R3 #6: DB駆動)')
 ON CONFLICT (config_key) DO NOTHING;
