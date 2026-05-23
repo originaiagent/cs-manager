@@ -28,6 +28,11 @@ export default function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
+  // ログイン画面ではナビゲーションを表示しない。
+  if (pathname === '/login' || pathname.startsWith('/login/')) {
+    return null;
+  }
+
   return (
     <>
       <button
