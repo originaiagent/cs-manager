@@ -1,0 +1,41 @@
+name: Cohere Guard
+
+# RAG stage2 (cs-manager-stage2-phase0-design.md §8): external rerank must use the
+# self-hosted BGE-reranker-v2-m3 GPU only -- never Cohere. This guard fails CI if any
+# real Cohere import or dependency is introduced. Detection is parser-based
+# (scripts/ci/detect_cohere.py): Python AST + JS/TS module specifiers + JSON-parsed
+# package.json deps + requirements/pyproject dep tokens. Prose, comments, docstrings,
+# and unrelated identifiers like "coherent" are NOT flagged. node_modules excluded.
+#
+# Additive only -- does not modify any existing workflow.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cohere-guard-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cohere-guard:
+    name: Forbid Cohere imports (BGE-reranker only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Detect forbidden Cohere imports / dependencies
+        run: python3 scripts/ci/detect_cohere.py .
