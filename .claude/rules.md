@@ -75,6 +75,25 @@ codex exec --sandbox read-only "計画書を読んで、影響範囲・破壊リ
 
 **判断基準: 「これは方針の判断か、手段の選択か」で考えろ。手段の選択なら自分で決めて進め。**
 
+### 選択肢提示・推奨マーク付き質問の禁止（最優先・違反 block）
+
+実装中・完了報告・質問のいずれでも、複数案を選択肢として人間に提示することを禁止する。頭に複数案が浮かんだ時点で、最も推奨できる案を自分で採用して即実行する。
+
+**禁止パターン**
+- 「どれにしますか？ 1案 / 2案 / 3案」式の列挙
+- 「1（推奨）〜 / 2〜 / 3〜」など推奨マーク付き選択肢
+- 「A or B、判断ください」「推奨は X です。進めますか？」
+- 「以下のオプションがあります」式の提示
+
+**正しい動作**
+- 採用案を即実行し、判断ログに1行残す：「候補 A/B/C → A 採用、理由: X（既存踏襲 / 一般値 / 他ツール整合 / 実態優先）」
+- 非致命の前提ズレ（型名・プロパティ名・シグネチャの細部が指示と実態でズレ）→ 実態優先で自己修正して継続。選択肢化しない
+- 致命差異（参照先テーブル/基盤の不在・構造的不整合・破壊的変更・権限不足・下記 13 カテゴリ該当）→ 自走継続せず停止する。ただし停止時も選択肢メニュー化はせず「実態: X。Y が必要。差し戻し/判断求む」と結論ファーストで報告する（13 カテゴリ該当時は `blocking_question` JSON）
+
+**例外**: 下記「質問する時のルール」の 13 カテゴリに該当する場合のみ `blocking_question` JSON で質問してよい。13 カテゴリ以外で「推奨」を付けられる時点で自走判断は完了している。聞くな、実行しろ。
+
+> 正本: guide_rules `R-no-recommended-choice-presentation` (severity=block, applies_to=both) / `R-no-decidable-escalation` (severity=block, applies_to=mgmt_claude) / Supabase origin-core (`fqzsxjhhdzrliuuooqic`) guides slug=`tier0-absolute-rules` ⑥13カテゴリ。検出 trigger / カテゴリ enum の実体は origin-policy/rules/{human_judgment_categories,tier0_detectors}.yaml にあり、question_classifier hook が live→cache→bundled fallback で参照する。検出パターンに該当した質問は Stop hook が exit 2 でブロックするが、bundled fallback 時は検出範囲が縮退しうる（文面の遵守が一次、hook は補助）。
+
 ### トムに聞くこと
 - デザイン・UXの好み / ビジネスロジックの判断（仕様の解釈が複数ある時）
 - 本番反映（mainマージ）/ 破壊的変更（データ削除、テーブル構造変更）
