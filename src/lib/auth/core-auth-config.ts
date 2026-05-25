@@ -21,15 +21,15 @@ export function isCoreAuthEnabled(): boolean {
 }
 
 /**
- * Core 認証に必要な env (URL / anon key) が両方そろっているか。
- * フラグ ON でも env 未設定なら認証クライアントを生成すると throw するため、
- * 生成前のガードに使う。
+ * Core 認証に必要なビルド時 env がそろっているか。
+ *
+ * OIDC リダイレクト方式では、middleware が `NEXT_PUBLIC_CORE_SUPABASE_URL` から
+ * issuer / JWKS URL を導出して access_token を検証する。これがログインボタン表示の
+ * 最低条件。OAuth client_secret / client_id / APP_BASE_URL 等のサーバ専用設定は
+ * /api/auth/* 経路が実行時に fail-closed で検証する (ここでは見ない)。
  */
 export function isCoreAuthConfigured(): boolean {
-  return (
-    !!process.env.NEXT_PUBLIC_CORE_SUPABASE_URL &&
-    !!process.env.NEXT_PUBLIC_CORE_SUPABASE_ANON_KEY
-  );
+  return !!process.env.NEXT_PUBLIC_CORE_SUPABASE_URL;
 }
 
 /**
