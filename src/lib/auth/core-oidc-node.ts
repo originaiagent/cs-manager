@@ -200,9 +200,21 @@ export async function getOriginAIOAuth(): Promise<OriginAIOAuth> {
   return { issuerUrl, clientId, clientSecret, metadataRedirectUri };
 }
 
+/** 設定された Core Supabase の base origin (NEXT_PUBLIC_CORE_SUPABASE_URL 由来)。 */
+function expectedCoreBase(): string | null {
+  const raw = process.env.NEXT_PUBLIC_CORE_SUPABASE_URL;
+  if (!raw) return null;
+  return raw.replace(/\/+$/, '').replace(/\/auth\/v1$/, '');
+}
+
 /**
  * issuer_url から Core OAuth エンドポイントを導出する。
  * issuer_url は base 形式 / /auth/v1 付きの両方を許容。https 絶対 URL でなければ throw。
+ *
+ * codex FAIL #3 反映: credential 由来の issuer_url を無制限に信頼しない。
+ *   設定済み Core origin (NEXT_PUBLIC_CORE_SUPABASE_URL) と同一 origin であることを必須にし、
+ *   誤登録 credential で authorize 誘導 / client_secret の token POST 先が任意 origin に
+ *   なるのを防ぐ。
  */
 export function deriveOAuthEndpoints(issuerUrl: string): {
   base: string;
@@ -221,9 +233,40 @@ export function deriveOAuthEndpoints(issuerUrl: string): {
   if (parsed.protocol !== 'https:') {
     throw new CredentialFetchError('issuer_url must be https', null, 'originai_oauth');
   }
+  const expected = expectedCoreBase();
+  if (expected) {
+    let expectedOrigin: string;
+    try {
+      expectedOrigin = new URL(expected).origin;
+    } catch {
+      throw new CredentialFetchError('configured Core base is invalid', null, 'originai_oauth');
+    }
+    if (parsed.origin !== expectedOrigin) {
+      throw new CredentialFetchError('issuer_url origin does not match configured Core', null, 'originai_oauth');
+    }
+  }
   return {
     base,
     authorizeUrl: `${base}/auth/v1/oauth/authorize`,
     tokenUrl: `${base}/auth/v1/oauth/token`,
   };
+}
+
+/**
+ * 検証済み相対パスを APP_BASE_URL 上の絶対 URL に解決する (オープンリダイレクト多層防御)。
+ * sanitizeRedirectPath 済みパスを渡す前提だが、解決後 origin が APP_BASE_URL と
+ * 一致しなければ強制的に `/` に落とす (codex FAIL #1 の最終防御)。
+ */
+export function resolveSameOriginRedirect(path: string): URL {
+  const baseOrigin = new URL(appBaseUrl()).origin;
+  let url: URL;
+  try {
+    url = new URL(path || '/', appBaseUrl());
+  } catch {
+    return new URL('/', appBaseUrl());
+  }
+  if (url.origin !== baseOrigin) {
+    return new URL('/', appBaseUrl());
+  }
+  return url;
 }

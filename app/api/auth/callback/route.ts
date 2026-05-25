@@ -19,6 +19,7 @@ import {
   appIsSecure,
   newCsrfToken,
   parseState,
+  resolveSameOriginRedirect,
   CredentialFetchError,
 } from '@/lib/auth/core-oidc-node';
 import { verifyCoreAccessToken, sessionCookieName } from '@/lib/auth/core-oidc-edge';
@@ -131,9 +132,10 @@ export async function GET(req: NextRequest) {
   }
 
   // 発行された access_token をサーバ面で検証 (iss/aud/client_id) + 認可ゲート。
+  // client_id は Core から実行時取得した authoritative な値で照合 (単一の正 — codex FAIL #2)。
   let user;
   try {
-    user = await verifyCoreAccessToken(accessToken);
+    user = await verifyCoreAccessToken(accessToken, clientId);
   } catch (err) {
     console.error('[auth/callback] access_token verification failed:', (err as Error)?.message || err);
     return NextResponse.json({ error: 'Token verification failed' }, { status: 401 });
@@ -151,7 +153,7 @@ export async function GET(req: NextRequest) {
 
   const sessionValue = 'base64-' + Buffer.from(JSON.stringify({ access_token: accessToken, expires_at: expiresAt })).toString('base64');
 
-  const res = NextResponse.redirect(new URL(redirectPath || '/', getRedirectUri()), { status: 302 });
+  const res = NextResponse.redirect(resolveSameOriginRedirect(redirectPath), { status: 302 });
   res.headers.set('Cache-Control', 'private, no-store');
   const secure = appIsSecure();
   res.cookies.set(sessionCookieName(), sessionValue, {

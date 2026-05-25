@@ -57,24 +57,35 @@ export interface VerifiedUser {
 }
 
 /**
- * Core 発行 access_token を JWKS 検証する。sig/iss/aud/client_id を確認 (fail-closed)。
+ * Core 発行 access_token を JWKS 検証する。alg/sig/iss/aud/client_id を確認 (fail-closed)。
  * 失敗時は throw。
+ *
+ * client_id の期待値:
+ *   - `expectedClientId` 引数があればそれを優先 (callback は Core から実行時取得した
+ *     authoritative な client_id を渡す = 単一の正)。
+ *   - 無ければ `CORE_OAUTH_CLIENT_ID` env (Edge=middleware は Core 取得できないため、
+ *     非 secret な client_id をビルド時 config として pin する。ローテーション時は env 更新が必要)。
+ *   - どちらも無ければ fail-closed。
  */
-export async function verifyCoreAccessToken(token: string): Promise<VerifiedUser> {
+export async function verifyCoreAccessToken(
+  token: string,
+  expectedClientId?: string,
+): Promise<VerifiedUser> {
   if (!token) throw new Error('verifyCoreAccessToken: empty token');
 
-  const expectedClientId = process.env.CORE_OAUTH_CLIENT_ID;
-  if (!expectedClientId) {
-    throw new Error('verifyCoreAccessToken: CORE_OAUTH_CLIENT_ID not set (fail-closed)');
+  const expected = expectedClientId ?? process.env.CORE_OAUTH_CLIENT_ID;
+  if (!expected) {
+    throw new Error('verifyCoreAccessToken: no expected client_id (env CORE_OAUTH_CLIENT_ID unset) (fail-closed)');
   }
 
   const { payload } = await jwtVerify(token, getJwks(), {
     issuer: coreIssuer(),
     audience: TOKEN_AUDIENCE,
+    algorithms: ['ES256'],
   });
 
   const clientId = typeof payload.client_id === 'string' ? payload.client_id : null;
-  if (clientId !== expectedClientId) {
+  if (clientId !== expected) {
     throw new Error('verifyCoreAccessToken: client_id claim mismatch');
   }
 
