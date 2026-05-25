@@ -1,94 +1,78 @@
-import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { isCoreAuthEnabled, TOOL_KEY } from '@/lib/auth/core-auth-config';
 import {
-  isCoreAuthEnabled,
-  hasToolAccess,
-} from '@/lib/auth/core-auth-config';
+  verifyCoreAccessToken,
+  extractAccessToken,
+  sessionCookieName,
+} from '@/lib/auth/core-oidc-edge';
 
 /**
- * ユーザー認証ゲート (Core を IdP とする Third-Party Auth)。
+ * ユーザー認証ゲート (Core を IdP とする OIDC リダイレクト方式)。
  *
  * フラグ OFF (既定): 何もせず素通し = 現行 (ユーザーログイン無し) の挙動を完全維持。
  *
  * フラグ ON:
- *   1. Cookie の origin-core Supabase セッションを読み込む
- *   2. getUser() で origin-core 発行の JWT を検証
- *   3. 未ログイン → /login?redirect=<元パス> にリダイレクト
- *   4. ログイン済だが tool_access['cs-manager'] を持たない → /login?error=forbidden
+ *   1. session cookie (callback が発行した base64-json) から access_token を抽出
+ *   2. JWKS で検証 (iss / aud='authenticated' / client_id / sig) — Core への往復なし
+ *   3. 未ログイン / 検証失敗 → /login?redirect=<元パス> (無効 cookie は削除)
+ *   4. ログイン済だが tool_access['cs-manager'] 無し → /login?error=forbidden
  *
  * 例外パス (USER ゲート対象外):
- *   - /login        : 認証画面そのもの
- *   - /api/*         : 全 API ルート。各ルートが独自の tier 認可 (internal-key / cron / diag) を
- *                      持つため、USER ゲートは一切触れない。これにより内部 API 呼び出し・
- *                      Vercel Cron (ユーザー session 無し) はフラグ ON/OFF に関わらず動作し続ける。
- *   - /_next/* 等    : matcher で除外
+ *   - /login : 認証画面 (ループ防止のため自動リダイレクトしないボタン式)
+ *   - /api/* : 全 API ルート。各ルートが独自 tier 認可 (internal-key / cron / diag) を持つため
+ *              USER ゲートは触れない。/api/auth/* もここに含まれる (login/callback は自前で flag 判定)。
+ *   - /_next 等 : matcher で除外
  *
- * 重要: middleware が握る Cookie は origin-core 側 Supabase の session。
- *   cs-manager 側 DB へのアクセスは従来通り service_role (server-side) で行う。
- *   本ゲートはページ到達の認可 (ロール込み) を担う。
+ * Edge 安全: core-oidc-edge.ts (jose + Web API のみ) だけを import する。
  */
 const PUBLIC_PATHS = ['/login', '/api'];
 
 export async function middleware(req: NextRequest) {
-  // フラグ OFF: 完全素通し (現行挙動)。
   if (!isCoreAuthEnabled()) {
     return NextResponse.next();
   }
 
   const { pathname } = req.nextUrl;
-
   if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'))) {
     return NextResponse.next();
   }
 
-  let response = NextResponse.next({ request: { headers: req.headers } });
+  const token = extractAccessToken(req.cookies.get(sessionCookieName())?.value);
 
-  const coreAuth = createServerClient(
-    process.env.NEXT_PUBLIC_CORE_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_CORE_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return req.cookies.getAll();
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value }) => req.cookies.set(name, value));
-          response = NextResponse.next({ request: { headers: req.headers } });
-          cookiesToSet.forEach(({ name, value, options }) =>
-            response.cookies.set(name, value, options),
-          );
-        },
-      },
-    },
-  );
-
-  const {
-    data: { user },
-  } = await coreAuth.auth.getUser();
-
-  if (!user) {
-    const loginUrl = req.nextUrl.clone();
-    loginUrl.pathname = '/login';
-    loginUrl.search = '';
-    // 元のパス+クエリを保持 (オープンリダイレクト防止は /login 側で sanitize)。
-    loginUrl.searchParams.set('redirect', pathname + req.nextUrl.search);
-    return NextResponse.redirect(loginUrl);
+  if (!token) {
+    const url = req.nextUrl.clone();
+    url.pathname = '/login';
+    url.search = '';
+    url.searchParams.set('redirect', pathname + req.nextUrl.search);
+    return NextResponse.redirect(url);
   }
 
-  // ログイン済でも cs-manager 用 tool_access が無ければアクセス不可。
-  if (!hasToolAccess(user.app_metadata)) {
-    const loginUrl = req.nextUrl.clone();
-    loginUrl.pathname = '/login';
-    loginUrl.search = '';
-    loginUrl.searchParams.set('error', 'forbidden');
-    return NextResponse.redirect(loginUrl);
+  let user;
+  try {
+    user = await verifyCoreAccessToken(token);
+  } catch {
+    // 無効・期限切れトークン: cookie を削除しつつ再ログインへ。
+    const url = req.nextUrl.clone();
+    url.pathname = '/login';
+    url.search = '';
+    url.searchParams.set('redirect', pathname + req.nextUrl.search);
+    const res = NextResponse.redirect(url);
+    res.cookies.set(sessionCookieName(), '', { path: '/', maxAge: 0 });
+    return res;
   }
 
-  return response;
+  if (user.toolAccess?.[TOOL_KEY] !== true) {
+    const url = req.nextUrl.clone();
+    url.pathname = '/login';
+    url.search = '';
+    url.searchParams.set('error', 'forbidden');
+    return NextResponse.redirect(url);
+  }
+
+  return NextResponse.next();
 }
 
 export const config = {
-  // 認証必須にしたいパス。Next 内部・静的ファイル・画像は除外。
   matcher: [
     '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)',
   ],

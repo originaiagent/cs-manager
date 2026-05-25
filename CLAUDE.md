@@ -17,6 +17,13 @@ OriginAI マルチチャネル統合カスタマーサポート + AI改善サイ
 - `SUPABASE_SERVICE_ROLE_KEY`: Supabase service role key
 - `CRON_SECRET`: Vercel Cron Bearer token (`/api/cron/*` 認可)
 
+### ユーザー認証 (OIDC リダイレクト方式 / origin-core IdP)
+- `NEXT_PUBLIC_CORE_AUTH_ENABLED`: `true` でユーザーログインゲート ON (未設定/`true`以外=OFF=現行素通り)。ビルド時インライン。
+- `NEXT_PUBLIC_CORE_SUPABASE_URL`: origin-core Supabase base URL。middleware が issuer / JWKS URL を導出。
+- `CORE_OAUTH_CLIENT_ID`: cs-manager の OAuth client_id (非 secret)。Edge=middleware が access_token の `client_id` claim を照合する pin。**client ローテーション時はこの env も更新**。callback は Core から実行時取得した client_id で照合するため env 非依存。
+- `APP_BASE_URL`: 本番 base URL (例 `https://cs-manager-chi.vercel.app`)。OAuth `redirect_uri` の単一固定生成元 (request Host 由来禁止)。
+- OAuth `client_secret` は **env に置かない**。token 交換直前に Core `/api/credentials/originai_oauth?scope_key=cs-manager` から実行時取得 (5 分 TTL)。
+
 外部サービス認証 (楽天 R-MessE 等) は cs-manager 内に持たない。
 Core `/api/credentials/:service_code?scope_key=<店舗ID>` 経由で動的取得 (5 分 TTL キャッシュ)。
 

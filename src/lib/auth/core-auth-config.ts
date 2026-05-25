@@ -1,8 +1,8 @@
 /**
- * Core (origin-core) を IdP とする Third-Party Auth (JWKS) のユーザー認証設定。
+ * Core (origin-core) を IdP とする OIDC 認証の純粋な定数・ヘルパ。
  *
- * このファイルはサーバ/ブラウザ双方から import される純粋な定数・ヘルパのみを持つ
- * (env 直参照やクライアント生成は別ファイル)。
+ * このファイルはサーバ/ブラウザ/Edge いずれからも import され得る純粋関数のみを持つ
+ * (env 直参照は最小限、jose / node:crypto / Core 取得は core-oidc-{edge,node}.ts 側)。
  */
 
 /**
@@ -11,9 +11,6 @@
  * - 既定 OFF: middleware は素通し = 現行 (ユーザーログイン無し) の挙動を完全維持。
  * - ON: ユーザー向けページに Core ログイン + tool_access (`TOOL_KEY`) を要求。
  *
- * 重要: cs-manager 側 Supabase に JWKS provider 未登録の状態で ON にすると
- * 全ユーザーがロックアウトされるため、provider 登録後にのみ ON にする運用。
- *
  * NEXT_PUBLIC_ なのでビルド時にインライン化される。フラグ変更には再デプロイが必要。
  */
 export function isCoreAuthEnabled(): boolean {
@@ -21,15 +18,15 @@ export function isCoreAuthEnabled(): boolean {
 }
 
 /**
- * Core 認証に必要な env (URL / anon key) が両方そろっているか。
- * フラグ ON でも env 未設定なら認証クライアントを生成すると throw するため、
- * 生成前のガードに使う。
+ * Core 認証に必要なビルド時 env がそろっているか。
+ *
+ * OIDC リダイレクト方式では、middleware が `NEXT_PUBLIC_CORE_SUPABASE_URL` から
+ * issuer / JWKS URL を導出して access_token を検証する。これがログインボタン表示の
+ * 最低条件。OAuth client_secret / client_id / APP_BASE_URL 等のサーバ専用設定は
+ * /api/auth/* 経路が実行時に fail-closed で検証する (ここでは見ない)。
  */
 export function isCoreAuthConfigured(): boolean {
-  return (
-    !!process.env.NEXT_PUBLIC_CORE_SUPABASE_URL &&
-    !!process.env.NEXT_PUBLIC_CORE_SUPABASE_ANON_KEY
-  );
+  return !!process.env.NEXT_PUBLIC_CORE_SUPABASE_URL;
 }
 
 /**
@@ -37,23 +34,13 @@ export function isCoreAuthConfigured(): boolean {
  *
  * PINNED JWT CONTRACT (core-tool-access と一致):
  *   - `app_metadata.tool_access` は 8 個のハイフン付きツールキーを持つ object。
- *     キーが存在しない場合は false 扱い (absent = false)。
- *   - `app_metadata.is_admin` は boolean。
- *
- * - middleware のページゲートで `user.app_metadata.tool_access['cs-manager'] === true`
- *   を要求する。
- * - 同じキーを Supabase 側 RLS の `has_tool_access('cs-manager')` ポリシーでも使う
- *   (ページ層と DB 層の認可セマンティクスを一致させるため)。
+ *   - middleware / callback のゲートで `tool_access['cs-manager'] === true` を要求する。
  */
 export const TOOL_KEY = 'cs-manager';
 
 /**
- * Core の access token / user オブジェクトの app_metadata.tool_access から
- * cs-manager のアクセス権を持つか判定する (fail-closed)。
- *
- * tool_access は { [toolKey]: boolean } を期待。
+ * app_metadata.tool_access から cs-manager のアクセス権を持つか判定する (fail-closed)。
  * 厳密に `tool_access['cs-manager'] === true` のときのみ許可。
- * 未定義・型不正 (配列含む)・欠如・true 以外の値は全て false。
  */
 export function hasToolAccess(
   appMetadata: Record<string, unknown> | null | undefined,
@@ -66,14 +53,26 @@ export function hasToolAccess(
 }
 
 /**
- * オープンリダイレクト防止: 同一オリジンの相対パスのみ許可する。
+ * オープンリダイレクト防止: 自オリジン相対パスのみ許可する。
  *
- * - `/` で始まり、かつ `//` (プロトコル相対 → 別オリジン) で始まらないものだけ通す。
- * - それ以外は既定 `/` にフォールバック。
+ * 弾く対象 (いずれも既定 `/` にフォールバック):
+ *   - 文字列でない / 空
+ *   - `/` で始まらない (絶対 URL / scheme)
+ *   - `//` (プロトコル相対 → 別オリジン)
+ *   - バックスラッシュを含む (`/\evil.com` は new URL() で別オリジンに正規化される — codex FAIL #1)
+ *   - 制御文字 (U+0000–U+001F, U+007F) を含む
+ *
+ * 値は既に URLSearchParams 等でデコード済みの前提なので、ここでは再デコードしない
+ * (二重デコード回避)。最終リダイレクト側でも同一オリジンを再検証する (多層防御)。
  */
 export function sanitizeRedirectPath(value: string | null | undefined): string {
-  if (typeof value !== 'string') return '/';
+  if (typeof value !== 'string' || value.length === 0) return '/';
   if (!value.startsWith('/')) return '/';
   if (value.startsWith('//')) return '/';
+  if (value.includes('\\')) return '/';
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return '/';
+  }
   return value;
 }
