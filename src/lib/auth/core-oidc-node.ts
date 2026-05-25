@@ -233,17 +233,20 @@ export function deriveOAuthEndpoints(issuerUrl: string): {
   if (parsed.protocol !== 'https:') {
     throw new CredentialFetchError('issuer_url must be https', null, 'originai_oauth');
   }
+  // fail-closed: 設定済み Core origin が無い / 不正なら authorize/token を導出しない
+  // (NEXT_PUBLIC_CORE_SUPABASE_URL 欠落時に任意 issuer を信頼しない — codex FAIL #3 再修正)。
   const expected = expectedCoreBase();
-  if (expected) {
-    let expectedOrigin: string;
-    try {
-      expectedOrigin = new URL(expected).origin;
-    } catch {
-      throw new CredentialFetchError('configured Core base is invalid', null, 'originai_oauth');
-    }
-    if (parsed.origin !== expectedOrigin) {
-      throw new CredentialFetchError('issuer_url origin does not match configured Core', null, 'originai_oauth');
-    }
+  if (!expected) {
+    throw new CredentialFetchError('NEXT_PUBLIC_CORE_SUPABASE_URL not configured (fail-closed)', null, 'originai_oauth');
+  }
+  let expectedOrigin: string;
+  try {
+    expectedOrigin = new URL(expected).origin;
+  } catch {
+    throw new CredentialFetchError('configured Core base is invalid', null, 'originai_oauth');
+  }
+  if (parsed.origin !== expectedOrigin) {
+    throw new CredentialFetchError('issuer_url origin does not match configured Core', null, 'originai_oauth');
   }
   return {
     base,
