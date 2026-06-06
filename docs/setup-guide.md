@@ -27,7 +27,7 @@ claude/ブランチへのpushをmainに自動マージするGitHub Actions。
 | {TOOL_DESCRIPTION} | ツールの概要説明 |
 | {FRAMEWORK} | 使用フレームワーク |
 | {LANGUAGE} | 使用言語 |
-| {DEPLOY_TARGET} | Vercel / Streamlit Cloud / Cloud Run / Cloudflare Pages |
+| {DEPLOY_TARGET} | Vercel / Cloud Run / Cloudflare Pages |
 | {PREVIEW_URL} | PRプレビュー用の確認URL |
 | {PRODUCTION_URL} | main用の本番URL |
 
@@ -57,7 +57,7 @@ URL体系:
 - requirements.txt（streamlit）
 - .gitignore（Python用）
 
-URL体系: Streamlit Cloudでデプロイ後に確定。
+URL体系: Vercel デプロイ後に確定（git push → 自動デプロイ）。
 
 ### 2-C. Cloud Run（Node.js/TypeScript）
 
@@ -115,7 +115,7 @@ Vercel / Cloud Runの場合:
 - [ ] 確認URLでの動作確認
 
 Streamlitの場合:
-- [ ] Streamlit Cloudでリポジトリを接続（https://share.streamlit.io）
+- [ ] Vercel でリポジトリを接続（https://vercel.com）
 - [ ] メインファイルパス: app.py / ブランチ: main
 - [ ] 確認URLでの動作確認
 
