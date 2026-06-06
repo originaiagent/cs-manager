@@ -115,7 +115,7 @@ Vercel / Cloud Runの場合:
 - [ ] 確認URLでの動作確認
 
 Streamlit（Cloud Run ホスティング）の場合:
-- [ ] Cloud Build トリガー作成 または `deploy/render-service.sh` で初回デプロイ
+- [ ] `deploy/render-service.sh` で初回デプロイ
 - [ ] エントリポイント: app.py / ブランチ: main
 - [ ] 確認URLでの動作確認
 
