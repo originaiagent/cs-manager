@@ -57,7 +57,7 @@ URL体系:
 - requirements.txt（streamlit）
 - .gitignore（Python用）
 
-URL体系: Vercel デプロイ後に確定（git push → 自動デプロイ）。
+URL体系: Cloud Run デプロイ後に status.url で確定（Streamlit はフレームワーク。Cloud Run コンテナでホストし、deploy/render-service.sh 経由でデプロイ）。
 
 ### 2-C. Cloud Run（Node.js/TypeScript）
 
@@ -114,9 +114,9 @@ URL体系: Cloudflare Pagesでデプロイ後に確定。
 Vercel / Cloud Runの場合:
 - [ ] 確認URLでの動作確認
 
-Streamlitの場合:
-- [ ] Vercel でリポジトリを接続（https://vercel.com）
-- [ ] メインファイルパス: app.py / ブランチ: main
+Streamlit（Cloud Run ホスティング）の場合:
+- [ ] Cloud Build トリガー作成 または `deploy/render-service.sh` で初回デプロイ
+- [ ] エントリポイント: app.py / ブランチ: main
 - [ ] 確認URLでの動作確認
 
 Cloudflare Pagesの場合:
