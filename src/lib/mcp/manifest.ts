@@ -56,20 +56,37 @@ export const SCHEMA_VERSION = '1.0.0';
 // cs-manager の read-only 窓口 slug (= ai_embed_clients.tool_slug / mcp_server_name)。
 export const TOOL_SLUG = 'cs-manager';
 
-// TODO: 自ツールの forms を定義する。下記は型代表性のための例 (read-only 段階は writable も
-// 後段 write 用の宣言として持てるが、route が write を disabled で返すため安全)。
-const EXAMPLE_PLACES: Place[] = [
-  { place_id: 'name', label: '名称', type: 'text', required: true, writable: true, validation: { maxLength: 200 } },
-  { place_id: 'status', label: 'ステータス', type: 'text', required: false, writable: true, validation: { maxLength: 100 } },
+// ---------------------------------------------------------------------------
+// フォーム定義 (customer_record) — customer_service_records テーブルに 1:1 対応
+//
+// cs-manager 自前の業務データ (顧客対応記録)。Core master / 財務 / 他WSデータではない。
+// write 対象は memo (自由記述メモ) の単一 scalar text 列のみ。
+//   - target_type = 'customer_record' は run token (JWT) の target_type と一致させる。
+//   - place_id 'memo' は customer_service_records.memo 列名と durable に 1:1。
+//   - repeating / file place は持たないため write は set op のみサポート。
+// ---------------------------------------------------------------------------
+const CUSTOMER_RECORD_PLACES: Place[] = [
+  {
+    place_id: 'memo',
+    label: '対応メモ',
+    type: 'text',
+    required: false,
+    writable: true,
+    description: '顧客対応記録の自由記述メモ (customer_service_records.memo)',
+    example: '返品リクエスト 対応済み',
+    validation: { maxLength: 5000 },
+  },
 ];
 
 const FORMS: FormDefinition[] = [
   {
-    form_id: 'example',          // TODO: 実 form_id (= target_type)
-    target_type: 'example',      // TODO: ai_embed_runs.target_type と一致させる
-    places: EXAMPLE_PLACES,
-    write_route: { method: 'PATCH', path_template: '/api/example/{target_id}' }, // write 有効化時に実値
-    file_route: { upload_path: '/api/upload', bucket: 'example-assets' },
+    form_id: 'customer_record',
+    target_type: 'customer_record',
+    places: CUSTOMER_RECORD_PLACES,
+    write_route: { method: 'PATCH', path_template: '/api/customer-records/{target_id}' },
+    // customer_record は file place を持たないが、型を満たすためのプレースホルダ。
+    // place-file capability は route 側で disabled のため未使用。
+    file_route: { upload_path: '/api/upload', bucket: 'customer-record-assets' },
   },
 ];
 

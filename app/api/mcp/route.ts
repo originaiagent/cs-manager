@@ -20,6 +20,8 @@ import { manifest } from '@/lib/mcp/manifest';
 import { authenticateMcpRequest } from '@/lib/mcp/auth';
 import { handleList } from '@/lib/mcp/capabilities/list';
 import { handleRead } from '@/lib/mcp/capabilities/read';
+import { handleWrite, type WriteOp } from '@/lib/mcp/capabilities/write';
+import { isFormWriteEnabled } from '@/lib/mcp/service';
 // fetch-file を提供するツールのみ有効化:
 // import { handleFetchFile } from '@/lib/mcp/capabilities/fetch-file';
 
@@ -58,14 +60,14 @@ const INTERNAL_ERROR = -32603;
 const AUTH_ERROR = -32001;
 
 // ---------------------------------------------------------------------------
-// ツール定義 (read-only 段階: list / read / fetch-file)。
-// write / place-file は write 有効化時に追加する。
+// ツール定義: list / read / write。
+// place-file / fetch-file は customer_record フォームでは未対応のため disabled のまま。
 // ---------------------------------------------------------------------------
 
 const TOOLS = [
   {
     name: 'list',
-    description: '読取可能箇所の一覧を返す',
+    description: '書込/読取可能箇所の一覧を返す',
     inputSchema: {
       type: 'object',
       properties: { form_id: { type: 'string' } },
@@ -85,11 +87,47 @@ const TOOLS = [
       required: ['form_id', 'place_id'],
     },
   },
-  // fetch-file を提供するツールはここに 'fetch-file' を追加する。
+  {
+    name: 'write',
+    description: '箇所への書込 (フォーム単位トランザクション、set op のみ)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        form_id: { type: 'string' },
+        ops: {
+          type: 'array',
+          description: 'WriteOp の配列 (customer_record は kind:"set" のみ)',
+          items: {
+            type: 'object',
+            properties: {
+              kind: { type: 'string', enum: ['set'] },
+              place_id: { type: 'string' },
+              value: {},
+            },
+            required: ['kind', 'place_id'],
+          },
+        },
+        dry_run: { type: 'boolean' },
+        idempotency_key: { type: 'string' },
+        expected_revision: { type: 'string' },
+        provenance: {
+          type: 'object',
+          properties: {
+            source: { type: 'string' },
+            run_id: { type: 'string' },
+            extracted_from: { type: 'string' },
+          },
+          required: ['source', 'run_id'],
+        },
+        confidence: { type: 'number', minimum: 0, maximum: 1 },
+      },
+      required: ['form_id', 'ops', 'dry_run', 'idempotency_key', 'provenance'],
+    },
+  },
 ];
 
-// read-only 窓口が拒否する write 系 op (fail-closed)。
-const WRITE_OPS = new Set(['write', 'place-file']);
+// read-only 窓口が拒否する未対応 write 系 op (fail-closed)。place-file は customer_record で未対応。
+const WRITE_OPS = new Set(['place-file']);
 const READ_OPS: Record<string, string> = { list: 'list', read: 'read', 'fetch-file': 'fetch-file' };
 
 // ---------------------------------------------------------------------------
@@ -138,14 +176,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const toolArgs = (p?.arguments ?? {}) as Record<string, unknown>;
     if (!toolName) return rpcErr(id, INVALID_PARAMS, 'tools/call requires params.name');
 
-    // read-only 窓口: write 系は一律 disabled (fail-closed)
+    // 未対応 write 系 (place-file 等) は一律 disabled (fail-closed)
     if (WRITE_OPS.has(toolName)) {
       return rpcOk(id, {
         ok: false,
-        reason: 'write disabled (read-only window). contract test green 後に gate を開けること。',
+        reason: 'このツールでは未対応の op です (customer_record フォームは place-file 非対応)。',
       });
     }
-    if (!READ_OPS[toolName]) {
+    // op 解決: read 系 + write
+    const opMap: Record<string, string> = { ...READ_OPS, write: 'write' };
+    if (!opMap[toolName]) {
       return rpcErr(id, METHOD_NOT_FOUND, `Unknown tool: ${toolName}`);
     }
 
@@ -173,9 +213,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       /* 認証ステップで適切に拒否される */
     }
 
+    // write の place は各 op 内 (place_id) に存在し top-level には無い。
+    // top-level auth は place_id=undefined で行い、per-op enforcement で別途強制する。
     const placeId = (toolArgs.place_id as string) ?? undefined;
     const authResult = await authenticateMcpRequest(authHeader, {
-      op: READ_OPS[toolName],
+      op: opMap[toolName],
       form_id,
       place_id: placeId,
       target_type: targetType,
@@ -211,6 +253,91 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           );
           if (!result.ok) return rpcErr(id, INVALID_PARAMS, result.message);
           return rpcOk(id, result.data);
+        }
+        case 'write': {
+          // ── ops は non-empty array でなければならない (fail-closed) ──
+          if (!Array.isArray(toolArgs.ops) || toolArgs.ops.length === 0) {
+            return rpcErr(id, INVALID_PARAMS, 'ops は要素を1つ以上含む配列で指定してください', 400);
+          }
+          const ops = toolArgs.ops as Array<Record<string, unknown>>;
+
+          // ── op は kind:'set' かつ place_id:'memo' のみ許可 ──
+          for (const op of ops) {
+            if (op.kind !== 'set') {
+              return rpcErr(id, INVALID_PARAMS, `customer_record フォームは op kind "${op.kind}" を許可していません (set のみ)`, 400);
+            }
+            if (op.place_id !== 'memo') {
+              return rpcErr(id, INVALID_PARAMS, `customer_record フォームで書込可能な place_id は "memo" のみです`, 400);
+            }
+          }
+
+          // ── per-op allowed_places enforcement (fail-closed, apply 前) ──
+          // top-level auth は place_id=undefined で place チェックをスキップするため、
+          // ここで各 op の place を claims.allowed_places に対して個別強制する。
+          {
+            const allowedPlaces = claims.allowed_places;
+            for (const op of ops) {
+              const opPlace = op.place_id as string | undefined;
+              if (!opPlace) {
+                return rpcErr(id, INVALID_PARAMS, `write op "${op.kind}" には place_id が必要です`, 400);
+              }
+              const allowed = allowedPlaces.some((ap) => opPlace === ap || opPlace.startsWith(ap + ':'));
+              if (!allowed) {
+                console.warn(`[api/mcp] write 拒否: place "${opPlace}" は allowed_places に含まれていません (jti=${claims.jti})`);
+                return rpcErr(id, AUTH_ERROR, `write op の place "${opPlace}" は allowed_places に含まれていません`, 403);
+              }
+            }
+          }
+
+          // ── dry_run は boolean 必須 (省略/非 boolean は live write へ暗黙フォールバックさせない) ──
+          if (typeof toolArgs.dry_run !== 'boolean') {
+            return rpcErr(id, INVALID_PARAMS, 'write の dry_run は boolean (true/false) で明示してください。省略は禁止です。', 400);
+          }
+          const dryRun = toolArgs.dry_run as boolean;
+
+          // ── provenance.source / run_id 必須、run_id は claims.run_id と一致 ──
+          const provenance = toolArgs.provenance as { source?: unknown; run_id?: unknown } | undefined;
+          if (!provenance || typeof provenance.source !== 'string' || provenance.source.length === 0 ||
+              typeof provenance.run_id !== 'string' || provenance.run_id.length === 0) {
+            return rpcErr(id, INVALID_PARAMS, 'provenance.source と provenance.run_id (non-empty string) は必須です', 400);
+          }
+          if (provenance.run_id !== claims.run_id) {
+            return rpcErr(id, AUTH_ERROR, 'provenance.run_id がトークンの run_id と一致しません', 403);
+          }
+
+          // ── live write は idempotency_key non-empty string 必須 ──
+          const idempotencyKey = toolArgs.idempotency_key;
+          if (!dryRun && (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0)) {
+            return rpcErr(id, INVALID_PARAMS, 'live write には idempotency_key (non-empty string) が必須です', 400);
+          }
+
+          // ── form gate: write_enabled=true の時だけ live 実行 (false→ok:false fail-closed) ──
+          if (!dryRun) {
+            const enabled = await isFormWriteEnabled(form_id);
+            if (!enabled) {
+              return rpcOk(id, {
+                ok: false,
+                rejected_op: null,
+                reason: `フォーム "${form_id}" は write が無効です (write_enabled=false)`,
+              });
+            }
+          }
+
+          const result = await handleWrite(
+            {
+              form_id,
+              ops: ops as unknown as WriteOp[],
+              dry_run: dryRun,
+              idempotency_key: (idempotencyKey as string) ?? '',
+              expected_revision: toolArgs.expected_revision as string | undefined,
+              provenance: provenance as { source: string; run_id: string; extracted_from?: string },
+              confidence: toolArgs.confidence as number | undefined,
+            },
+            resolvedTargetId,
+            claims.run_id,
+          );
+          // write 失敗も 200 + ok:false で返す (JSON-RPC error にしない)
+          return rpcOk(id, result);
         }
         // fetch-file を提供するツールは handleFetchFile を追加する。
         default:
