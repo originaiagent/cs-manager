@@ -31,6 +31,16 @@ export interface McpJwtClaims {
   session_id?: string;
   agent_id?: string;
   mcp_server_name: string;
+  // 書き込み可逆性レイヤー (v4):
+  //   purpose            — 'run' (通常 write) | 'undo' (取り消し)。route が verified claim から判定する。
+  //   source_request_id  — intent 呼出に必要な origin 側のリクエスト相関 ID (通常 write で必須)。
+  //   undo の場合は claim に write_id / idempotency_key / payload_hash / expected_revision が含まれる。
+  purpose?: string;
+  source_request_id?: string;
+  write_id?: string;
+  idempotency_key?: string;
+  payload_hash?: string;
+  expected_revision?: string;
   exp: number;
   iat: number;
 }
@@ -240,12 +250,18 @@ async function validateWithOriginAi(
  * Authorization: Bearer <JWT> ヘッダを検証し、op/place/target の認可も確認する。
  * いずれかの段階で失敗した場合は fail-closed で McpAuthError を返す。
  *
- * @param authHeader  - req.headers.get('authorization')
- * @param opReq       - 実行しようとする操作の情報
+ * @param authHeader          - req.headers.get('authorization')
+ * @param opReq               - 実行しようとする操作の情報
+ * @param deferOriginValidate - true の場合、ステップ3 (origin-ai validate) を **スキップ** する。
+ *                              書き込み可逆性レイヤー (flag ON の write) では validate を
+ *                              handshake 内 (intent→validate→apply→audit) で実施するため、ここでは
+ *                              JWT 検証 + ローカル認可のみ行う。read 系・flag OFF は false (validate 込み)。
+ *                              JWT/ローカル認可は **常に** 実行されるため fail-closed は維持される。
  */
 export async function authenticateMcpRequest(
   authHeader: string | null,
   opReq: McpOpRequest,
+  deferOriginValidate = false,
 ): Promise<McpAuthResult> {
   // Bearer トークン抽出
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -266,8 +282,12 @@ export async function authenticateMcpRequest(
   if (authError) return { ok: false, err: authError };
 
   // ステップ 3: origin-ai コールバック照合
-  const validateResult = await validateWithOriginAi(claims, opReq);
-  if (!validateResult.ok) return validateResult;
+  // deferOriginValidate=true の場合は handshake 内 (reversibility.ts) で validate を行うため
+  // ここではスキップする。JWT 検証 + ローカル認可は上で完了しているため fail-closed は維持される。
+  if (!deferOriginValidate) {
+    const validateResult = await validateWithOriginAi(claims, opReq);
+    if (!validateResult.ok) return validateResult;
+  }
 
   return { ok: true, ctx: { claims } };
 }
