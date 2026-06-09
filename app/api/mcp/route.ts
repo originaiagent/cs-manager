@@ -21,9 +21,17 @@ import { authenticateMcpRequest } from '@/lib/mcp/auth';
 import { handleList } from '@/lib/mcp/capabilities/list';
 import { handleRead } from '@/lib/mcp/capabilities/read';
 import { handleWrite, type WriteOp } from '@/lib/mcp/capabilities/write';
+import { handleReversibleWrite } from '@/lib/mcp/reversibility';
 import { isFormWriteEnabled } from '@/lib/mcp/service';
 // fetch-file を提供するツールのみ有効化:
 // import { handleFetchFile } from '@/lib/mcp/capabilities/fetch-file';
+
+// 書き込み可逆性レイヤー (v4) の有効化フラグ。正本: minpaku-tool route.ts。
+// OFF (既定): handshake を一切行わず現行 legacy write を実行する (現挙動完全維持)。
+// ON: write op のみ intent→validate→apply→audit の handshake を行う。
+function isReversibilityEnabled(): boolean {
+  return process.env.EMBED_REVERSIBILITY_ENABLED === 'true';
+}
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -216,6 +224,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // write の place は各 op 内 (place_id) に存在し top-level には無い。
     // top-level auth は place_id=undefined で行い、per-op enforcement で別途強制する。
     const placeId = (toolArgs.place_id as string) ?? undefined;
+
+    // 書き込み可逆性レイヤー: flag ON かつ write op の場合のみ origin-ai validate を
+    // handshake 内 (reversibility.ts: intent→validate→apply→audit) に遅延する。
+    // JWT 検証 + ローカル認可は authenticateMcpRequest 内で必ず実行される (fail-closed 維持)。
+    // read 系 / flag OFF は従来通り validate 込みで認証する。
+    const reversibilityOn = isReversibilityEnabled();
+    const deferOriginValidate = reversibilityOn && opMap[toolName] === 'write';
+
     const authResult = await authenticateMcpRequest(authHeader, {
       op: opMap[toolName],
       form_id,
@@ -224,7 +240,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       target_id: targetId,
       session_id: sessionId || undefined,
       agent_id: agentId || undefined,
-    });
+    }, deferOriginValidate);
     if (!authResult.ok) return rpcErr(id, AUTH_ERROR, authResult.err.message, authResult.err.status);
 
     const { claims } = authResult.ctx;
@@ -323,6 +339,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             }
           }
 
+          // ── 書き込み可逆性レイヤー (flag ON): handshake 経由 ─────────────────
+          // intent→validate→handleWrite→audit を reversibility.ts が orchestrate する。
+          // purpose (run/undo) は **verified claim** から判定する (caller 供給は信用しない)。
+          // reversible は scalar set のみ可逆。非 set / 非 scalar / value 欠落 / 重複 place は
+          // handshake 内で fail-closed 拒否される。
+          if (reversibilityOn) {
+            const rev = await handleReversibleWrite({
+              claims,
+              form_id,
+              target_id: resolvedTargetId,
+              ops: ops as unknown as WriteOp[],
+              dry_run: dryRun,
+              expected_revision: toolArgs.expected_revision as string | undefined,
+              provenance: provenance as { source: string; run_id: string; extracted_from?: string },
+              confidence: toolArgs.confidence as number | undefined,
+            });
+            if (!rev.ok) {
+              // handshake 失敗 (intent/validate 拒否・origin 到達不能等) は fail-closed。
+              return rpcErr(id, AUTH_ERROR, rev.reason, rev.status);
+            }
+            // handshake 内の apply 結果。write 失敗は 200 + ok:false (legacy と同形式)。
+            return rpcOk(id, rev.write);
+          }
+
+          // ── 現行 legacy write (flag OFF): handshake 一切なし ─────────────────
           const result = await handleWrite(
             {
               form_id,

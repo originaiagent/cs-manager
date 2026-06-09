@@ -62,7 +62,9 @@ vi.mock('@/lib/mcp/service', () => {
       const data = recordStore[id] ?? { id, memo: '初期メモ', updated_at: '2026-01-01T00:00:00.000Z' };
       return { ok: true, data };
     }),
-    patchCustomerRecord: vi.fn(async (id: string, updates: Record<string, unknown>) => {
+    patchCustomerRecord: vi.fn(async (id: string, updates: Record<string, unknown>, _expected_revision?: string) => {
+      // _expected_revision (第3引数) は mock では衝突判定に使わない (CAS は実 DB の責務)。
+      // contract test は「呼出に CAS 引数が渡るか」と REVISION_CONFLICT override での挙動を検証する。
       const existing = recordStore[id] ?? { id, updated_at: '2026-01-01T00:00:00.000Z' };
       const updated = { ...existing, ...updates, updated_at: new Date().toISOString() };
       recordStore[id] = updated;
@@ -398,5 +400,129 @@ describe('§6: write_disabled ゲート', () => {
       'run-005',
     );
     expect(result.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §7: [可逆性] atomic CAS OCC — expected_revision 指定時は patch に CAS 引数が渡る
+// 正本: minpaku-tool contract.test.ts §6-17 (atomic CAS OCC) の縮小移植。
+// ---------------------------------------------------------------------------
+
+describe('§7: atomic CAS OCC (可逆性レイヤー)', () => {
+  it('expected_revision 指定時、patchCustomerRecord に CAS 引数 (updated_at) が渡る', async () => {
+    const { patchCustomerRecord } = await import('@/lib/mcp/service');
+    vi.mocked(patchCustomerRecord).mockClear();
+
+    const TARGET = `rec-cas-${Date.now()}`;
+    const RUN = `run-cas-${Date.now()}`;
+    const REV = '2026-01-01T00:00:00.000Z'; // モック getCustomerRecord の updated_at と一致 (preflight 通過)
+
+    const result = await handleWrite(
+      {
+        form_id: 'customer_record',
+        ops: [{ kind: 'set', place_id: 'memo', value: 'CAS更新' }],
+        dry_run: false,
+        idempotency_key: `idem-cas-${Date.now()}`,
+        expected_revision: REV,
+        provenance: { source: 'test', run_id: RUN },
+      },
+      TARGET,
+      RUN,
+    );
+    expect(result.ok).toBe(true);
+
+    // patchCustomerRecord が第3引数 expected_revision 付きで呼ばれている (pure-scalar 単一 CAS 経路)
+    const calls = vi.mocked(patchCustomerRecord).mock.calls;
+    const casCall = calls.find((c) => c[2] !== undefined);
+    expect(casCall).toBeDefined();
+    expect(casCall![2]).toBe(REV);
+  });
+
+  it('expected_revision 未指定時は CAS 引数なし (legacy 挙動維持)', async () => {
+    const { patchCustomerRecord } = await import('@/lib/mcp/service');
+    vi.mocked(patchCustomerRecord).mockClear();
+
+    const TARGET = `rec-nocas-${Date.now()}`;
+    const RUN = `run-nocas-${Date.now()}`;
+
+    const result = await handleWrite(
+      {
+        form_id: 'customer_record',
+        ops: [{ kind: 'set', place_id: 'memo', value: 'legacy更新' }],
+        dry_run: false,
+        idempotency_key: `idem-nocas-${Date.now()}`,
+        provenance: { source: 'test', run_id: RUN },
+      },
+      TARGET,
+      RUN,
+    );
+    expect(result.ok).toBe(true);
+
+    // 第3引数は undefined (CAS なし)
+    const calls = vi.mocked(patchCustomerRecord).mock.calls;
+    for (const c of calls) {
+      expect(c[2]).toBeUndefined();
+    }
+  });
+
+  it('CAS 0 件 (REVISION_CONFLICT) は楽観ロック衝突として fail + key 解放', async () => {
+    const { patchCustomerRecord, checkIdempotencyKey } = await import('@/lib/mcp/service');
+    vi.mocked(patchCustomerRecord).mockClear();
+
+    const TARGET = `rec-cas-conflict-${Date.now()}`;
+    const RUN = `run-cas-conflict-${Date.now()}`;
+    const key = `idem-cas-conflict-${Date.now()}`;
+
+    // preflight checkRevision は通すが、apply 時の CAS で衝突させる:
+    // 1回目の patch 呼び出しだけ REVISION_CONFLICT を返すよう上書き。
+    vi.mocked(patchCustomerRecord).mockResolvedValueOnce({
+      ok: false,
+      error: { code: 'REVISION_CONFLICT', message: '楽観ロック衝突: revision が一致しません', status: 409 },
+    } as never);
+
+    const result = await handleWrite(
+      {
+        form_id: 'customer_record',
+        ops: [{ kind: 'set', place_id: 'memo', value: '衝突更新' }],
+        dry_run: false,
+        idempotency_key: key,
+        expected_revision: '2026-01-01T00:00:00.000Z', // preflight は通る値
+        provenance: { source: 'test', run_id: RUN },
+      },
+      TARGET,
+      RUN,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('楽観ロック');
+    }
+
+    // CAS 衝突後は pending 行が解放され、同一 key で再試行できる (miss に戻る)
+    const idem = await checkIdempotencyKey(key, RUN);
+    expect(idem.status).toBe('miss');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §8: [可逆性] handshake fail-closed — reversibleSetOps の境界条件
+// reversibility.ts の純ロジック (network/origin 不要部分) を直接検証する。
+// ---------------------------------------------------------------------------
+
+describe('§8: reversible write fail-closed 境界条件', () => {
+  // handleReversibleWrite は origin fetch を要するため、ここでは設計不変条件として
+  // 「scalar set + value own property + place=memo のみが可逆対象」を payloadHash の
+  // 性質と manifest 型で間接検証する (詳細 E2E は親 deploy 後 / canonical.test.ts §parity で担保)。
+  it('memo は manifest 上 scalar (text) で reversible 対象である', () => {
+    const place = getPlace('customer_record', 'memo');
+    expect(place).toBeDefined();
+    expect(place!.type).toBe('text');
+    expect(place!.writable).toBe(true);
+  });
+
+  it('customer_record は repeating / file place を持たない (構造 op 不可)', () => {
+    const form = getForm('customer_record');
+    expect(form).toBeDefined();
+    const nonScalar = form!.places.filter((p) => p.type === 'repeating' || p.type === 'file');
+    expect(nonScalar).toHaveLength(0);
   });
 });

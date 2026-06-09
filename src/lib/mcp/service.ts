@@ -65,31 +65,46 @@ export async function getCustomerRecord(id: string): Promise<ServiceResult<Custo
  * cs-manager 自前 service_role 経由 (自ツールの自前データ更新)。
  * updated_at を明示セットし、handleRead / checkRevision と同じ revision ソースを更新する
  * (DB トリガ trg_csr_updated_at もあるが round-trip 一貫性のため明示)。
+ *
+ * 正本: minpaku-tool patchProperty / patchVendor の atomic CAS パターン。
+ * expected_revision を指定した場合は **atomic CAS**: `.eq('updated_at', expected_revision)` を
+ * 条件に加え、affected rows が 0 件なら OCC 衝突 (code='REVISION_CONFLICT') を返す。
+ * これにより別 idempotency_key の同時 write が同じ revision を読んで両方 apply する競合を防ぐ。
+ * expected_revision 未指定時は従来通り CAS 条件なし (legacy 挙動完全維持)。
  */
 export async function patchCustomerRecord(
   id: string,
   updates: Partial<Omit<CustomerRecordRow, 'id'>>,
+  expected_revision?: string,
 ): Promise<ServiceResult<CustomerRecordRow>> {
   if (Object.keys(updates).length === 0) {
     return { ok: false, error: { code: 'NO_FIELDS', message: '更新フィールドがありません', status: 400 } };
   }
 
   const sb = await getSupabaseAdmin();
-  const { data, error } = await sb
+  let q = sb
     .from('customer_service_records')
     .update({ ...updates, updated_at: new Date().toISOString() })
-    .eq('id', id)
-    .select('*')
-    .maybeSingle();
+    .eq('id', id);
+  // CAS: expected_revision 指定時のみ updated_at 一致を条件に追加 (atomic OCC)
+  if (expected_revision !== undefined) {
+    q = q.eq('updated_at', expected_revision);
+  }
+  // 0 件判定のため .maybeSingle() は使わず affected rows を select で確認する
+  const { data, error } = await q.select('*');
 
   if (error) {
     console.error('[mcp/service] patchCustomerRecord error:', error.message);
     return { ok: false, error: { code: 'DB_ERROR', message: '更新に失敗しました', status: 500 } };
   }
-  if (!data) {
+  if (!data || data.length === 0) {
+    // CAS 指定時の 0 件は OCC 衝突 (revision がズレた)。未指定時の 0 件は対象不在。
+    if (expected_revision !== undefined) {
+      return { ok: false, error: { code: 'REVISION_CONFLICT', message: '楽観ロック衝突: revision が一致しません', status: 409 } };
+    }
     return { ok: false, error: { code: 'NOT_FOUND', message: '対応記録が見つかりません', status: 404 } };
   }
-  return { ok: true, data: data as CustomerRecordRow };
+  return { ok: true, data: data[0] as CustomerRecordRow };
 }
 
 // ---------------------------------------------------------------------------
