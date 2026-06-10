@@ -14,6 +14,7 @@ import {
 import ChannelBadge from '@/components/ui/channel-badge';
 import CustomerInfo from './_components/customer-info';
 import StatusControls from './_components/status-controls';
+import InquiryToRecordButton from './_components/inquiry-to-record-button';
 import MessageThread from './_components/message-thread';
 import ReplyForm from './_components/reply-form';
 
@@ -87,6 +88,7 @@ export default async function TicketDetailPage({ params }: { params: Params }) {
         description={`受信 ${formatRelative(ticket.created_at)}`}
         rightSlot={
           <div className="flex items-center gap-2">
+            <InquiryToRecordButton ticketId={ticket.id} />
             <Link
               href={`/customer-records/new?ticket_id=${encodeURIComponent(ticket.id)}${
                 ticket.customer_name
