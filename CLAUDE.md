@@ -45,9 +45,11 @@ npm run dev
   - 1 サイクルあたり最大送信件数 20 件 (Vercel タイムアウト対策)
 
 ## DB Schema (Phase 1.1+)
-channels / tickets / messages / channel_sync_state / ticket_drafts.
+channels / channel_inboxes / tickets / messages / channel_sync_state / ticket_drafts.
 全テーブル RLS 有効、service_role のみ読み書き可（Phase 1.2 で UI 用ポリシー追加予定）。
 `channel_credentials` は廃止 (Core /api/credentials 経由に移行済)。
+- `channels.status`: `active` | `inactive` | `pending` | `disabled`。`pending`=配線なしの申請中チャネル(表示のみ、例: Amazon)。`inactive`は`disabled`の旧称(後方互換で残置)。
+- `channel_inboxes`: メールアドレス単位の受信レジストリ。`address`(envelope/original recipient 推奨) を `lower(btrim(...))` で一意化。`status` active/disabled。**メアドは行追加だけで増やせる**（DB登録だけでチャネル/メアド拡張）。
 
 ## Channel Adapters
 - `src/channels/_lib/`: ChannelAdapter インターフェース・正規化型・registry
@@ -57,5 +59,10 @@ channels / tickets / messages / channel_sync_state / ticket_drafts.
   - 受信 (fetchInbox): `src/channels/rakuten/adapter.ts`
   - 送信 (sendApprovedDrafts): `src/channels/rakuten/outbound.ts`
   - **店舗 ID** は `channels.config.shop_id` に格納する運用 (Core API の scope_key と同一)
+- **メール (inbound webhook 駆動)**: pull adapter は持たない (registry 非登録)。`channels.code='email'`, `config.ingestion='inbound_webhook'`。sync-channels cron は pull adapter 無しチャネルを skip する。
+  - 受信: `POST /api/channels/email/inbound` (認可 tier=`cron`: `Authorization: Bearer ${CRON_SECRET}` または `X-Diag-Token`)。正規化ペイロード `{to, from, from_name?, subject?, text, message_id, received_at?, in_reply_to?, references?, thread_id?}`。body サイズ・スキーマ検証、ログ/エラーに PII を出さない。
+  - 経路: 宛先(`to`)を `channel_inboxes`(active) で解決 → `src/lib/sync/ingest.ts` で ticket+inbound message を冪等 upsert → origin-ai RAG (`src/lib/rag/reply-adapter.ts`) で返信ドラフト生成 → `ticket_drafts(source='rag', status='pending')` 保存。同一 Message-ID 再送はドラフト二重生成しない。
+  - 送信 (SMTP 等): **未実装**。`email_send_enabled` は将来のゲート項目。実送信はどの cron にも配線していない。
+  - 本番で実フォワーダ(IMAP poller / SendGrid Inbound Parse 等)を繋ぐ際は、同一正規化契約に写像する thin adapter を足し、webhook 認可を専用 secret へ切替える (ゲート項目)。
 
 Note: spec で示された `_diag` は Next.js App Router の private folder 規約 (アンダースコアプレフィックスはルーティングから除外) と衝突するため `diag` に変更。

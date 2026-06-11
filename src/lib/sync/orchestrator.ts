@@ -254,6 +254,15 @@ export async function runChannelSync(): Promise<SyncRunResult> {
   const channels = await loadActiveChannels();
   const results: ChannelSyncResult[] = [];
   for (const ch of channels) {
+    // pull adapter を持たない active チャネル (例: メール = inbound webhook 駆動) は
+    // 本 cron の対象外。エラー結果ではなく skip として扱い、ノイズを出さない。
+    if (!getChannelAdapter(ch.code)) {
+      makeLogger(ch.code).info('skip_no_pull_adapter', {
+        channelId: ch.id,
+        ingestion: (ch.config as Record<string, unknown>)?.ingestion ?? null,
+      });
+      continue;
+    }
     const r = await syncOneChannel(ch);
     results.push(r);
   }
