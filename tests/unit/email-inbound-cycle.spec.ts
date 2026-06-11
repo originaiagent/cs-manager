@@ -18,16 +18,19 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 const MOCK_PORT = 31907;
 const MOCK_URL = `http://127.0.0.1:${MOCK_PORT}`;
 
-// === source module の import 前に env を上書き (credentials/index.ts は module-init で評価) ===
-process.env.CORE_API_URL = MOCK_URL;
-process.env.INTERNAL_API_KEY = 'mock-internal-key';
-process.env.ORIGIN_AI_URL = MOCK_URL;
-process.env.CRON_SECRET = process.env.CRON_SECRET ?? 'mock-cron-secret';
-process.env.DIAG_TOKEN = process.env.DIAG_TOKEN ?? 'mock-diag-token';
-
+// Core (credential) と origin-ai (RAG skill) をローカル mock に向ける。Supabase は実 DB。
+// credentials/index.ts は env を call-time に読むため、env の差し替えは beforeAll で行い
+// afterAll で復元する (他 spec との env 衝突を避ける)。
 import { _clearCredentialCacheForTest } from '../../src/lib/credentials';
 import { getSupabaseAdmin } from '../../src/lib/db/supabase-admin';
 import { POST as inboundPost } from '../../app/api/channels/email/inbound/route';
+
+const ORIGINAL_ENV = {
+  CORE_API_URL: process.env.CORE_API_URL,
+  INTERNAL_API_KEY: process.env.INTERNAL_API_KEY,
+  ORIGIN_AI_URL: process.env.ORIGIN_AI_URL,
+};
+const MOCK_DIAG_TOKEN = process.env.DIAG_TOKEN ?? 'mock-diag-token';
 
 const RUN = Date.now();
 const TEST_ADDRESS = `e2e-inbound-${RUN}@cs-test.example`;
@@ -50,31 +53,21 @@ function startMock(): Promise<Server> {
     if (url.startsWith('/api/credentials/supabase_service_role')) {
       const realKey = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? '').replace(/\s+$/, '');
       res.statusCode = 200;
-      res.end(
-        JSON.stringify({
-          service_code: 'supabase_service_role',
-          scope_key: null,
-          credentials: { service_key: realKey },
-          metadata: {},
-          valid_from: new Date().toISOString(),
-          valid_to: null,
-        }),
-      );
+      res.end(JSON.stringify({
+        service_code: 'supabase_service_role', scope_key: null,
+        credentials: { service_key: realKey }, metadata: {},
+        valid_from: new Date().toISOString(), valid_to: null,
+      }));
       return;
     }
-    // Core: origin_ai_internal credential
+    // Core: origin_ai_internal — RAG エンドポイント認証鍵 (mock 値、mock 側は検証しない)
     if (url.startsWith('/api/credentials/origin_ai_internal')) {
       res.statusCode = 200;
-      res.end(
-        JSON.stringify({
-          service_code: 'origin_ai_internal',
-          scope_key: null,
-          credentials: { api_key: 'mock-rag-key' },
-          metadata: {},
-          valid_from: new Date().toISOString(),
-          valid_to: null,
-        }),
-      );
+      res.end(JSON.stringify({
+        service_code: 'origin_ai_internal', scope_key: null,
+        credentials: { api_key: 'mock-rag-key' }, metadata: {},
+        valid_from: new Date().toISOString(), valid_to: null,
+      }));
       return;
     }
     // origin-ai rag skills
@@ -115,7 +108,7 @@ function makeReq(payload: unknown): Request {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Diag-Token': process.env.DIAG_TOKEN as string,
+      'X-Diag-Token': MOCK_DIAG_TOKEN,
     },
     body: JSON.stringify(payload),
   });
@@ -128,6 +121,11 @@ let ticketId: string | null = null;
 
 test.beforeAll(async () => {
   mock = await startMock();
+  // Core / origin-ai を mock に差し替える (credentials は call-time read)。DIAG_TOKEN は確実に設定。
+  process.env.CORE_API_URL = MOCK_URL;
+  process.env.INTERNAL_API_KEY = 'mock-internal-key';
+  process.env.ORIGIN_AI_URL = MOCK_URL;
+  process.env.DIAG_TOKEN = MOCK_DIAG_TOKEN;
   _clearCredentialCacheForTest();
   const sb = await getSupabaseAdmin();
 
@@ -153,6 +151,12 @@ test.afterAll(async () => {
   const sb = await getSupabaseAdmin();
   if (ticketId) await sb.from('tickets').delete().eq('id', ticketId); // cascade messages/drafts
   if (inboxId) await sb.from('channel_inboxes').delete().eq('id', inboxId);
+  // env 復元 (他 spec へ影響を残さない)
+  for (const [k, v] of Object.entries(ORIGINAL_ENV)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  _clearCredentialCacheForTest();
   await new Promise<void>((r) => mock.close(() => r()));
 });
 
@@ -245,4 +249,19 @@ test('認可なしは 401', async () => {
   });
   const res = await inboundPost(noAuth as any);
   expect(res.status, 'D1: 401').toBe(401);
+});
+
+test('JSON object 以外 (null/配列) は 400', async () => {
+  const mkRaw = (raw: string) =>
+    new Request(`${MOCK_URL}/api/channels/email/inbound`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Diag-Token': MOCK_DIAG_TOKEN },
+      body: raw,
+    });
+  const r1 = await inboundPost(mkRaw('null') as any);
+  expect(r1.status, 'E1: null body → 400').toBe(400);
+  const r2 = await inboundPost(mkRaw('[1,2]') as any);
+  expect(r2.status, 'E2: array body → 400').toBe(400);
+  const r3 = await inboundPost(mkRaw('not json') as any);
+  expect(r3.status, 'E3: 不正 JSON → 400').toBe(400);
 });

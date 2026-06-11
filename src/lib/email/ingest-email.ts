@@ -27,12 +27,25 @@ export type EmailIngestStatus =
   | 'duplicate' // 既知の Message-ID → 何もしない
   | 'unknown_recipient'; // 宛先 inbox 未登録 / 無効
 
+/**
+ * ドラフト生成失敗の安定コード。
+ * codex High 指摘: upstream のエラーテキスト (raw 問い合わせ文を入力に持つ RAG の
+ * 応答ボディ等) を DB / API 応答に流すと PII 漏洩リスクがあるため、外部に出すのは
+ * この固定コードのみとし、生テキストは保持・返却しない。
+ */
+export type DraftErrorCode =
+  | 'rag_upstream_error' // RAG エンドポイントが非 OK / draft 不正
+  | 'rag_no_draft' // RAG は成功したが draft 空 (no_answer 等)
+  | 'rag_exception' // RAG 呼び出し自体が例外 (ネットワーク等)
+  | 'draft_persist_error'; // ticket_drafts への保存失敗
+
 export interface EmailIngestResult {
   status: EmailIngestStatus;
   channelId?: string;
   ticketId?: string;
   draftId?: string;
-  draftError?: string;
+  /** PII を含まない安定コードのみ (生のエラーテキストは載せない) */
+  draftError?: DraftErrorCode;
 }
 
 interface ResolvedInbox {
@@ -47,30 +60,32 @@ async function resolveInbox(
   sb: SupabaseClient,
   toNormalized: string,
 ): Promise<ResolvedInbox | null> {
-  // ilike で大小文字差を吸収して候補を絞り、JS 側で正規化一致を最終確認する
-  // (一意制約は lower(btrim(address)) のため、表記揺れは正規化で吸収)。
+  // 生成列 normalized_address (lower(btrim(address))) の等価比較で正確に解決する
+  // (DB の正規化契約と一致。表記揺れ・前後空白は生成列側で吸収済み)。
   const { data, error } = await sb
     .from('channel_inboxes')
-    .select('address, channel_id, status, channels!inner(id, status)')
-    .ilike('address', toNormalized)
-    .eq('status', 'active');
+    .select('channel_id, status, channels!inner(id, status)')
+    .eq('normalized_address', toNormalized)
+    .eq('status', 'active')
+    .maybeSingle();
   if (error) throw new Error(`resolveInbox failed: ${error.message}`);
+  if (!data) return null;
 
-  for (const row of (data ?? []) as any[]) {
-    const addr = String(row.address ?? '');
-    if (addr.trim().toLowerCase() !== toNormalized) continue;
-    const channel = Array.isArray(row.channels) ? row.channels[0] : row.channels;
-    if (!channel || channel.status !== 'active') continue;
-    return { channelId: row.channel_id as string };
-  }
-  return null;
+  const channel = Array.isArray((data as any).channels)
+    ? (data as any).channels[0]
+    : (data as any).channels;
+  if (!channel || channel.status !== 'active') return null;
+  return { channelId: (data as any).channel_id as string };
 }
 
-/** PII を含めない短いエラー記録を ticket.channel_meta.email_ingest に書く。 */
+/**
+ * ドラフト失敗を安定コードで ticket.channel_meta.email_ingest に記録する。
+ * PII を含む生テキストは保存しない (codex High 指摘)。
+ */
 async function recordDraftError(
   sb: SupabaseClient,
   ticketId: string,
-  shortError: string,
+  code: DraftErrorCode,
 ): Promise<void> {
   const { data } = await sb
     .from('tickets')
@@ -79,7 +94,7 @@ async function recordDraftError(
     .maybeSingle();
   const meta = (data?.channel_meta ?? {}) as Record<string, unknown>;
   meta.email_ingest = {
-    draft_error: shortError.slice(0, 200),
+    draft_error_code: code,
     at: new Date().toISOString(),
   };
   await sb.from('tickets').update({ channel_meta: meta }).eq('id', ticketId);
@@ -137,20 +152,32 @@ export async function ingestEmailInbound(
       tenantId: null,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    await recordDraftError(sb, ticketId, msg);
-    return { status: 'ingested_draft_failed', channelId: inbox.channelId, ticketId, draftError: msg };
-  }
-
-  if (!ragResult.ok || !ragResult.draft || !ragResult.draft.trim()) {
-    const msg = ragResult.error ?? 'RAG が返信ドラフトを生成しませんでした';
-    await recordDraftError(sb, ticketId, msg);
+    // 例外メッセージは外部に出さない (PII 安全)。種別のみログ。
+    console.error('[email-ingest] rag_exception', {
+      name: e instanceof Error ? e.name : 'unknown',
+    });
+    await recordDraftError(sb, ticketId, 'rag_exception');
     return {
-      status: ragResult.ok ? 'ingested_no_draft' : 'ingested_draft_failed',
+      status: 'ingested_draft_failed',
       channelId: inbox.channelId,
       ticketId,
-      draftError: ragResult.ok ? undefined : msg,
+      draftError: 'rag_exception',
     };
+  }
+
+  if (!ragResult.ok) {
+    await recordDraftError(sb, ticketId, 'rag_upstream_error');
+    return {
+      status: 'ingested_draft_failed',
+      channelId: inbox.channelId,
+      ticketId,
+      draftError: 'rag_upstream_error',
+    };
+  }
+  if (!ragResult.draft || !ragResult.draft.trim()) {
+    // RAG は成功したが回答なし (no_answer 等)。失敗ではないが draft は保存しない。
+    await recordDraftError(sb, ticketId, 'rag_no_draft');
+    return { status: 'ingested_no_draft', channelId: inbox.channelId, ticketId };
   }
 
   // 下書きを source='rag' / status='pending' (既定) で保存。auto-approve しない。
@@ -160,12 +187,12 @@ export async function ingestEmailInbound(
     .select('id')
     .single();
   if (draftErr) {
-    await recordDraftError(sb, ticketId, draftErr.message);
+    await recordDraftError(sb, ticketId, 'draft_persist_error');
     return {
       status: 'ingested_draft_failed',
       channelId: inbox.channelId,
       ticketId,
-      draftError: draftErr.message,
+      draftError: 'draft_persist_error',
     };
   }
 

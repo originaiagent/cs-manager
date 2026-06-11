@@ -8,8 +8,14 @@
  * - キャッシュ: プロセス内 Map (TTL 5 分)。Vercel Functions のコールドスタートで失効する想定で OK
  * - cs-manager 内に楽天等の鍵類は持たない (env も含めて)
  */
-const CORE_API_URL = process.env.CORE_API_URL?.replace(/\s+$/, '');
-const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
+// CORE_API_URL / INTERNAL_API_KEY は call-time に解決する (module-init 固定にしない)。
+// 本番では env は静的なため挙動不変。テスト/複数 import 時の env 上書き順序に依存しないため。
+function envCoreApiUrl(): string | undefined {
+  return process.env.CORE_API_URL?.replace(/\s+$/, '');
+}
+function envInternalApiKey(): string | undefined {
+  return process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
+}
 const CORE_API_TIMEOUT_MS = process.env.CORE_API_TIMEOUT_MS
   ? parseInt(process.env.CORE_API_TIMEOUT_MS, 10)
   : 10_000;
@@ -77,8 +83,8 @@ export async function getCredential<T = Record<string, unknown>>(
   scopeKey: string | null = null,
   opts: GetCredentialOptions = {},
 ): Promise<CredentialResponse<T>> {
-  const coreUrl = opts.coreApiUrl ?? CORE_API_URL;
-  const apiKey = opts.internalApiKey ?? INTERNAL_API_KEY;
+  const coreUrl = opts.coreApiUrl ?? envCoreApiUrl();
+  const apiKey = opts.internalApiKey ?? envInternalApiKey();
   if (!coreUrl) {
     throw new CredentialFetchError('CORE_API_URL is not set', null, serviceCode, scopeKey);
   }

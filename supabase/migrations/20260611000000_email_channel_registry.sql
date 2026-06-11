@@ -49,6 +49,8 @@ create table if not exists public.channel_inboxes (
   channel_id         uuid not null references public.channels(id) on delete cascade,
   -- 受信アドレス (envelope/original recipient を優先して登録する運用)
   address            text not null,
+  -- 照合用の正規化アドレス (生成列)。大小文字差・前後空白を吸収。lookup は本列の等価比較で行う。
+  normalized_address text generated always as (lower(btrim(address))) stored,
   status             text not null default 'active'
                        check (status in ('active', 'disabled')),
   config             jsonb not null default '{}'::jsonb,
@@ -56,9 +58,9 @@ create table if not exists public.channel_inboxes (
   updated_at         timestamptz not null default now()
 );
 
--- 大小文字差・前後空白を吸収した一意制約 (lower(btrim(address)))
+-- 正規化アドレスの一意制約 (アドレス重複登録を防止)
 create unique index if not exists uq_channel_inboxes_normalized_address
-  on public.channel_inboxes (lower(btrim(address)));
+  on public.channel_inboxes (normalized_address);
 
 create index if not exists idx_channel_inboxes_channel
   on public.channel_inboxes (channel_id);

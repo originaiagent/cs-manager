@@ -44,12 +44,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: 'payload too large' }, { status: 413 });
   }
 
-  let raw: RawEmailInbound;
+  let parsed: unknown;
   try {
-    raw = JSON.parse(rawText) as RawEmailInbound;
+    parsed = JSON.parse(rawText);
   } catch {
     return NextResponse.json({ ok: false, error: 'invalid json' }, { status: 400 });
   }
+  // null / 配列 / プリミティブは拒否 (JSON object 必須)
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return NextResponse.json({ ok: false, error: 'json object required' }, { status: 400 });
+  }
+  const raw = parsed as RawEmailInbound;
 
   const normalized = normalizeEmailInbound(raw, new Date().toISOString());
   if (!normalized.ok) {
