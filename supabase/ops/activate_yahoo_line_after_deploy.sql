@@ -1,10 +1,15 @@
 -- ============================================================================
+-- 【運用スクリプト / 手動適用専用 — 通常の migration ではない】
 -- yahoo / line を active 化 (credential-gated)
 --
--- ⚠️ 適用順序 (codex CONCERN#4): 本 migration は yahoo 受信アダプタ登録
---    (src/channels/yahoo + registry) と line webhook endpoint
---    (/api/channels/line/inbound) を Vercel にデプロイした「後」に適用すること。
---    先に適用すると sync-channels cron が yahoo を no-adapter error 扱いする。
+-- ⚠️ これは supabase/migrations/ には置かない (codex コードレビュー #3):
+--    timestamped migration として自動適用されると、アダプタ/endpoint デプロイ前に
+--    yahoo=active になり sync-channels cron が no-adapter error を起こす恐れがある。
+--    よって ops/ 配下の手動適用スクリプトとし、運用手順で「アプリ先行デプロイ」を担保する。
+--
+-- ⚠️ 適用順序: yahoo 受信アダプタ登録 (src/channels/yahoo + registry) と line webhook
+--    endpoint (/api/channels/line/inbound) を Vercel にデプロイした「後」に、
+--    supabase MCP (project ID 明示) で手動実行すること。
 --
 -- active 化しても「キー未投入」のうちは受信しない:
 --   - yahoo (pull): orchestrator が Core `yahoo_shopping` を解決 → 404 (キー無し) なら

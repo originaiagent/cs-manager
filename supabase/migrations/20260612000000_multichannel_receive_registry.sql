@@ -16,9 +16,10 @@
 --   qoo10  = 公式受信API未確認                                          → メール転送
 --   own_ec = 自社EC                                                    → メール転送 (既存)
 --
--- ※ 本 migration は additive (自専有テーブルのみ)。yahoo/line の active 化は
---    アダプタ/endpoint デプロイ後に別 migration (20260612010000) で適用する
---    (codex CONCERN#4: activation が adapter デプロイに先行すると no-adapter error)。
+-- ※ 本 migration は additive (自専有テーブルのみ)。yahoo/line の active 化は含めない。
+--    activation は手動運用スクリプト supabase/ops/activate_yahoo_line_after_deploy.sql を
+--    アダプタ/endpoint デプロイ後に手動適用する (codex: activation を timestamped migration に
+--    すると adapter デプロイ前に自動適用され no-adapter error の恐れ)。
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------

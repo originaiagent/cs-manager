@@ -1,12 +1,16 @@
 /**
- * Yahoo!ショッピング 問い合わせ (外部トーク) API HTTP クライアント
+ * Yahoo!ショッピング 問い合わせ (質問) API HTTP クライアント
+ *
+ * 公式仕様で突合:
+ *  - 一覧 externalTalkList: params sellerId(必須), start(1始まり), result(最大20),
+ *    dateType/startDate/endDate(日付絞り込み, 任意), sort 等。
+ *  - 詳細 externalTalkDetail: params sellerId(必須), topicId(必須)。
  *
  * - apiBase は channels.config.api_base から渡す (ハードコード禁止)
  * - 認証は Bearer <access_token> (ctx.credentials 由来)。constructor 引数で受ける。
- * - 429 / 非 200 は明確に throw する。
+ * - 429 / 非 200 は明確に throw。
  * - 1 req/s のレート制御 (throttle) は adapter 側の責務。client は throttle しない。
- *
- * fetch は注入可能 (テストでフェイク応答を差し込むため)。
+ * - fetch は注入可能 (テストでフェイク応答を差し込む)。
  */
 import type {
   YahooTalkDetailResponse,
@@ -38,6 +42,21 @@ export interface YahooClientConfig {
   fetchImpl?: FetchLike;
 }
 
+export interface ListTalksParams {
+  /** ストアアカウント識別子 (= Core scope_key と同一)。必須。 */
+  sellerId: string;
+  /** 取得開始位置 (1 始まり)。 */
+  start: number;
+  /** 取得件数 (最大 20)。 */
+  result: number;
+  /** 日付絞り込み種別 (⚠️要検証 enum)。指定時のみ startDate/endDate を送る。 */
+  dateType?: string;
+  /** 絞り込み開始日 (dateType 指定時)。 */
+  startDate?: string;
+  /** 絞り込み終了日 (dateType 指定時)。 */
+  endDate?: string;
+}
+
 export class YahooTalkClient {
   private readonly apiBase: string;
   private readonly accessToken: string;
@@ -64,11 +83,7 @@ export class YahooTalkClient {
 
     const text = await res.text();
     if (res.status === 429) {
-      throw new YahooApiError(
-        `Yahoo API 429 rate limited: ${text.slice(0, 300)}`,
-        429,
-        text,
-      );
+      throw new YahooApiError(`Yahoo API 429 rate limited: ${text.slice(0, 300)}`, 429, text);
     }
     if (!res.ok) {
       throw new YahooApiError(
@@ -77,40 +92,35 @@ export class YahooTalkClient {
         text,
       );
     }
-    if (!text) {
-      // 空ボディは defensive に空オブジェクトとして返す (parse 側で既定値処理)
-      return {} as T;
-    }
+    if (!text) return {} as T; // 空ボディは defensive に空オブジェクト
     try {
       return JSON.parse(text) as T;
     } catch {
-      throw new YahooApiError(
-        `Yahoo API returned non-JSON body: ${text.slice(0, 200)}`,
-        res.status,
-        text,
-      );
+      throw new YahooApiError(`Yahoo API returned non-JSON body: ${text.slice(0, 200)}`, res.status, text);
     }
   }
 
-  /**
-   * 問い合わせトーク一覧。1 ページ最大 20 件。
-   * @param params.page 1 始まり
-   * @param params.since 増分起点 (更新日時下限)。null なら絞り込まない
-   */
-  async listTalks(params: { page: number; since: Date | null }): Promise<YahooTalkListResponse> {
-    const q = new URLSearchParams({ page: String(params.page) });
-    if (params.since) {
-      // ⚠️ 要検証: 更新日時の絞り込みパラメータ名。公式想定 'updateTimeFrom' を採用。
-      q.set('updateTimeFrom', params.since.toISOString());
+  /** 質問一覧。start/result でページング (page ではない)。 */
+  async listTalks(params: ListTalksParams): Promise<YahooTalkListResponse> {
+    const q = new URLSearchParams({
+      sellerId: params.sellerId,
+      start: String(params.start),
+      result: String(params.result),
+    });
+    if (params.dateType && params.startDate && params.endDate) {
+      q.set('dateType', params.dateType);
+      q.set('startDate', params.startDate);
+      q.set('endDate', params.endDate);
     }
     return this.request<YahooTalkListResponse>('externalTalkList', q);
   }
 
-  /**
-   * 1 トークの詳細 (全メッセージ)。
-   */
-  async getTalkDetail(talkId: string | number): Promise<YahooTalkDetailResponse> {
-    const q = new URLSearchParams({ talkId: String(talkId) });
+  /** 質問詳細 (全メッセージ)。sellerId + topicId 必須。 */
+  async getTalkDetail(params: { sellerId: string; topicId: string | number }): Promise<YahooTalkDetailResponse> {
+    const q = new URLSearchParams({
+      sellerId: params.sellerId,
+      topicId: String(params.topicId),
+    });
     return this.request<YahooTalkDetailResponse>('externalTalkDetail', q);
   }
 }

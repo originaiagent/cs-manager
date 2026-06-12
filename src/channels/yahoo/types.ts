@@ -1,104 +1,103 @@
 /**
- * Yahoo!ショッピング 問い合わせ (外部トーク) API のレスポンス型
+ * Yahoo!ショッピング 問い合わせ (質問) API レスポンス型
  *
- * 仕様参照: https://developer.yahoo.co.jp/webapi/shopping/question/
- *   - 一覧: GET externalTalkList   (問い合わせトーク一覧。1 レスポンス上限 20 件)
- *   - 詳細: GET externalTalkDetail (1 トークの全メッセージ本文)
+ * 公式仕様で突合 (2026-06-12, codex コードレビュー指摘を受け実ドキュメントに整合):
+ *  - 質問一覧API: https://developer.yahoo.co.jp/webapi/shopping/question/list.html
+ *  - 質問詳細API: https://developer.yahoo.co.jp/webapi/shopping/question/detail.html
  *
- * ⚠️ 要検証: 実 API キー未取得のため実レスポンスで叩けていない。フィールド名は
- * 公式ドキュメント準拠の「想定形状」であり、本番接続前に実レスポンスとの突き合わせが必須。
- * 各フィールドの前提は JSDoc に明示する。defensive parse 方針:
- *   - 欠損フィールドは安全な既定値に丸める (throw しない)
- *   - 配列でない値は空配列に丸める
+ * パース方針: defensive。欠損は安全な既定値に丸め、throw しない。
+ * 一部の値域 (postUserType の具体値 / postdate の単位 / dateType enum) は実レスポンスとの
+ * 最終突合がゲート項目 (実キー取得後)。⚠️要検証 を付す。
  */
 
-/**
- * トーク一覧 1 件分のサマリ。
- *
- * 要検証フィールド前提:
- * - talkId:       トークの一意 ID (string | number 両対応で受ける)
- * - updateTime:   最終更新日時 (ISO 8601 風 / JST 想定)。増分絞り込みの基準
- * - status:       Yahoo 側の生ステータス文字列 (例 'open' / 'completed' / 'closed')
- * - customerName: 顧客表示名 (マスクされている可能性あり)
- * - subject:      件名 (無い場合あり)
- */
-export interface YahooTalkListItem {
-  talkId: string | number;
-  updateTime?: string;
-  status?: string;
-  customerName?: string;
-  subject?: string;
+/** 質問一覧API: summary.topic ページング情報。 */
+export interface YahooTalkListSummaryTopic {
+  /** 取得開始位置 (1 始まり) */
+  start?: number;
+  /** 取得終了位置 */
+  end?: number;
+  /** 全件数 */
+  count?: number;
 }
 
-/**
- * externalTalkList のレスポンス全体。
- *
- * 要検証フィールド前提:
- * - result:    トーク配列 (1 ページ最大 20 件)
- * - totalPage: 総ページ数 (無い場合は件数 < 20 で終端判定する)
- * - totalCount / page: 補助。存在すれば利用、無ければ無視
- */
+export interface YahooTalkListSummary {
+  filter?: unknown;
+  unansweredCount?: number;
+  topic?: YahooTalkListSummaryTopic;
+}
+
+/** 質問一覧API: headlines[] の 1 件 (topic=1問い合わせスレッド)。 */
+export interface YahooTalkListHeadline {
+  topicId: string | number;
+  isUnread?: boolean;
+  isNoAnswer?: boolean;
+  isCompleted?: boolean;
+  completeConditionId?: string | number;
+  completeConditionShortName?: string;
+  /** 顧客側 最終投稿時刻 (⚠️要検証: UNIX秒 or 日付文字列) */
+  userPostTime?: string | number;
+  /** 店舗側 最終投稿時刻 */
+  sellerPostTime?: string | number;
+  qaType?: string;
+  isPrivate?: boolean;
+  category?: string;
+  title?: string;
+  body?: string;
+  messageCount?: number;
+  /** 顧客マスク済み ID (PII 低減済の識別子) */
+  userMaskedId?: string;
+  itemCode?: string;
+  orderId?: string;
+  firstPoster?: string;
+  serviceType?: string;
+}
+
 export interface YahooTalkListResponse {
-  result?: YahooTalkListItem[];
-  totalPage?: number;
-  totalCount?: number;
-  page?: number;
+  summary?: YahooTalkListSummary;
+  headlines?: YahooTalkListHeadline[];
 }
 
-/**
- * トーク内の 1 メッセージ。
- *
- * 要検証フィールド前提:
- * - messageId:  メッセージ一意 ID (string | number)。無ければ index で補完
- * - body:       本文
- * - postTime:   投稿日時 (ISO 8601 風 / JST 想定)
- * - senderType: 送信者種別。顧客 → inbound, 店舗 → outbound に写像。
- *               想定値: 'customer' / 'buyer' / 'user' は顧客、
- *               'store' / 'seller' / 'merchant' / 'staff' は店舗。
- *               不明値は inbound 既定。
- * - senderName: 送信者表示名
- */
+/** 質問詳細API: messages[].fileList の添付。 */
+export interface YahooTalkDetailFile {
+  fileName?: string;
+  objectKey?: string;
+  fileExt?: string;
+  thumbnailUrl?: string;
+  fileSize?: number;
+}
+
+/** 質問詳細API: messages[] の 1 メッセージ。 */
 export interface YahooTalkMessage {
   messageId?: string | number;
+  /** 投稿者種別 (⚠️要検証: 顧客/店舗を表す値。文字列 or 数値) */
+  postUserType?: string | number;
+  bid?: string | number;
+  /** 投稿時刻 (⚠️要検証: UNIX秒想定。文字列日付も defensive 許容) */
+  postdate?: string | number;
   body?: string;
-  postTime?: string;
-  senderType?: string;
-  senderName?: string;
+  fileList?: YahooTalkDetailFile[];
 }
 
-/**
- * externalTalkDetail のレスポンス全体。
- *
- * 要検証フィールド前提:
- * - talkId:       対象トーク ID
- * - status:       生ステータス文字列
- * - customerName: 顧客表示名
- * - customerEmail: 顧客メール (マスク済みの可能性。存在すれば利用)
- * - subject:      件名
- * - itemId / itemName: 商品情報 (channelMeta に格納)
- * - orderId:      注文番号 (channelMeta に格納)
- * - completeTime: 完了日時 (resolvedAt に写像)
- * - messages:     メッセージ配列 (時系列)
- *
- * Yahoo は result でラップして返す想定。直下 / result 両方を defensive に許容する。
- */
-export interface YahooTalkDetail {
-  talkId?: string | number;
-  status?: string;
-  customerName?: string;
-  customerEmail?: string;
-  subject?: string;
-  itemId?: string;
-  itemName?: string;
-  orderId?: string;
-  completeTime?: string;
-  updateTime?: string;
-  messages?: YahooTalkMessage[];
+/** 質問詳細API: topic オブジェクト (スレッドメタ)。 */
+export interface YahooTalkDetailTopic {
+  accessUserType?: string | number;
+  userLastReadTime?: string | number;
+  isUserUnRead?: boolean;
+  sellerLastReadTime?: string | number;
+  isSellerUnRead?: boolean;
+  isPrivate?: boolean;
+  isComplete?: boolean;
+  completeConditionId?: string | number;
+  isMail?: boolean;
+  userMaskedIdx?: string;
+  itemcode?: string;
+  orderid?: string;
+  categoryid?: string | number;
+  categoryName?: string;
+  title?: string;
 }
 
-/**
- * externalTalkDetail のトップレベル (result ラップ想定)。
- */
 export interface YahooTalkDetailResponse {
-  result?: YahooTalkDetail;
+  topic?: YahooTalkDetailTopic;
+  messages?: YahooTalkMessage[];
 }

@@ -38,7 +38,13 @@ export const maxDuration = 300;
 // LINE webhook の実用上限は十分小さい。過大 body を弾く防御 (1MB)。
 const MAX_BODY_BYTES = 1_048_576;
 
-const LINE_CRED_SERVICE_CODE = 'line_messaging';
+/** config.service_code 未宣言時の既定。 */
+const DEFAULT_LINE_CRED_SERVICE_CODE = 'line_messaging';
+/**
+ * line channel が指定してよい service_code の allowlist (orchestrator 側 pull allowlist と同趣旨の多層防御)。
+ * config 改竄で他サービスの Vault 鍵を引かせない。LINE 系の追加時のみここへ足す。
+ */
+const ALLOWED_LINE_SERVICE_CODES = new Set<string>([DEFAULT_LINE_CRED_SERVICE_CODE]);
 
 interface LineCredential {
   channel_secret?: string;
@@ -80,11 +86,20 @@ export async function POST(req: NextRequest) {
   const channelId = channel.id as string;
   const config = (channel.config ?? {}) as Record<string, unknown>;
   const scopeKey = typeof config.scope_key === 'string' ? config.scope_key : undefined;
+  // service_code は config 駆動 (ハードコード禁止)。allowlist 外は misconfig として 503。
+  const serviceCode =
+    typeof config.service_code === 'string' && config.service_code.trim()
+      ? config.service_code.trim()
+      : DEFAULT_LINE_CRED_SERVICE_CODE;
+  if (!ALLOWED_LINE_SERVICE_CODES.has(serviceCode)) {
+    console.error('[line-inbound] service_code not in allowlist');
+    return NextResponse.json({ ok: false, error: 'line channel misconfigured' }, { status: 503 });
+  }
 
   // 3/4. channel secret を Core から取得 (env 非依存)。未投入は 503 (endpoint は存在するが受信不可)。
   let channelSecret: string;
   try {
-    const cred = await getCredential<LineCredential>(LINE_CRED_SERVICE_CODE, scopeKey ?? null);
+    const cred = await getCredential<LineCredential>(serviceCode, scopeKey ?? null);
     const secret = cred.credentials?.channel_secret ?? cred.credentials?.channelSecret ?? '';
     if (!secret) {
       console.error('[line-inbound] channel_secret missing in credential');

@@ -1,36 +1,41 @@
 /**
- * Yahoo!ショッピング 問い合わせ受信 (pull) アダプタ
+ * Yahoo!ショッピング 問い合わせ (質問) 受信 (pull) アダプタ
+ *
+ * 公式仕様で突合 (developer.yahoo.co.jp/webapi/shopping/question/):
+ *  - 一覧 externalTalkList: start/result でページング (最大 20)、summary.topic.count で全件数。
+ *  - 詳細 externalTalkDetail: sellerId + topicId、messages[] に全メッセージ。
  *
  * - 認証 token は ctx.credentials から読む (orchestrator が Core /api/credentials/yahoo_shopping
- *   を解決して注入)。service_code はハードコードせず、getCredential も自前で呼ばない。
- * - since→now で externalTalkList をページ走査 (1 ページ 20 件上限 → 必ずページネーション)。
- *   各 talk を externalTalkDetail で取得し NormalizedTicketWithMessages に map して yield。
- * - レート制限 1 req/s → 各 API 呼び出し間に最低 1000ms の sleep を必ず入れる。
+ *   を解決して注入)。service_code ハードコードなし・getCredential 自前呼出なし。
+ * - sellerId は ctx.channel.config.store_id (= Core scope_key と同一)。
+ * - レート制限 1 req/s → 各 API 呼び出し間に最低 1000ms の sleep。
+ * - 増分: since 以降の更新分のみ (userPostTime/sellerPostTime を client 側で比較)。
+ *   dateType enum が未検証のため、日付絞り込みは config.date_type 指定時のみ送り、既定は
+ *   client 側フィルタに倒す (誤 enum による 400 回避)。
  * - 送信系は一切実装しない。
  */
-import type {
-  ChannelAdapter,
-  ChannelAdapterContext,
-} from '../_lib/adapter';
+import type { ChannelAdapter, ChannelAdapterContext } from '../_lib/adapter';
 import { formatChannelMessageId } from '../_lib/ids';
 import type {
   Direction,
+  NormalizedAttachment,
   NormalizedMessage,
   NormalizedTicket,
   NormalizedTicketWithMessages,
 } from '../_lib/types';
 import { YahooTalkClient, type FetchLike } from './client';
 import type {
-  YahooTalkDetail,
-  YahooTalkListItem,
+  YahooTalkDetailResponse,
+  YahooTalkListHeadline,
   YahooTalkMessage,
 } from './types';
 
 const DEFAULT_API_BASE = 'https://circus.shopping.yahooapis.jp/ShoppingWebService/V1';
-/** Yahoo レート制限 1 req/s。各 API 呼び出し間の最小ディレイ。 */
 const RATE_LIMIT_DELAY_MS = 1000;
-/** externalTalkList の 1 レスポンス上限。これ未満なら最終ページと判定。 */
-const PAGE_SIZE = 20;
+/** 1 リクエストの取得件数上限 (公式: result 最大 20)。 */
+const PAGE_RESULT = 20;
+/** 無限ループ防御の最大ページ数。 */
+const MAX_PAGES = 200;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -42,14 +47,10 @@ function cfgRecord(ctx: ChannelAdapterContext): Record<string, unknown> {
   return (ctx.channel.config ?? {}) as Record<string, unknown>;
 }
 
-/**
- * ctx.credentials から OAuth access token を取り出す。
- * access_token を第一候補、token をフォールバックに許容。無ければ throw。
- */
 function resolveAccessToken(ctx: ChannelAdapterContext): string {
-  const creds = ctx.credentials ?? {};
-  const primary = (creds as Record<string, unknown>).access_token;
-  const fallback = (creds as Record<string, unknown>).token;
+  const creds = (ctx.credentials ?? {}) as Record<string, unknown>;
+  const primary = creds.access_token;
+  const fallback = creds.token;
   const token =
     (typeof primary === 'string' && primary.length > 0 && primary) ||
     (typeof fallback === 'string' && fallback.length > 0 && fallback) ||
@@ -63,94 +64,106 @@ function resolveAccessToken(ctx: ChannelAdapterContext): string {
 }
 
 /**
- * Yahoo 日付文字列を ISO 8601 に変換。タイムゾーン情報が無ければ JST と解釈。
- * 解釈不能な値は now() に丸める (throw しない / defensive)。
+ * UNIX秒/ミリ秒/日付文字列を ISO 8601 に変換 (defensive)。
+ * - 数値 or 数値文字列: 1e12 未満は秒とみなし ×1000、以上はミリ秒。
+ * - それ以外: 日付文字列として解釈 (TZ 無しは JST)。解釈不能は now()。
  */
-function toIsoString(raw: string | null | undefined): string {
-  if (!raw) return new Date().toISOString();
+function postTimeToIso(v: string | number | null | undefined): string {
+  if (v === null || v === undefined || v === '') return new Date().toISOString();
+  const n = typeof v === 'number' ? v : Number(v);
+  if (Number.isFinite(n) && (typeof v === 'number' || /^\d+$/.test(String(v)))) {
+    const ms = n < 1e12 ? n * 1000 : n;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+  }
+  const raw = String(v);
   const hasTz = /[zZ]|[+-]\d\d:?\d\d$/.test(raw);
-  const normalized = hasTz ? raw : `${raw}+09:00`;
-  const d = new Date(normalized);
-  if (Number.isNaN(d.getTime())) return new Date().toISOString();
-  return d.toISOString();
+  const d = new Date(hasTz ? raw : `${raw}+09:00`);
+  return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
 }
 
-const CUSTOMER_SENDER_TYPES = new Set(['customer', 'buyer', 'user', 'consumer']);
-const STORE_SENDER_TYPES = new Set(['store', 'seller', 'merchant', 'staff', 'shop']);
+/** epoch(ms) を返す (since 比較用)。解釈不能は null。 */
+function toEpochMs(v: string | number | null | undefined): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const iso = postTimeToIso(v);
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? null : t;
+}
+
+const SELLER_SENDER_TOKENS = ['seller', 'store', 'merchant', 'staff', 'shop'];
 
 /**
- * Yahoo senderType を direction に写像。顧客→inbound, 店舗→outbound。
- * 不明値は inbound 既定。
+ * postUserType を direction に写像。店舗側→outbound、それ以外→inbound 既定。
+ * ⚠️要検証: postUserType の具体値 (実キー取得後に突合)。文字列の seller 系のみ outbound 判定。
  */
-function toDirection(senderType: string | undefined): Direction {
-  const s = (senderType ?? '').toLowerCase();
-  if (STORE_SENDER_TYPES.has(s)) return 'outbound';
-  if (CUSTOMER_SENDER_TYPES.has(s)) return 'inbound';
+function toDirection(postUserType: string | number | undefined): Direction {
+  if (postUserType === undefined || postUserType === null) return 'inbound';
+  const s = String(postUserType).toLowerCase();
+  if (SELLER_SENDER_TOKENS.some((t) => s.includes(t))) return 'outbound';
   return 'inbound';
 }
 
-/** 完了系の生ステータスを 'done' に、それ以外を 'untouched' に丸める。 */
-function toTicketStatus(rawStatus: string | undefined): 'untouched' | 'done' {
-  const s = (rawStatus ?? '').toLowerCase();
-  if (s === 'completed' || s === 'complete' || s === 'closed' || s === 'done' || s === 'resolved') {
-    return 'done';
-  }
-  return 'untouched';
+function toAttachments(msg: YahooTalkMessage): NormalizedAttachment[] | undefined {
+  const files = Array.isArray(msg.fileList) ? msg.fileList : [];
+  if (files.length === 0) return undefined;
+  return files.map((f) => ({
+    label: f.fileName,
+    path: f.objectKey,
+    url: f.thumbnailUrl,
+    meta: { fileExt: f.fileExt, fileSize: f.fileSize },
+  }));
 }
 
-function toNormalizedTicket(
-  talkId: string,
-  detail: YahooTalkDetail,
-  listItem: YahooTalkListItem | undefined,
+function buildTicket(
+  topicId: string,
+  headline: YahooTalkListHeadline,
+  detail: YahooTalkDetailResponse,
 ): NormalizedTicket {
-  const rawStatus = asStr(detail.status, asStr(listItem?.status, ''));
+  const topic = detail.topic ?? {};
+  const completed = topic.isComplete === true || headline.isCompleted === true;
   const channelMeta: Record<string, unknown> = {};
-  if (detail.itemId) channelMeta.itemId = detail.itemId;
-  if (detail.itemName) channelMeta.itemName = detail.itemName;
-  if (detail.orderId) channelMeta.orderId = detail.orderId;
-  const updateTime = asStr(detail.updateTime, asStr(listItem?.updateTime, ''));
-  if (updateTime) channelMeta.updateTime = updateTime;
+  const itemCode = asStr(topic.itemcode, asStr(headline.itemCode, ''));
+  const orderId = asStr(topic.orderid, asStr(headline.orderId, ''));
+  if (itemCode) channelMeta.itemCode = itemCode;
+  if (orderId) channelMeta.orderId = orderId;
+  if (topic.categoryName) channelMeta.categoryName = topic.categoryName;
+  // 顧客識別子はマスク済 ID のみ (氏名は API が返さない)。
+  const userMasked = asStr(headline.userMaskedId, asStr(topic.userMaskedIdx, ''));
+  if (userMasked) channelMeta.userMaskedId = userMasked;
 
   return {
-    externalId: talkId,
-    customerName: asStr(detail.customerName, asStr(listItem?.customerName, '')) || undefined,
-    customerEmail: asStr(detail.customerEmail, '') || undefined,
-    subject: asStr(detail.subject, asStr(listItem?.subject, '')) || undefined,
-    status: toTicketStatus(rawStatus || undefined),
-    rawStatus: rawStatus || undefined,
-    resolvedAt: detail.completeTime ? toIsoString(detail.completeTime) : undefined,
+    externalId: topicId,
+    customerName: undefined,
+    subject: asStr(topic.title, asStr(headline.title, '')) || undefined,
+    status: completed ? 'done' : 'untouched',
+    rawStatus: completed ? 'completed' : 'open',
     channelMeta: Object.keys(channelMeta).length > 0 ? channelMeta : undefined,
   };
 }
 
-function toNormalizedMessage(
-  talkId: string,
-  msg: YahooTalkMessage,
-  index: number,
-): NormalizedMessage {
-  const direction = toDirection(msg.senderType);
-  // messageId 欠損時は talkId + index で安定した擬似 ID を採番 (冪等性のため決定的に)。
+function buildMessage(topicId: string, msg: YahooTalkMessage, index: number): NormalizedMessage {
+  const direction = toDirection(msg.postUserType);
   const rawId =
     msg.messageId !== undefined && msg.messageId !== null && msg.messageId !== ''
       ? msg.messageId
-      : `${talkId}-${index}`;
+      : `${topicId}-${index}`;
   return {
     channelMessageId: formatChannelMessageId('talk', rawId),
     direction,
     body: asStr(msg.body, ''),
-    senderName: asStr(msg.senderName, '') || undefined,
     senderType: direction === 'outbound' ? 'staff' : 'customer',
-    sentAt: toIsoString(msg.postTime),
+    sentAt: postTimeToIso(msg.postdate),
+    attachments: toAttachments(msg),
   };
 }
 
-function unwrapDetail(resp: { result?: YahooTalkDetail } | YahooTalkDetail | undefined): YahooTalkDetail {
-  if (!resp) return {};
-  // result ラップ / 直下 両対応 (defensive)。
-  if ('result' in resp && resp.result && typeof resp.result === 'object') {
-    return resp.result as YahooTalkDetail;
-  }
-  return resp as YahooTalkDetail;
+/** headline の最新投稿時刻 (顧客/店舗の新しい方) を epoch(ms) で返す。 */
+function headlineLatestMs(h: YahooTalkListHeadline): number | null {
+  const u = toEpochMs(h.userPostTime);
+  const s = toEpochMs(h.sellerPostTime);
+  if (u === null) return s;
+  if (s === null) return u;
+  return Math.max(u, s);
 }
 
 export const yahooAdapter: ChannelAdapter = {
@@ -162,80 +175,91 @@ export const yahooAdapter: ChannelAdapter = {
     const cfg = cfgRecord(ctx);
     const apiBase = asStr(cfg.api_base, DEFAULT_API_BASE);
     const accessToken = resolveAccessToken(ctx);
-    // テスト注入用 fetch (config.__fetchImpl 経由)。本番では undefined → global fetch。
+    // sellerId は store_id (= Core scope_key)。seller_id フォールバックも許容。
+    const sellerId = asStr(cfg.store_id, asStr(cfg.seller_id, ''));
+    if (!sellerId) {
+      throw new Error(
+        `yahoo.fetchInbox: channels.config.store_id (sellerId) is required (channel_id=${ctx.channel.id})`,
+      );
+    }
+    const dateType = asStr(cfg.date_type, '') || undefined;
     const fetchImpl = (cfg.__fetchImpl as FetchLike | undefined) ?? undefined;
 
     const client = new YahooTalkClient({ apiBase, accessToken, fetchImpl });
-
     const since = ctx.since ?? null;
+    const sinceMs = since ? since.getTime() : null;
+
     ctx.logger.info('yahoo.fetchInbox.start', {
       since: since ? since.toISOString() : null,
-      apiBase,
+      sellerId: sellerId ? 'set' : 'missing',
     });
 
-    let page = 1;
+    let start = 1;
     let yielded = 0;
     let firstApiCall = true;
+    let pageGuard = 0;
 
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      // 各 API 呼び出し間に 1req/s throttle (先頭呼び出しは待たない)。
+    while (pageGuard < MAX_PAGES) {
+      pageGuard += 1;
       if (!firstApiCall) await sleep(RATE_LIMIT_DELAY_MS);
       firstApiCall = false;
 
-      const list = await client.listTalks({ page, since });
-      const items = Array.isArray(list.result) ? list.result : [];
-      const totalPage = typeof list.totalPage === 'number' ? list.totalPage : undefined;
+      const listParams: Parameters<typeof client.listTalks>[0] = { sellerId, start, result: PAGE_RESULT };
+      if (dateType && since) {
+        listParams.dateType = dateType;
+        listParams.startDate = since.toISOString();
+        listParams.endDate = new Date().toISOString();
+      }
+      const list = await client.listTalks(listParams);
+      const headlines = Array.isArray(list.headlines) ? list.headlines : [];
+      const count = list.summary?.topic?.count;
 
       ctx.logger.info('yahoo.fetchInbox.page', {
-        page,
-        count: items.length,
-        totalPage: totalPage ?? null,
+        start,
+        got: headlines.length,
+        count: typeof count === 'number' ? count : null,
       });
 
-      for (const item of items) {
-        const talkId =
-          item.talkId !== undefined && item.talkId !== null && item.talkId !== ''
-            ? String(item.talkId)
-            : '';
-        if (!talkId) {
-          ctx.logger.warn('yahoo.fetchInbox.skip_missing_talkId', { page });
+      for (const h of headlines) {
+        const topicId =
+          h.topicId !== undefined && h.topicId !== null && h.topicId !== '' ? String(h.topicId) : '';
+        if (!topicId) {
+          ctx.logger.warn('yahoo.fetchInbox.skip_missing_topicId', { start });
           continue;
         }
+        // since 以降のみ (client 側フィルタ。ordering 不定のため hard-stop はしない)。
+        if (sinceMs !== null) {
+          const latest = headlineLatestMs(h);
+          if (latest !== null && latest < sinceMs) continue;
+        }
 
-        // detail 取得前に throttle。
         await sleep(RATE_LIMIT_DELAY_MS);
-        let detail: YahooTalkDetail;
+        let detail: YahooTalkDetailResponse;
         try {
-          const resp = await client.getTalkDetail(talkId);
-          detail = unwrapDetail(resp);
+          detail = await client.getTalkDetail({ sellerId, topicId });
         } catch (err) {
           ctx.logger.warn('yahoo.fetchInbox.getTalkDetail_failed', {
-            talkId,
+            topicId,
             error: err instanceof Error ? err.message : String(err),
           });
-          // 詳細取得失敗時は一覧情報のみで最小構成 (メッセージ無し)。
           detail = {};
         }
 
-        const ticket = toNormalizedTicket(talkId, detail, item);
+        const ticket = buildTicket(topicId, h, detail);
         const rawMessages = Array.isArray(detail.messages) ? detail.messages : [];
-        const messages: NormalizedMessage[] = rawMessages.map((m, i) =>
-          toNormalizedMessage(talkId, m, i),
-        );
+        const messages = rawMessages.map((m, i) => buildMessage(topicId, m, i));
 
         yielded += 1;
         yield { ticket, messages };
       }
 
-      // 終端判定: totalPage 到達 or 1 ページ件数が上限未満。
-      const reachedTotalPage = totalPage !== undefined && page >= totalPage;
-      const partialPage = items.length < PAGE_SIZE;
-      if (reachedTotalPage || partialPage) break;
-
-      page += 1;
+      // 終端判定: count に達した or 取得件数が result 未満。
+      const reachedCount = typeof count === 'number' && start + PAGE_RESULT > count;
+      const partialPage = headlines.length < PAGE_RESULT;
+      if (reachedCount || partialPage) break;
+      start += PAGE_RESULT;
     }
 
-    ctx.logger.info('yahoo.fetchInbox.done', { yielded, pages: page });
+    ctx.logger.info('yahoo.fetchInbox.done', { yielded });
   },
 };
