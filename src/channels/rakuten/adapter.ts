@@ -126,8 +126,12 @@ export const rakutenAdapter: ChannelAdapter = {
       );
     }
 
-    // Core から credential 動的取得 (5 分 TTL キャッシュ)
-    const credResp = await getCredential<RakutenCredentials>('rakuten_rmesse', shopId);
+    // service_code は channels.config.service_code 駆動 (ハードコード禁止)。
+    // 既存運用との後方互換のため未設定時は 'rakuten_rmesse' にフォールバック。
+    const serviceCode = asStr((cfg as Record<string, unknown>).service_code, 'rakuten_rmesse');
+    // Core から credential 動的取得 (5 分 TTL キャッシュ)。rakuten は専用 cron 経路のため
+    // ctx.credentials ではなく自前解決を継続 (live 経路の回帰最小化)。
+    const credResp = await getCredential<RakutenCredentials>(serviceCode, shopId);
     const client = new RakutenInquiryClient({ apiBase, credentials: credResp.credentials });
 
     const now = new Date();
