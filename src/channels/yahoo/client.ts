@@ -24,10 +24,17 @@ export type FetchLike = (
   init?: RequestInit,
 ) => Promise<Response>;
 
+/**
+ * Yahoo API エラー。
+ * ⚠️ PII 非露出: message には status/statusText のみを載せ、レスポンス body を埋め込まない
+ * (Yahoo が問い合わせ本文や顧客情報を含む body を返しうるため。codex コードレビュー指摘)。
+ * 詳細 body はデバッグ用に保持するが、ログ/cron 応答には出さない (caller は status/name のみ出す)。
+ */
 export class YahooApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    /** 生 body。PII を含みうるため絶対にログ/レスポンスへ出さないこと。 */
     public readonly body: string,
   ) {
     super(message);
@@ -82,21 +89,18 @@ export class YahooTalkClient {
     });
 
     const text = await res.text();
+    // ⚠️ message には body を埋め込まない (PII 非露出)。status/statusText のみ。
     if (res.status === 429) {
-      throw new YahooApiError(`Yahoo API 429 rate limited: ${text.slice(0, 300)}`, 429, text);
+      throw new YahooApiError('Yahoo API 429 rate limited', 429, text);
     }
     if (!res.ok) {
-      throw new YahooApiError(
-        `Yahoo API ${res.status} ${res.statusText}: ${text.slice(0, 500) || '(empty response)'}`,
-        res.status,
-        text,
-      );
+      throw new YahooApiError(`Yahoo API error ${res.status} ${res.statusText}`, res.status, text);
     }
     if (!text) return {} as T; // 空ボディは defensive に空オブジェクト
     try {
       return JSON.parse(text) as T;
     } catch {
-      throw new YahooApiError(`Yahoo API returned non-JSON body: ${text.slice(0, 200)}`, res.status, text);
+      throw new YahooApiError(`Yahoo API non-JSON body (status ${res.status})`, res.status, text);
     }
   }
 

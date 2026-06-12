@@ -23,7 +23,7 @@ import type {
   NormalizedTicket,
   NormalizedTicketWithMessages,
 } from '../_lib/types';
-import { YahooTalkClient, type FetchLike } from './client';
+import { YahooTalkClient, YahooApiError, type FetchLike } from './client';
 import type {
   YahooTalkDetailResponse,
   YahooTalkListHeadline,
@@ -254,9 +254,11 @@ export const yahooAdapter: ChannelAdapter = {
         try {
           detail = await client.getTalkDetail({ sellerId, topicId });
         } catch (err) {
-          ctx.logger.warn('yahoo.fetchInbox.getTalkDetail_failed', {
+          // PII 非露出: status/name のみログ (err.message に Yahoo body は載らない設計だが二重防御)。
+          ctx.logger.warn('yahoo.fetchInbox.getTalkDetail_failed_degraded', {
             topicId,
-            error: err instanceof Error ? err.message : String(err),
+            status: err instanceof YahooApiError ? err.status : null,
+            name: err instanceof Error ? err.name : 'unknown',
           });
           detail = {};
           detailFailed = true;
@@ -265,9 +267,14 @@ export const yahooAdapter: ChannelAdapter = {
         const ticket = buildTicket(topicId, h, detail);
         const rawMessages = Array.isArray(detail.messages) ? detail.messages : [];
         let messages: NormalizedMessage[] = rawMessages.map((m, i) => buildMessage(topicId, m, i));
-        // detail 取得失敗時は一覧 headline の body を inbound メッセージにフォールバック
-        // (顧客メッセージ/ドラフトの取りこぼし防止 = 根本原因優先)。detail 復帰後は実メッセージが
-        // 別 channel_message_id で追加され、本フォールバックは冪等に残る。
+        // detail 取得失敗時は一覧 headline の body を inbound メッセージにフォールバック。
+        // 設計判断 (codex コードレビュー指摘への対応): 受信MVPの主目的=顧客の問い合わせ文→
+        // ドラフト生成。headline.body は問い合わせ本文を含むため、detail 失敗でも primary 価値
+        // (顧客メッセージ捕捉+ドラフト) は失われない。失われるのは full スレッド履歴/添付 (secondary)。
+        // ⚠️ go-live ゲート: orchestrator の wall-clock cursor と組み合わせると detail 復旧後も
+        //   full スレッドを再取得しない (cursor が当該 topic を通過するため)。完全な再取得保証は、
+        //   yahoo 実 API 挙動の確認後に「topic 単位の取込状態管理 or server dateType 絞り込み」で
+        //   ハードニングする (yahoo 有効化前の必須対応)。本 MVP は degraded 捕捉+loud ログに留める。
         if (detailFailed && messages.length === 0) {
           const fallbackBody = asStr(h.body, '');
           if (fallbackBody) {
