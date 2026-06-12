@@ -41,7 +41,9 @@ on conflict (code) do nothing;
 
 -- ----------------------------------------------------------------------------
 -- 2. yahoo = pull アダプタ宣言 (service_code/scope_key_field)。status はまだ active にしない。
---    store_id (Yahoo ストアアカウント識別子) を scope_key として使う運用。
+--    sellerId (Yahoo ストアアカウント) は Core `yahoo_shopping` credential が access_token と
+--    一緒に seller_id として返す前提 (= キー投入だけで稼働)。複数店舗運用で明示したい場合のみ
+--    config.store_id を入れると scope_key として使われる (単一店舗運用では未設定=scope_key null)。
 -- ----------------------------------------------------------------------------
 update public.channels
 set config = coalesce(config, '{}'::jsonb) || jsonb_build_object(

@@ -64,6 +64,25 @@ function resolveAccessToken(ctx: ChannelAdapterContext): string {
 }
 
 /**
+ * sellerId (= Yahoo ストアアカウント) を解決する。
+ * 「Core にキーを入れるだけ」を満たすため Core credential を第一とし、config はフォールバック:
+ *   1. ctx.credentials.seller_id / store_id (Core が token と一緒に返す。これだけで稼働可)
+ *   2. channels.config.store_id / seller_id (複数店舗等で明示したい場合)
+ */
+function resolveSellerId(ctx: ChannelAdapterContext, cfg: Record<string, unknown>): string {
+  const creds = (ctx.credentials ?? {}) as Record<string, unknown>;
+  const fromCred = asStr(creds.seller_id, asStr(creds.store_id, ''));
+  const fromCfg = asStr(cfg.store_id, asStr(cfg.seller_id, ''));
+  const sellerId = fromCred || fromCfg;
+  if (!sellerId) {
+    throw new Error(
+      `yahoo.fetchInbox: sellerId not found (expected Core credential seller_id or channels.config.store_id) (channel_id=${ctx.channel.id})`,
+    );
+  }
+  return sellerId;
+}
+
+/**
  * UNIX秒/ミリ秒/日付文字列を ISO 8601 に変換 (defensive)。
  * - 数値 or 数値文字列: 1e12 未満は秒とみなし ×1000、以上はミリ秒。
  * - それ以外: 日付文字列として解釈 (TZ 無しは JST)。解釈不能は now()。
@@ -175,13 +194,8 @@ export const yahooAdapter: ChannelAdapter = {
     const cfg = cfgRecord(ctx);
     const apiBase = asStr(cfg.api_base, DEFAULT_API_BASE);
     const accessToken = resolveAccessToken(ctx);
-    // sellerId は store_id (= Core scope_key)。seller_id フォールバックも許容。
-    const sellerId = asStr(cfg.store_id, asStr(cfg.seller_id, ''));
-    if (!sellerId) {
-      throw new Error(
-        `yahoo.fetchInbox: channels.config.store_id (sellerId) is required (channel_id=${ctx.channel.id})`,
-      );
-    }
+    // sellerId は Core credential 優先 (キー投入だけで稼働)、config はフォールバック。
+    const sellerId = resolveSellerId(ctx, cfg);
     const dateType = asStr(cfg.date_type, '') || undefined;
     const fetchImpl = (cfg.__fetchImpl as FetchLike | undefined) ?? undefined;
 
@@ -206,9 +220,10 @@ export const yahooAdapter: ChannelAdapter = {
 
       const listParams: Parameters<typeof client.listTalks>[0] = { sellerId, start, result: PAGE_RESULT };
       if (dateType && since) {
+        // 公式: dateType 指定時の startDate/endDate は UNIX 時刻 (秒)。ISO ではない。
         listParams.dateType = dateType;
-        listParams.startDate = since.toISOString();
-        listParams.endDate = new Date().toISOString();
+        listParams.startDate = String(Math.floor(since.getTime() / 1000));
+        listParams.endDate = String(Math.floor(Date.now() / 1000));
       }
       const list = await client.listTalks(listParams);
       const headlines = Array.isArray(list.headlines) ? list.headlines : [];
@@ -235,6 +250,7 @@ export const yahooAdapter: ChannelAdapter = {
 
         await sleep(RATE_LIMIT_DELAY_MS);
         let detail: YahooTalkDetailResponse;
+        let detailFailed = false;
         try {
           detail = await client.getTalkDetail({ sellerId, topicId });
         } catch (err) {
@@ -243,11 +259,29 @@ export const yahooAdapter: ChannelAdapter = {
             error: err instanceof Error ? err.message : String(err),
           });
           detail = {};
+          detailFailed = true;
         }
 
         const ticket = buildTicket(topicId, h, detail);
         const rawMessages = Array.isArray(detail.messages) ? detail.messages : [];
-        const messages = rawMessages.map((m, i) => buildMessage(topicId, m, i));
+        let messages: NormalizedMessage[] = rawMessages.map((m, i) => buildMessage(topicId, m, i));
+        // detail 取得失敗時は一覧 headline の body を inbound メッセージにフォールバック
+        // (顧客メッセージ/ドラフトの取りこぼし防止 = 根本原因優先)。detail 復帰後は実メッセージが
+        // 別 channel_message_id で追加され、本フォールバックは冪等に残る。
+        if (detailFailed && messages.length === 0) {
+          const fallbackBody = asStr(h.body, '');
+          if (fallbackBody) {
+            messages = [
+              {
+                channelMessageId: formatChannelMessageId('talk', `${topicId}:headline`),
+                direction: 'inbound',
+                body: fallbackBody,
+                senderType: 'customer',
+                sentAt: postTimeToIso(h.userPostTime ?? h.sellerPostTime),
+              },
+            ];
+          }
+        }
 
         yielded += 1;
         yield { ticket, messages };

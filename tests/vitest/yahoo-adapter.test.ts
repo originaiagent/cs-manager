@@ -177,10 +177,19 @@ describe('yahooAdapter.fetchInbox', () => {
     await expect(yahooAdapter.fetchInbox(ctx).next()).rejects.toThrow(/access token/i);
   });
 
-  it('store_id (sellerId) が無ければ throw する', async () => {
+  it('sellerId が config/credential いずれにも無ければ throw する', async () => {
     const { fetchImpl } = makeFakeFetch();
+    const ctx = makeCtx(fetchImpl, { store_id: '' }); // credentials は access_token のみ
+    await expect(yahooAdapter.fetchInbox(ctx).next()).rejects.toThrow(/sellerId|store_id/i);
+  });
+
+  it('sellerId を Core credential (seller_id) から解決できる (config store_id 不要=キー投入だけで稼働)', async () => {
+    const { fetchImpl, calls } = makeFakeFetch();
     const ctx = makeCtx(fetchImpl, { store_id: '' });
-    await expect(yahooAdapter.fetchInbox(ctx).next()).rejects.toThrow(/store_id|sellerId/i);
+    ctx.credentials = { access_token: 'tok', seller_id: 'cred-seller-9' };
+    const results = await drainWithFakeTimers(yahooAdapter.fetchInbox(ctx));
+    expect(results.length).toBeGreaterThan(0);
+    expect(calls.find((c) => c.includes('/externalTalkList'))!).toContain('sellerId=cred-seller-9');
   });
 
   it('token フォールバック (credentials.token) を許容する', async () => {
@@ -216,13 +225,13 @@ describe('yahooAdapter.fetchInbox', () => {
     expect(calls.some((c) => c.includes('topicId=OLD'))).toBe(false);
   });
 
-  it('detail 取得失敗時も throw せず最小 ticket を yield (messages 空)', async () => {
+  it('detail 取得失敗時は headline.body を inbound フォールバックして取りこぼさない', async () => {
     const fetchImpl = async (input: string): Promise<Response> => {
       const url = new URL(input);
       if (url.pathname.endsWith('/externalTalkList')) {
         const start = Number(url.searchParams.get('start') ?? '1');
         const headlines = start === 1
-          ? [{ topicId: 'T1', isCompleted: false, userPostTime: RECENT_UNIX, title: 'a' }]
+          ? [{ topicId: 'T1', isCompleted: false, userPostTime: RECENT_UNIX, title: 'a', body: '届いていません' }]
           : [];
         return new Response(JSON.stringify({ summary: { topic: { start, end: start, count: 1 } }, headlines }), {
           status: 200, headers: { 'Content-Type': 'application/json' },
@@ -232,7 +241,11 @@ describe('yahooAdapter.fetchInbox', () => {
     };
     const results = await drainWithFakeTimers(yahooAdapter.fetchInbox(makeCtx(fetchImpl)));
     expect(results).toHaveLength(1);
-    expect(results[0].messages).toHaveLength(0);
     expect(results[0].ticket.externalId).toBe('T1');
+    // detail 失敗でも headline.body から inbound メッセージを 1 件確保 (取りこぼし防止)
+    expect(results[0].messages).toHaveLength(1);
+    expect(results[0].messages[0].direction).toBe('inbound');
+    expect(results[0].messages[0].body).toBe('届いていません');
+    expect(results[0].messages[0].channelMessageId).toBe('talk:T1:headline');
   });
 });
