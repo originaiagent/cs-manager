@@ -3,7 +3,7 @@ import path from 'path';
 
 export default defineConfig({
   test: {
-    include: ['src/lib/mcp/__contract__/**/*.test.ts'],
+    include: ['src/lib/mcp/__contract__/**/*.test.ts', 'tests/vitest/**/*.test.ts'],
     environment: 'node',
   },
   resolve: {

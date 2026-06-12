@@ -1,5 +1,6 @@
 import type { ChannelAdapter } from './adapter';
 import { rakutenAdapter } from '../rakuten/adapter';
+import { yahooAdapter } from '../yahoo/adapter';
 
 /**
  * 利用可能な adapter を code で引くレジストリ。
@@ -7,6 +8,7 @@ import { rakutenAdapter } from '../rakuten/adapter';
  */
 const REGISTRY: Record<string, ChannelAdapter> = {
   [rakutenAdapter.code]: rakutenAdapter,
+  [yahooAdapter.code]: yahooAdapter,
 };
 
 export function getChannelAdapter(code: string): ChannelAdapter | null {

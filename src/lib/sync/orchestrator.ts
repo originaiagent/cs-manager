@@ -8,6 +8,14 @@ import type {
   NormalizedTicketWithMessages,
 } from '@/channels/_lib/types';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
+import { getCredential, CredentialFetchError } from '@/lib/credentials';
+
+/**
+ * pull チャネルが Core から解決してよい service_code の allowlist (codex 設計レビュー guard)。
+ * channels.config は service_role 限定だが、万一改竄された config が任意の service_code を
+ * 指定して他サービスの Vault 鍵を引き出すのを防ぐ多層防御。新 pull チャネル追加時にここへ足す。
+ */
+const ALLOWED_PULL_SERVICE_CODES = new Set<string>(['yahoo_shopping']);
 
 /**
  * チャネル取込 orchestrator
@@ -167,7 +175,59 @@ async function upsertMessages(
   return count ?? rows.length;
 }
 
-async function syncOneChannel(channel: ChannelRow): Promise<ChannelSyncResult> {
+export type CredentialResolution =
+  | { kind: 'ok'; credentials: Record<string, unknown> }
+  | { kind: 'skip'; reason: string }
+  | { kind: 'error'; error: string };
+
+/**
+ * pull チャネルの credential を config 駆動で Core から解決する。
+ *
+ * - config.service_code 必須・allowlist 内であること (無効は misconfig=error)。
+ * - scope_key は config[config.scope_key_field ?? 'scope_key'] から引く。
+ * - Core 404 (キー未投入) → graceful skip (「キー入れるだけ」で次 tick から稼働)。
+ * - その他 (401/500/network) → error (再試行対象)。
+ *
+ * getCred は注入可能 (テストで Core を差し替え、「キー投入で skip→稼働に切替わる」ことを実証する)。
+ */
+export async function resolvePullCredentials(
+  channel: ChannelRow,
+  logger: AdapterLogger,
+  getCred: typeof getCredential = getCredential,
+): Promise<CredentialResolution> {
+  const cfg = (channel.config ?? {}) as Record<string, unknown>;
+  const serviceCode = typeof cfg.service_code === 'string' ? cfg.service_code.trim() : '';
+  if (!serviceCode) {
+    return { kind: 'error', error: `pull channel misconfig: channels.config.service_code is required (channel_id=${channel.id})` };
+  }
+  if (!ALLOWED_PULL_SERVICE_CODES.has(serviceCode)) {
+    return { kind: 'error', error: `pull channel misconfig: service_code='${serviceCode}' not in allowlist (channel_id=${channel.id})` };
+  }
+  const scopeKeyField = typeof cfg.scope_key_field === 'string' && cfg.scope_key_field.trim()
+    ? cfg.scope_key_field.trim()
+    : 'scope_key';
+  const scopeKeyRaw = cfg[scopeKeyField];
+  const scopeKey = typeof scopeKeyRaw === 'string' && scopeKeyRaw.trim() ? scopeKeyRaw.trim() : null;
+
+  try {
+    const resp = await getCred(serviceCode, scopeKey);
+    return { kind: 'ok', credentials: resp.credentials as Record<string, unknown> };
+  } catch (err) {
+    if (err instanceof CredentialFetchError && err.status === 404) {
+      logger.info('skip_no_credential', { serviceCode, hasScopeKey: scopeKey !== null });
+      return { kind: 'skip', reason: 'no_credential_in_core' };
+    }
+    return {
+      kind: 'error',
+      error: `credential resolution failed for service_code='${serviceCode}': ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+async function syncOneChannel(
+  channel: ChannelRow,
+  credentials: Record<string, unknown>,
+): Promise<ChannelSyncResult> {
   const startedAt = new Date();
   const logger = makeLogger(channel.code);
   const adapter = getChannelAdapter(channel.code);
@@ -196,6 +256,7 @@ async function syncOneChannel(channel: ChannelRow): Promise<ChannelSyncResult> {
     channel: { id: channel.id, code: channel.code, config: channel.config ?? {} },
     since,
     logger,
+    credentials,
   };
 
   let ticketsProcessed = 0;
@@ -254,15 +315,37 @@ export async function runChannelSync(): Promise<SyncRunResult> {
   const channels = await loadActiveChannels();
   const results: ChannelSyncResult[] = [];
   for (const ch of channels) {
-    // push 型チャネル (config.ingestion='inbound_webhook'、例: メール) は webhook で
-    // 受信するため本 pull cron の対象外。明示的な push 指定のみ skip し、それ以外の
-    // adapter 不在は misconfig として error 結果に残す (codex Medium 指摘)。
+    const logger = makeLogger(ch.code);
+    // 受信機構は channels.config.ingestion で宣言 (データ駆動)。
+    //  - 'inbound_webhook' (メール転送) / 'push_webhook' (LINE 等) は各 webhook endpoint が
+    //    受信するため本 pull cron の対象外。明示的な push 指定のみ skip する。
+    //  - 'pull' (または未指定の後方互換) は credential を Core から解決して adapter 実行。
     const ingestion = (ch.config as Record<string, unknown>)?.ingestion;
-    if (ingestion === 'inbound_webhook') {
-      makeLogger(ch.code).info('skip_push_channel', { channelId: ch.id, ingestion });
+    if (ingestion === 'inbound_webhook' || ingestion === 'push_webhook') {
+      logger.info('skip_non_pull_channel', { channelId: ch.id, ingestion });
       continue;
     }
-    const r = await syncOneChannel(ch);
+
+    // pull チャネル: 「キー入れるだけ」の心臓部。config 駆動で credential を Core 解決し、
+    // キー未投入 (404) は graceful skip、解決できれば adapter に注入して受信開始。
+    const cred = await resolvePullCredentials(ch, logger);
+    if (cred.kind === 'skip') {
+      continue; // キー未投入: error にしない (次 tick でキーがあれば自動稼働)
+    }
+    if (cred.kind === 'error') {
+      logger.error('credential_resolution_error', { channelId: ch.id });
+      results.push({
+        channelCode: ch.code,
+        channelId: ch.id,
+        ticketsProcessed: 0,
+        messagesUpserted: 0,
+        error: cred.error,
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+      });
+      continue;
+    }
+    const r = await syncOneChannel(ch, cred.credentials);
     results.push(r);
   }
   return {

@@ -20,6 +20,17 @@ export interface ChannelAdapterContext {
   /** 増分起点。null なら adapter が config の lookback_minutes に基づき初回起点を決める */
   since: Date | null;
   logger: AdapterLogger;
+  /**
+   * 受信ワーカー (orchestrator) が `channels.config.service_code` + scope_key から
+   * Core /api/credentials 経由で解決した認証情報。
+   *
+   * - pull チャネルでは orchestrator が必ず populate する (キー未投入チャネルは
+   *   そもそも graceful skip され adapter まで到達しない)。
+   * - adapter は service_code を知らず、ここに渡された credentials を使う
+   *   (service_code ハードコード禁止の徹底)。
+   * - 自前で credential 解決する旧来 adapter (rakuten 専用 cron 経路) では undefined。
+   */
+  credentials?: Record<string, unknown>;
 }
 
 /**
