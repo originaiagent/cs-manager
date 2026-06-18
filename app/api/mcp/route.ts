@@ -51,6 +51,25 @@ function rpcOk(id: string | number | null, result: unknown): NextResponse {
   return NextResponse.json({ jsonrpc: '2.0', id, result }, { status: 200 });
 }
 
+/**
+ * MCP tools/call の結果は MCP 仕様上 `result.content: [{type:"text", text}]` で返す必要がある。
+ * 生のオブジェクトを result に入れると spec 準拠 MCP クライアント (Anthropic mcp_toolset) は
+ * content[] が無いため「空応答」と解釈しエージェントに何も渡さない (実測バグ)。
+ */
+function rpcToolResult(id: string | number | null, payload: unknown, isError = false): NextResponse {
+  let text: string;
+  if (typeof payload === 'string') {
+    text = payload;
+  } else {
+    try {
+      text = JSON.stringify(payload) ?? String(payload);
+    } catch {
+      text = String(payload);
+    }
+  }
+  return rpcOk(id, { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) });
+}
+
 function rpcErr(
   id: string | number | null,
   code: number,
@@ -186,10 +205,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // 未対応 write 系 (place-file 等) は一律 disabled (fail-closed)
     if (WRITE_OPS.has(toolName)) {
-      return rpcOk(id, {
+      return rpcToolResult(id, {
         ok: false,
         reason: 'このツールでは未対応の op です (customer_record フォームは place-file 非対応)。',
-      });
+      }, true);
     }
     // op 解決: read 系 + write
     const opMap: Record<string, string> = { ...READ_OPS, write: 'write' };
@@ -260,7 +279,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         case 'list': {
           const result = handleList({ form_id });
           if (!result.ok) return rpcErr(id, INVALID_PARAMS, result.message);
-          return rpcOk(id, result.data);
+          return rpcToolResult(id, result.data);
         }
         case 'read': {
           const result = await handleRead(
@@ -268,7 +287,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             resolvedTargetId,
           );
           if (!result.ok) return rpcErr(id, INVALID_PARAMS, result.message);
-          return rpcOk(id, result.data);
+          return rpcToolResult(id, result.data);
         }
         case 'write': {
           // ── ops は non-empty array でなければならない (fail-closed) ──
@@ -331,11 +350,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           if (!dryRun) {
             const enabled = await isFormWriteEnabled(form_id);
             if (!enabled) {
-              return rpcOk(id, {
+              return rpcToolResult(id, {
                 ok: false,
                 rejected_op: null,
                 reason: `フォーム "${form_id}" は write が無効です (write_enabled=false)`,
-              });
+              }, true);
             }
           }
 
@@ -360,7 +379,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               return rpcErr(id, AUTH_ERROR, rev.reason, rev.status);
             }
             // handshake 内の apply 結果。write 失敗は 200 + ok:false (legacy と同形式)。
-            return rpcOk(id, rev.write);
+            return rpcToolResult(id, rev.write, (rev.write as { ok?: unknown })?.ok === false);
           }
 
           // ── 現行 legacy write (flag OFF): handshake 一切なし ─────────────────
@@ -378,7 +397,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             claims.run_id,
           );
           // write 失敗も 200 + ok:false で返す (JSON-RPC error にしない)
-          return rpcOk(id, result);
+          return rpcToolResult(id, result, (result as { ok?: unknown })?.ok === false);
         }
         // fetch-file を提供するツールは handleFetchFile を追加する。
         default:
