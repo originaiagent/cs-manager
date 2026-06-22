@@ -77,7 +77,54 @@ describe('splitReply: 正常系', () => {
     expect(r.internalPreview).toContain('knowledge_search');
   });
 
-  it('CRLF 行末でも行全体一致が成立する', () => {
+  it('ナレーションが START トークンと同一行先頭に連結 → parseOk=true, customerReply は本文のみ (codex APPROVE: トークンアンカー)', () => {
+    // 本番 agent の実出力 (~2/3): START センチネルと同じ行頭に narration を連結
+    const raw = [
+      `まず社内ナレッジを検索します。${CUSTOMER_REPLY_START}`,
+      '{{customer_name}} 様',
+      'お問い合わせありがとうございます。返品を承ります。',
+      CUSTOMER_REPLY_END,
+      '<<<ORIGIN_CS_INTERNAL_GROUNDING_V1>>>',
+      '社内根拠: 返品ポリシー記事#12',
+      '<<<END_ORIGIN_CS_INTERNAL_GROUNDING_V1>>>',
+    ].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(true);
+    expect(r.customerReply).toBe(
+      '{{customer_name}} 様\nお問い合わせありがとうございます。返品を承ります。',
+    );
+    // narration は customerReply に入らない
+    expect(r.customerReply).not.toContain('社内ナレッジを検索');
+    // internalPreview に narration + 内部ブロックが残る
+    expect(r.internalPreview).toContain('まず社内ナレッジを検索します。');
+    expect(r.internalPreview).toContain('社内根拠: 返品ポリシー記事#12');
+  });
+
+  it('END トークン後ろの後続テキスト → parseOk=true, 本文は影響なし, 後続は internalPreview へ', () => {
+    const raw = [
+      CUSTOMER_REPLY_START,
+      'ご返信いたします。',
+      `${CUSTOMER_REPLY_END}続いて担当者向けの社内メモを記載します。`,
+    ].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(true);
+    expect(r.customerReply).toBe('ご返信いたします。');
+    expect(r.customerReply).not.toContain('担当者向け');
+    expect(r.internalPreview).toContain('担当者向けの社内メモ');
+  });
+
+  it('END トークン直前が空白のみ (行頭インデント) → parseOk=true', () => {
+    const raw = [
+      CUSTOMER_REPLY_START,
+      'ご返信します。',
+      `   ${CUSTOMER_REPLY_END}`,
+    ].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(true);
+    expect(r.customerReply).toBe('ご返信します。');
+  });
+
+  it('CRLF 行末でもトークンアンカーが成立する', () => {
     const raw = [
       CUSTOMER_REPLY_START,
       'CRLF本文',
@@ -86,6 +133,17 @@ describe('splitReply: 正常系', () => {
     const r = splitReply(raw);
     expect(r.parseOk).toBe(true);
     expect(r.customerReply).toBe('CRLF本文');
+  });
+
+  it('CR のみ (lone \\r) 行末でもトークンアンカーが成立する (codex CODE review P3)', () => {
+    const raw = [
+      CUSTOMER_REPLY_START,
+      'CR本文',
+      CUSTOMER_REPLY_END,
+    ].join('\r');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(true);
+    expect(r.customerReply).toBe('CR本文');
   });
 });
 
@@ -137,14 +195,41 @@ describe('splitReply: fail-closed (parseOk=false → customerReply 必ず空)', 
     expect(r.customerReply).toBe('');
   });
 
-  it('マーカーが行頭以外 (行全体一致しない) → parseOk=false', () => {
+  it('START トークン直後 (同一行 suffix) に narration 連結 → parseOk=false (codex CODE review P1)', () => {
+    // 緩和は START の「前」の narration のみ。START の「後ろ」に narration が連結された
+    // 形は narration が customerBody に滑り込むため fail-closed にする。
     const raw = [
-      `前置き ${CUSTOMER_REPLY_START}`,
-      '本文',
+      `${CUSTOMER_REPLY_START}まず社内情報を確認します。`,
+      '本文です。',
       CUSTOMER_REPLY_END,
     ].join('\n');
     const r = splitReply(raw);
     expect(r.parseOk).toBe(false);
+    expect(r.customerReply).toBe('');
+    expect(r.internalPreview).toBe(raw);
+  });
+
+  it('END トークン直前 (同一行 prefix) に narration 連結 → parseOk=false (codex CODE review P1)', () => {
+    // END 直前へ narration が連結された形は narration が customerBody に滑り込むため
+    // fail-closed (START 側と対称、旧 END 行全体一致の fail-closed 性を復元)。
+    const raw = [
+      CUSTOMER_REPLY_START,
+      '顧客本文です。',
+      `次に処理状況を確認します${CUSTOMER_REPLY_END}`,
+    ].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(false);
+    expect(r.customerReply).toBe('');
+    expect(r.internalPreview).toBe(raw);
+  });
+
+  it('END トークン欠落 (inline START のみ) → parseOk=false', () => {
+    // トークンアンカーでも END 不在は fail-closed (緩和は START/END の locating のみ)
+    const raw = [`前置き ${CUSTOMER_REPLY_START}`, '本文だけで END なし'].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(false);
+    expect(r.customerReply).toBe('');
+    expect(r.internalPreview).toBe(raw);
   });
 
   it('顧客本文に 📋 が混入 → parseOk=false, customerReply=', () => {
