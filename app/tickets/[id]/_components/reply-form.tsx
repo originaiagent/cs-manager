@@ -166,7 +166,7 @@ export default function ReplyForm({
         <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50/50 p-4">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-semibold text-indigo-700 inline-flex items-center gap-1">
-              <BookOpen size={14} /> 返信案 (参照ナレッジ付き)
+              <BookOpen size={14} /> 返信案 (ナレッジ参照 AI)
             </span>
             <span className="text-[10px] text-gray-500">
               {rag.confidence != null &&
@@ -175,23 +175,16 @@ export default function ReplyForm({
             </span>
           </div>
 
-          {/* 人間確認推奨の警告 (低 confidence / needs_human / no_answer / 引用ゼロ) */}
-          {(rag.needsHuman ||
-            rag.noAnswer ||
-            rag.citations.length === 0 ||
-            (rag.confidence != null &&
-              rag.confidence < rag.lowConfidenceThreshold)) && (
-            <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-800 inline-flex items-start gap-1.5 w-full">
-              <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-              <span>
-                ※自動生成、人間確認推奨
-                {rag.noAnswer && '（ナレッジで十分に回答できませんでした）'}
-                {!rag.noAnswer &&
-                  rag.citations.length === 0 &&
-                  '（参照ナレッジなし）'}
-              </span>
-            </div>
-          )}
+          {/* 人間確認推奨の警告 (常時、自動生成のため)。
+              方式A ではナレッジ検索は AI agent 内で行われ cs 側に引用が返らないため、
+              「参照ナレッジなし」=引用ゼロ判定は使わない (誤警告防止)。 */}
+          <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-800 inline-flex items-start gap-1.5 w-full">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+            <span>
+              ※自動生成、送信前に人間確認を推奨します
+              {rag.noAnswer && '（ナレッジで十分に回答できませんでした）'}
+            </span>
+          </div>
 
           <pre className="whitespace-pre-wrap text-sm text-gray-800 font-sans bg-white rounded-md border border-indigo-100 p-3 max-h-64 overflow-auto">
             {rag.draft}

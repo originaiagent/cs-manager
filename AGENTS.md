@@ -16,9 +16,24 @@ OriginAI マルチチャネル統合カスタマーサポート + AI改善サイ
 - `NEXT_PUBLIC_SUPABASE_URL`: Supabase project URL
 - `SUPABASE_SERVICE_ROLE_KEY`: Supabase service role key
 - `CRON_SECRET`: Vercel Cron Bearer token (`/api/cron/*` 認可)
+- `CS_MCP_KNOWLEDGE_TOKEN`: MCP `knowledge_search` ツール専用の静的 Bearer トークン。origin-ai の
+  `customer-reply-writer` agent がナレッジ検索時に注入する。**go-live: cs-manager と origin-ai に
+  同一値を設定すること。** 未設定時は Core credential `cs_mcp_knowledge.token` にフォールバック。
+  `INTERNAL_API_KEY` / `origin_ai_internal` とは別物 (流用禁止)。log 出力禁止。
 
 外部サービス認証 (楽天 R-MessE 等) は cs-manager 内に持たない。
 Core `/api/credentials/:service_code?scope_key=<店舗ID>` 経由で動的取得 (5 分 TTL キャッシュ)。
+
+## MCP 窓口 (`/api/mcp`)
+- read-only 窓口 (JSON-RPC 2.0)。`initialize` / `tools/list` は匿名。
+- `tools/call`:
+  - `list` / `read` / `write`: run-scoped JWT 必須 (embed 波及)。
+  - `knowledge_search`: **専用静的キー (`CS_MCP_KNOWLEDGE_TOKEN`) のみ**。JWT は使えない。
+    - 方式A: origin-ai `customer-reply-writer` agent が自前でナレッジ検索するための read tool。
+    - args: `{query (必須), limit? (1-8)}`。db_target='cs' / pii_state='masked' /
+      filter_visibility=['public','internal'] / status='published' は**サーバ固定** (args 無視)。
+    - 戻り: `{results:[{title, content, article_id, chunk_id}], count}` (全て masked)。
+    - 静的キーは `knowledge_search` 以外 (list/read/write) には到達不可。
 
 ## Development
 ```bash

@@ -23,6 +23,8 @@ import { handleRead } from '@/lib/mcp/capabilities/read';
 import { handleWrite, type WriteOp } from '@/lib/mcp/capabilities/write';
 import { handleReversibleWrite } from '@/lib/mcp/reversibility';
 import { isFormWriteEnabled } from '@/lib/mcp/service';
+import { verifyKnowledgeToken, handleKnowledgeSearch } from '@/lib/mcp/knowledge-search';
+import { randomUUID } from 'node:crypto';
 // fetch-file を提供するツールのみ有効化:
 // import { handleFetchFile } from '@/lib/mcp/capabilities/fetch-file';
 
@@ -92,6 +94,20 @@ const AUTH_ERROR = -32001;
 // ---------------------------------------------------------------------------
 
 const TOOLS = [
+  {
+    name: 'knowledge_search',
+    description:
+      '社内ナレッジ(CS)を意味検索する読み取り専用ツール。query(必須,自然言語), limit(任意,1-8)。',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        query: { type: 'string' },
+        limit: { type: 'number' },
+      },
+      required: ['query'],
+    },
+  },
   {
     name: 'list',
     description: '書込/読取可能箇所の一覧を返す',
@@ -202,6 +218,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const toolName = p?.name as string | undefined;
     const toolArgs = (p?.arguments ?? {}) as Record<string, unknown>;
     if (!toolName) return rpcErr(id, INVALID_PARAMS, 'tools/call requires params.name');
+
+    // ── knowledge_search: 専用静的キー認証 (JWT 経路より前に評価) ─────────────
+    // この分岐は knowledge_search のみを認可する。静的キーは list/read/write には
+    // 到達できない (このブロックを抜けると下の opMap には knowledge_search が無いため
+    // METHOD_NOT_FOUND になる)。逆に run-scoped JWT はここで弾かれ knowledge_search を
+    // 叩けない (verifyKnowledgeToken は JWT を受け付けず、JWT は静的キーと一致しない)。
+    if (toolName === 'knowledge_search') {
+      const ksAuthHeader = req.headers.get('authorization');
+      const authorized = await verifyKnowledgeToken(ksAuthHeader);
+      if (!authorized) {
+        return rpcErr(id, AUTH_ERROR, 'knowledge_search の認証に失敗しました', 401);
+      }
+      const traceId = randomUUID();
+      try {
+        const outcome = await handleKnowledgeSearch(toolArgs, traceId, ksAuthHeader);
+        if (!outcome.ok) {
+          return rpcToolResult(id, { ok: false, error: outcome.error }, true);
+        }
+        return rpcToolResult(id, outcome.payload);
+      } catch (err) {
+        console.error(
+          '[api/mcp] knowledge_search 内部エラー:',
+          (err as Error)?.message ?? err,
+        );
+        return rpcErr(id, INTERNAL_ERROR, '内部エラーが発生しました');
+      }
+    }
 
     // 未対応 write 系 (place-file 等) は一律 disabled (fail-closed)
     if (WRITE_OPS.has(toolName)) {
