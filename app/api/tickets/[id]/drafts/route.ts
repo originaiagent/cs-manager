@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { authorizeApiRoute } from '@/lib/auth/api-auth';
+import { isCustomerSafeBody } from '@/lib/rag/split-reply';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -90,6 +91,20 @@ export async function POST(
     return NextResponse.json(
       {
         error: `source '${source}' requires is_separated=true (customer-only text)`,
+      },
+      { status: 400 },
+    );
+  }
+
+  // サーバ側送信安全ゲート (codex review P1): is_separated=true はクライアントの主張を
+  // 鵜呑みにせず、body 自体に内部マーカー/センチネルが無いことをサーバで独立検証する。
+  // これにより「parser が唯一の安全境界」を汎用 API でも担保 (混在 body を送信安全扱い
+  // できる迂回を塞ぐ)。違反時は 400 で拒否し、決して保存しない。
+  if (isSeparated && !isCustomerSafeBody(body)) {
+    return NextResponse.json(
+      {
+        error:
+          'is_separated=true requires customer-only body (internal markers/sentinels detected)',
       },
       { status: 400 },
     );

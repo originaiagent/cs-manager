@@ -94,12 +94,13 @@ export async function ingestInboundWithDraft(
     return { status: 'ingested_draft_failed', ticketId, draftError: 'rag_upstream_error' };
   }
 
-  // 構造分離 fail-closed (codex CONCERN#3):
-  //   reply-adapter は split-reply で分離済み。parseOk=false の場合 ragResult.draft は ''
-  //   (顧客向け本文を安全に取り出せなかった = 混在の可能性) なので、混在 body を絶対に
-  //   保存しない。draft を作らず parse 失敗として記録する。
-  //   ※ ragResult.draft は「顧客向け本文のみ」(parser 通過済)。社内テキストは含まれない。
-  if (ragResult.parseOk === false) {
+  // 構造分離 fail-closed (codex CONCERN#3 + review P2):
+  //   reply-adapter は split-reply で分離済み。is_separated=true で保存してよいのは
+  //   parseOk が **厳密に true** の場合のみ (parseOk が false / 未設定のいずれも不許可)。
+  //   parseOk!==true の場合 ragResult.draft は信頼できない (混在の可能性) ため、
+  //   絶対に保存しない (fail-closed)。draft を作らず parse 失敗として記録する。
+  //   ※ parseOk===true の ragResult.draft は「顧客向け本文のみ」(parser 通過済)。
+  if (ragResult.parseOk !== true) {
     return { status: 'ingested_no_draft', ticketId, draftError: 'rag_parse_failed' };
   }
   if (!ragResult.draft || !ragResult.draft.trim()) {

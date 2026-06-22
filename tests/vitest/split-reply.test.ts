@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   splitReply,
+  isCustomerSafeBody,
   CUSTOMER_REPLY_START,
   CUSTOMER_REPLY_END,
 } from '@/lib/rag/split-reply';
@@ -207,5 +208,40 @@ describe('splitReply: fail-closed (parseOk=false → customerReply 必ず空)', 
       expect(r.parseOk).toBe(false);
       expect(r.customerReply).toBe('');
     }
+  });
+});
+
+describe('isCustomerSafeBody (サーバ側 /drafts POST 用ゲート, parser 迂回防止)', () => {
+  it('純粋な顧客向け本文 → true', () => {
+    expect(isCustomerSafeBody('お問い合わせありがとうございます。承りました。')).toBe(true);
+  });
+
+  it('空 / 空白のみ → false', () => {
+    expect(isCustomerSafeBody('')).toBe(false);
+    expect(isCustomerSafeBody('   ')).toBe(false);
+    expect(isCustomerSafeBody(null)).toBe(false);
+    expect(isCustomerSafeBody(undefined)).toBe(false);
+  });
+
+  it('内部マーカー (根拠/📋/INTERNAL_/ナレッジ/担当者メモ/⚠️) を含む → false', () => {
+    for (const bad of [
+      '回答。根拠: 記事#1',
+      '回答。📋 チェック',
+      '回答。INTERNAL_NOTE',
+      '回答。ナレッジ参照',
+      '回答。担当者メモ',
+      '回答。⚠️ 注意',
+      '回答。検索結果より',
+      '回答。担当者向け補足',
+    ]) {
+      expect(isCustomerSafeBody(bad), bad).toBe(false);
+    }
+  });
+
+  it('ORIGIN_CS センチネル系 (開始/END いずれも) を含む → false', () => {
+    expect(isCustomerSafeBody('回答 <<<ORIGIN_CS_CUSTOMER_REPLY_V1>>>')).toBe(false);
+    expect(
+      isCustomerSafeBody('回答 <<<END_ORIGIN_CS_INTERNAL_GROUNDING_V1>>>'),
+    ).toBe(false);
   });
 });

@@ -43,6 +43,26 @@ export const FORBIDDEN_IN_CUSTOMER_BODY = [
   '📋',
 ] as const;
 
+/**
+ * 「この本文は顧客向けとして安全か」をサーバ側で独立検証する (parser 迂回防止)。
+ *
+ * 用途: 汎用 /drafts POST 等、splitReply を通さない経路で is_separated=true を
+ *   受け付ける前のサーバ側ゲート。クライアントの is_separated 主張を鵜呑みにせず、
+ *   body 自体に内部マーカー/センチネルが無いことを証明する (codex review P1)。
+ *
+ * 安全条件 (全充足): trim 後非空 / 既知内部マーカー (FORBIDDEN_IN_CUSTOMER_BODY) を
+ *   含まない / ORIGIN_CS センチネル系を含まない。1 つでも違反 → false。
+ */
+export function isCustomerSafeBody(body: string | null | undefined): boolean {
+  const text = typeof body === 'string' ? body : '';
+  if (!text.trim()) return false;
+  for (const marker of FORBIDDEN_IN_CUSTOMER_BODY) {
+    if (text.includes(marker)) return false;
+  }
+  if (/<<<\s*(END_)?ORIGIN_CS_/i.test(text)) return false;
+  return true;
+}
+
 export interface SplitReplyResult {
   /** 顧客向け返信本文 (送信/編集対象)。parseOk=false 時は ''。 */
   customerReply: string;
