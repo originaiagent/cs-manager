@@ -10,6 +10,34 @@ export const maxDuration = 300;
 const MAX_THREAD_MESSAGES = 10;
 
 /**
+ * channel_meta(jsonb) から注文番号を best-effort 抽出。専用カラムは無い。
+ * キー命名は adapter ごとに揺れる (order_number / orderNumber / orderNo / order_id 等)
+ * ため、英数字以外を除去して lower-case 化した正規化キーで照合する。
+ * (例: 楽天 adapter は `orderNumber` を書き込む → 正規化で `ordernumber`)
+ */
+const ORDER_NUMBER_NORMALIZED_KEYS = ['ordernumber', 'orderno', 'orderid'] as const;
+
+function normalizeKey(k: string): string {
+  return k.replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
+function extractOrderNumber(channelMeta: unknown): string | null {
+  if (!channelMeta || typeof channelMeta !== 'object') return null;
+  // キーを正規化して走査 (命名揺れ吸収、最初の非空値が勝つ)
+  const normalized = new Map<string, unknown>();
+  for (const [k, v] of Object.entries(channelMeta as Record<string, unknown>)) {
+    const nk = normalizeKey(k);
+    if (!normalized.has(nk)) normalized.set(nk, v);
+  }
+  for (const key of ORDER_NUMBER_NORMALIZED_KEYS) {
+    const v = normalized.get(key);
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+  }
+  return null;
+}
+
+/**
  * RAG 返信案生成 (引用元付き)
  *
  * - cs-manager 内には LLM 直接呼出・プロンプトを書かない (AI 集約原則)
@@ -34,7 +62,9 @@ export async function POST(
   // 1. ticket 取得 (raw PII 含む、外部には送らない)
   const { data: ticket, error: ticketError } = await sb
     .from('tickets')
-    .select('id, customer_name, subject, status, product_id, case_category, channel_id')
+    .select(
+      'id, customer_name, subject, status, product_id, case_category, channel_id, channel_meta',
+    )
     .eq('id', params.id)
     .maybeSingle();
   if (ticketError) {
@@ -84,11 +114,17 @@ export async function POST(
     if (!bhError && typeof bh === 'boolean') withinBusinessHours = bh;
   }
 
+  // 3c. 注文番号を channel_meta (jsonb) から best-effort 抽出。
+  //     専用カラムは無い。よくあるキーを case-insensitive で探索し最初の非空値を採用。
+  const orderNumber = extractOrderNumber(ticket.channel_meta);
+
   // 4. RAG 返信案生成 (PII boundary は adapter 内で厳守)
   const result = await generateRagReply(sb, {
     subject: ticket.subject ?? null,
     inquiryBody,
     customerName: ticket.customer_name ?? null,
+    orderNumber,
+    category: ticket.case_category ?? null,
     channelId: ticket.channel_id ?? null,
     tenantId: null,
   });

@@ -83,15 +83,13 @@ function startMock(): Promise<Server> {
       res.end(JSON.stringify({ results: [] }));
       return;
     }
-    if (url.startsWith('/api/skills/rag-reply-draft')) {
+    // origin-ai v2 customer-reply-writer agent (draft は `text` で返る契約)
+    if (url.startsWith('/api/agents/customer-reply-writer/chat')) {
       res.statusCode = 200;
       res.end(
         JSON.stringify({
-          draft: MOCK_DRAFT,
-          citations: [],
-          no_answer: false,
-          needs_human: false,
-          confidence: 0.82,
+          agent: 'customer-reply-writer',
+          text: MOCK_DRAFT,
           model: 'mock-model',
         }),
       );

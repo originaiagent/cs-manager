@@ -8,10 +8,12 @@
  *
  * フロー:
  *  (a) origin-ai /api/skills/rag-pii-mask で問い合わせ文をマスク → masked_query + 置換マップ
+ *      さらに顧客名・注文番号を placeholder 化 ({{customer_name}} / {{order_id}})
  *  (b) /api/skills/rag-hybrid-search (db_target='cs', pii_state='masked',
  *      filter_visibility=['public','internal'])
  *  (c) hit の article_id → cs DB から記事 title を解決 (citation 表示用)
- *  (d) /api/skills/rag-reply-draft (masked_query + masked_chunks + pii_state='masked')
+ *  (d) /api/agents/customer-reply-writer/chat (origin-ai v2 managed agent)
+ *      に masked な構造化メッセージを渡し、返信ドラフト本文 (`text`) を受け取る
  *  (e) 返ってきた draft 内のマスクトークンを **ローカルで** 復元
  *
  * 認証: origin-ai rag endpoint は `x-internal-api-key` を要求し、Core 解決した
@@ -67,18 +69,15 @@ export interface RagCitation {
   rrf_score?: number | null;
 }
 
-interface ReplyDraftResponse {
-  draft: string;
-  citations: Array<{
-    chunk_id: string;
-    article_id: string;
-    article_version: number;
-    title?: string | null;
-  }>;
-  no_answer: boolean;
-  needs_human: boolean;
-  confidence: number;
-  model: string;
+/** customer-reply-writer agent chat レスポンス契約 (origin-ai v2) */
+interface AgentChatResponse {
+  agent?: string;
+  /** 生成された返信ドラフト本文 (主フィールド) */
+  text?: string;
+  /** 防御的フォールバック (text 欠落時) */
+  message?: string;
+  draft?: string;
+  model?: string | null;
 }
 
 export interface RagReplyInput {
@@ -88,6 +87,10 @@ export interface RagReplyInput {
   inquiryBody: string;
   /** 顧客名 (raw)。復元用 placeholder 化に使用 */
   customerName: string | null;
+  /** 注文番号 (raw)。{{order_id}} placeholder 化に使用 (origin-ai へは raw 送信禁止) */
+  orderNumber?: string | null;
+  /** カテゴリー (任意、PII ではないため masked メッセージにラベル付きで含める) */
+  category?: string | null;
   /** チャネル絞り込み (任意、UUID)。未指定なら絞り込みなし */
   channelId?: string | null;
   /** テナント絞り込み (任意) */
@@ -193,6 +196,27 @@ function applyCustomerNamePlaceholder(
   };
 }
 
+/**
+ * 注文番号を {{order_id}} placeholder に置換する。
+ * masked テキスト中に出現する orderNumber を全置換し、復元マップに登録。
+ * 注文番号は PII 境界対象: raw で origin-ai へ送ってはならない (codex blocker)。
+ * 復元トークンは常に返す (テキストに出現しなくても、メッセージの ## 注文番号 欄に
+ * placeholder を載せるため。出現しない場合は restore は no-op)。
+ */
+function applyOrderNumberPlaceholder(
+  text: string,
+  orderNumber: string | null | undefined,
+): { text: string; token: string | null; restoreToken?: { token: string; original: string } } {
+  const order = orderNumber?.trim();
+  if (!order) return { text, token: null };
+  const token = '{{order_id}}';
+  return {
+    text: text.includes(order) ? text.split(order).join(token) : text,
+    token,
+    restoreToken: { token, original: order },
+  };
+}
+
 /** masked テキストの全トークンをローカルで復元する。 */
 function restoreLocally(
   text: string,
@@ -294,16 +318,24 @@ export async function generateRagReply(
   }
 
   // 顧客名を placeholder 化 (regex マスクの後)
-  const { text: maskedQuery, restoreToken: nameToken } = applyCustomerNamePlaceholder(
+  const { text: nameMaskedQuery, restoreToken: nameToken } = applyCustomerNamePlaceholder(
     maskRes.masked_text,
     input.customerName,
   );
+
+  // 注文番号を placeholder 化 (raw で外部へ出さない — PII 境界)
+  const {
+    text: maskedQuery,
+    token: orderToken,
+    restoreToken: orderRestoreToken,
+  } = applyOrderNumberPlaceholder(nameMaskedQuery, input.orderNumber);
 
   // 復元マップ (外部呼び出し後にローカル復元するためだけに保持。log に出さない)
   const restoreMap: Array<{ token: string; original: string }> = [
     ...maskRes.replacements.map((r) => ({ token: r.token, original: r.original })),
   ];
   if (nameToken) restoreMap.push(nameToken);
+  if (orderRestoreToken) restoreMap.push(orderRestoreToken);
 
   // (b) hybrid search (masked query)
   let hits: SearchHit[] = [];
@@ -350,56 +382,136 @@ export async function generateRagReply(
     title: titleMap.get(h.article_id) ?? null,
   }));
 
-  // (d) reply draft 生成 (masked query + masked chunks)
-  let reply: ReplyDraftResponse;
+  // (d) customer-reply-writer agent で返信ドラフト生成
+  //     送信メッセージは全て masked (顧客名/注文番号は placeholder 化済み)。
+  const agentMessage = buildAgentMessage({
+    maskedQuery,
+    category: input.category ?? null,
+    orderToken,
+    chunks: maskedChunks,
+  });
+
+  let agentRes: AgentChatResponse;
   try {
-    const res = await ragFetch('/api/skills/rag-reply-draft', internalKey, {
-      masked_query: maskedQuery,
-      masked_chunks: maskedChunks,
-      pii_state: 'masked',
-    });
+    const res = await ragFetch(
+      '/api/agents/customer-reply-writer/chat',
+      internalKey,
+      { message: agentMessage },
+    );
     if (!res.ok) {
       const t = await res.text().catch(() => '');
       return {
         ok: false,
-        error: `rag-reply-draft ${res.status}: ${t.slice(0, 200)}`,
+        error: `customer-reply-writer ${res.status}: ${t.slice(0, 200)}`,
         searchHitCount: hits.length,
         durationMs: Date.now() - startedAt,
       };
     }
-    reply = (await res.json()) as ReplyDraftResponse;
+    agentRes = (await res.json()) as AgentChatResponse;
   } catch (e) {
     return {
       ok: false,
-      error: `rag-reply-draft 呼び出し失敗: ${e instanceof Error ? e.message : String(e)}`,
+      error: `customer-reply-writer 呼び出し失敗: ${e instanceof Error ? e.message : String(e)}`,
+      searchHitCount: hits.length,
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  // 契約: draft は `text`。欠落時のみ防御的に message/draft を試す。
+  const rawDraft =
+    (typeof agentRes.text === 'string' && agentRes.text.trim() && agentRes.text) ||
+    (typeof agentRes.message === 'string' && agentRes.message) ||
+    (typeof agentRes.draft === 'string' && agentRes.draft) ||
+    '';
+
+  if (!rawDraft.trim()) {
+    return {
+      ok: false,
+      error: 'customer-reply-writer が空のドラフトを返しました',
       searchHitCount: hits.length,
       durationMs: Date.now() - startedAt,
     };
   }
 
   // (e) draft 内のマスクトークンをローカル復元 (外部送信後)
-  const restoredDraft = restoreLocally(reply.draft ?? '', restoreMap);
+  const restoredDraft = restoreLocally(rawDraft, restoreMap);
 
-  // citation の rrf_score を search hit から補完 (reply 側は score を返さない)
-  const scoreByChunk = new Map(hits.map((h) => [h.chunk_id, h.rrf_score]));
-  const citations: RagCitation[] = (reply.citations ?? []).map((c) => ({
-    chunk_id: c.chunk_id,
-    article_id: c.article_id,
-    article_version: c.article_version,
-    title: c.title ?? titleMap.get(c.article_id) ?? null,
-    rrf_score: scoreByChunk.get(c.chunk_id) ?? null,
+  // citation は search hit (b/c) から構築。agent は citation を返さないため。
+  const citations: RagCitation[] = hits.map((h) => ({
+    chunk_id: h.chunk_id,
+    article_id: h.article_id,
+    article_version: h.article_version,
+    title: titleMap.get(h.article_id) ?? null,
+    rrf_score: h.rrf_score ?? null,
   }));
+
+  // confidence/noAnswer/needsHuman は検索ヒット有無から導出 (agent は返さない)。
+  // 設計 (方式B): ヒット0件でも agent には「該当なし」で渡しドラフトは生成するが、
+  //   noAnswer=needsHuman=true でフラグし UI 警告 (人間確認推奨) を必ず発火させる。
+  //   = fail-closed ではなく flag-and-require-human。自動送信は別途ゲートで遮断。
+  const hasHits = hits.length > 0;
+  const confidence = deriveConfidence(hits);
 
   return {
     ok: true,
     draft: restoredDraft,
     citations,
-    confidence: reply.confidence,
-    noAnswer: reply.no_answer,
-    needsHuman: reply.needs_human,
-    model: reply.model ?? null,
+    confidence,
+    noAnswer: !hasHits,
+    needsHuman: !hasHits,
+    model: agentRes.model ?? null,
     searchHitCount: hits.length,
     maskFailed: false,
     durationMs: Date.now() - startedAt,
   };
+}
+
+// ---- agent メッセージ構築 (全て masked) -------------------------------------
+
+/**
+ * customer-reply-writer agent へ渡す構造化メッセージを組み立てる。
+ * 含めるのは全て masked な値のみ。注文番号は placeholder ({{order_id}})。
+ */
+function buildAgentMessage(args: {
+  maskedQuery: string;
+  category: string | null;
+  orderToken: string | null;
+  chunks: ReplyChunk[];
+}): string {
+  const { maskedQuery, category, orderToken, chunks } = args;
+  const knowledge =
+    chunks.length > 0
+      ? chunks
+          .map(
+            (c, i) =>
+              `${i + 1}. [${c.title?.trim() || '(タイトルなし)'}] ${c.content}`,
+          )
+          .join('\n')
+      : '該当なし';
+  return [
+    '## 問い合わせ',
+    maskedQuery,
+    '',
+    '## カテゴリー',
+    category?.trim() || '不明',
+    '',
+    '## 注文番号',
+    orderToken ?? '不明',
+    '',
+    '## 参照ナレッジ',
+    knowledge,
+  ].join('\n');
+}
+
+/**
+ * 検索ヒットから confidence を導出 (agent は confidence を返さない)。
+ * トップヒットの RRF スコアを 0..1 にクランプしてそのまま用いる。
+ * 人為的な下駄 (0.5 floor) は履かせない — 弱いヒットは低 confidence のまま
+ * UI 警告 (< threshold) を発火させ、人間確認を促すため。
+ */
+function deriveConfidence(hits: SearchHit[]): number {
+  if (hits.length === 0) return 0;
+  const top = hits[0]?.rrf_score ?? 0;
+  if (!Number.isFinite(top)) return 0;
+  return Math.max(0, Math.min(1, top));
 }
