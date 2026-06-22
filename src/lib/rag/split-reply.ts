@@ -141,18 +141,25 @@ export function splitReply(rawInput: string | null | undefined): SplitReplyResul
     return failClosed;
   }
 
+  // 行末を正規化 (\r\n / 単独 \r → \n) してから以降の index 計算・slice を行う。
+  //   旧 splitLines が \r\n と単独 \r を共に \n 扱いしていたのと同じ前提を維持し、
+  //   START/END 行の境界探索 (indexOf/lastIndexOf '\n') が CR-only 出力でも成立する
+  //   ようにする (codex CODE review P3: CR-only envelope の取りこぼし回避)。
+  //   センチネルトークンは \r/\n を含まないため index 整合性は保たれる。
+  const text = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
   // (1)(2) START/END トークンが各々ちょうど 1 回出現することを要件にする。
   //   START トークンは END トークンの部分文字列ではない (`<<<ORIGIN_CS_...` vs
   //   `<<<END_ORIGIN_CS_...`) ため、両者の出現数は独立に数えてよい。
   if (
-    countOccurrences(raw, CUSTOMER_REPLY_START) !== 1 ||
-    countOccurrences(raw, CUSTOMER_REPLY_END) !== 1
+    countOccurrences(text, CUSTOMER_REPLY_START) !== 1 ||
+    countOccurrences(text, CUSTOMER_REPLY_END) !== 1
   ) {
     return failClosed;
   }
 
-  const startIdx = raw.indexOf(CUSTOMER_REPLY_START);
-  const endIdx = raw.indexOf(CUSTOMER_REPLY_END);
+  const startIdx = text.indexOf(CUSTOMER_REPLY_START);
+  const endIdx = text.indexOf(CUSTOMER_REPLY_END);
   const bodyStart = startIdx + CUSTOMER_REPLY_START.length;
 
   // (3) START が END に先行 (本文 0 文字も後段 (5) で弾く)
@@ -166,10 +173,10 @@ export function splitReply(rawInput: string | null | undefined): SplitReplyResul
   //   narration が customerBody に滑り込むため許容しない (codex CODE review P1)。
   //   旧「行全体一致」が START 後方に持っていた fail-closed 性を復元する。
   //   CRLF の \r は空白扱いなので `<<<START>>>\r\n本文` は通る。
-  const startLineEnd = raw.indexOf('\n', bodyStart);
-  const startLineRest = raw.slice(
+  const startLineEnd = text.indexOf('\n', bodyStart);
+  const startLineRest = text.slice(
     bodyStart,
-    startLineEnd === -1 ? raw.length : startLineEnd,
+    startLineEnd === -1 ? text.length : startLineEnd,
   );
   if (startLineRest.trim() !== '') {
     return failClosed;
@@ -180,8 +187,8 @@ export function splitReply(rawInput: string | null | undefined): SplitReplyResul
   //   連結されると customerBody に滑り込むため許容しない (codex CODE review P1)。
   //   END 始端直前の最後の改行から END 始端までが空白のみなら OK (= END が実質行頭)。
   //   CRLF の \r は空白扱いなので `本文\r\n<<<END>>>` は通る。
-  const endLineStart = raw.lastIndexOf('\n', endIdx - 1);
-  const endLinePrefix = raw.slice(
+  const endLineStart = text.lastIndexOf('\n', endIdx - 1);
+  const endLinePrefix = text.slice(
     endLineStart === -1 ? 0 : endLineStart + 1,
     endIdx,
   );
@@ -192,7 +199,7 @@ export function splitReply(rawInput: string | null | undefined): SplitReplyResul
   // (5) START 終端〜END 始端の「厳密に間」の本文が trim 後に非空。
   //   START と同一行の前置きナレーション・前後空白はこの slice の外なので
   //   customerBody には入らない。END より後ろの全文も入らない。
-  const customerBody = raw.slice(bodyStart, endIdx).trim();
+  const customerBody = text.slice(bodyStart, endIdx).trim();
   if (!customerBody) {
     return failClosed;
   }
@@ -216,7 +223,7 @@ export function splitReply(rawInput: string | null | undefined): SplitReplyResul
   //   除いた残り。START 前のナレーション・END 後の根拠/メモをオペレータ表示用に
   //   そのまま残す。customerBody 由来の再構成は混ぜない (生 raw からの slice のみ)。
   const internalPreview = (
-    raw.slice(0, startIdx) + raw.slice(endIdx + CUSTOMER_REPLY_END.length)
+    text.slice(0, startIdx) + text.slice(endIdx + CUSTOMER_REPLY_END.length)
   ).trim();
 
   return {

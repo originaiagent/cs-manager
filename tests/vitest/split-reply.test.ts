@@ -134,6 +134,17 @@ describe('splitReply: 正常系', () => {
     expect(r.parseOk).toBe(true);
     expect(r.customerReply).toBe('CRLF本文');
   });
+
+  it('CR のみ (lone \\r) 行末でもトークンアンカーが成立する (codex CODE review P3)', () => {
+    const raw = [
+      CUSTOMER_REPLY_START,
+      'CR本文',
+      CUSTOMER_REPLY_END,
+    ].join('\r');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(true);
+    expect(r.customerReply).toBe('CR本文');
+  });
 });
 
 describe('splitReply: fail-closed (parseOk=false → customerReply 必ず空)', () => {
