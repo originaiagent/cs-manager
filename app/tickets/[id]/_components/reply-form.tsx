@@ -10,6 +10,7 @@ import {
   Check,
   BookOpen,
   AlertTriangle,
+  Lock,
 } from 'lucide-react';
 import {
   generateRagDraft,
@@ -21,6 +22,11 @@ interface Props {
   ticketId: string;
   initialBody: string;
   initialSource: string | null;
+  /**
+   * 旧形式 (AI 由来かつ未分離 = 混在の可能性) のドラフトが存在する。
+   * true の場合 textarea には何も入れず、再生成を促す通知のみ表示する。
+   */
+  legacyUnsafe?: boolean;
   /** 製品情報の有無 (page.tsx から渡される。現状は表示制御に未使用だが互換のため受領) */
   productAvailable?: boolean;
 }
@@ -30,7 +36,12 @@ type RagState =
   | { kind: 'loading' }
   | {
       kind: 'preview';
+      /** 顧客向け本文のみ (split-reply 分離後)。parseOk=false 時は ''。 */
       draft: string;
+      /** 社内用プレビュー (読み取り専用)。送信欄には入れない。 */
+      internalPreview: string;
+      /** 構造分離に成功したか。false = 採用/編集不可 (送信欄空)。 */
+      parseOk: boolean;
       citations: RagCitation[];
       confidence: number | null;
       needsHuman: boolean;
@@ -50,6 +61,7 @@ export default function ReplyForm({
   ticketId,
   initialBody,
   initialSource,
+  legacyUnsafe = false,
 }: Props) {
   const router = useRouter();
   const [body, setBody] = useState(initialBody);
@@ -90,6 +102,8 @@ export default function ReplyForm({
     setRag({
       kind: 'preview',
       draft: result.draft,
+      internalPreview: result.internalPreview ?? '',
+      parseOk: result.parseOk === true,
       citations: result.citations ?? [],
       confidence: result.confidence ?? null,
       needsHuman: result.needsHuman ?? false,
@@ -105,13 +119,17 @@ export default function ReplyForm({
 
   async function adoptRagDraft() {
     if (rag.kind !== 'preview') return;
+    // fail-closed: 分離失敗 or 顧客本文空のときは採用させない (社内テキスト保存防止)。
+    if (!rag.parseOk || !rag.draft.trim()) return;
     setBody(rag.draft);
     setSource('ai_draft');
     const adopted = rag.draft;
     setRag({ kind: 'idle' });
-    // 採用 = source='ai_draft' (ナレッジ参照 AI ドラフト) で永続化
+    // 採用 = source='ai_draft' で、顧客向け本文のみを is_separated=true で永続化。
     try {
-      const r = await saveDraft(ticketId, adopted, 'ai_draft');
+      const r = await saveDraft(ticketId, adopted, 'ai_draft', {
+        is_separated: true,
+      });
       if (!r.ok) {
         setSaveError(r.error ?? '保存に失敗しました');
         return;
@@ -125,6 +143,8 @@ export default function ReplyForm({
 
   function editRagDraft() {
     if (rag.kind !== 'preview') return;
+    // 分離失敗時は textarea に入れない (混在テキスト混入防止)。
+    if (!rag.parseOk || !rag.draft.trim()) return;
     setBody(rag.draft);
     setSource('ai_draft');
     setRag({ kind: 'idle' });
@@ -186,9 +206,41 @@ export default function ReplyForm({
             </span>
           </div>
 
-          <pre className="whitespace-pre-wrap text-sm text-gray-800 font-sans bg-white rounded-md border border-indigo-100 p-3 max-h-64 overflow-auto">
-            {rag.draft}
-          </pre>
+          {/* 分離失敗 (fail-closed): 送信欄は空のまま、顧客向け部分は手動切り出し。 */}
+          {!rag.parseOk && (
+            <div className="mb-2 rounded-md border border-rose-300 bg-rose-50 p-2.5 text-[12px] text-rose-800 flex items-start gap-1.5">
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+              <span>
+                自動分離に失敗しました。下の社内用テキストから顧客向け部分を手動で切り出して入力してください。
+                （安全のため送信欄・採用は無効化しています）
+              </span>
+            </div>
+          )}
+
+          {/* 顧客向け本文プレビュー (parseOk 時のみ。送信される唯一のテキスト)。 */}
+          {rag.parseOk && (
+            <>
+              <div className="text-[10px] font-semibold text-indigo-700 tracking-wider mb-1">
+                顧客向け返信 (この内容のみ送信されます)
+              </div>
+              <pre className="whitespace-pre-wrap text-sm text-gray-800 font-sans bg-white rounded-md border border-indigo-100 p-3 max-h-64 overflow-auto">
+                {rag.draft}
+              </pre>
+            </>
+          )}
+
+          {/* 社内用パネル (読み取り専用、絶対に送信されない)。根拠/メモ/narration。 */}
+          {rag.internalPreview.trim() && (
+            <div className="mt-2">
+              <div className="text-[10px] font-semibold text-gray-500 tracking-wider mb-1 inline-flex items-center gap-1">
+                <Lock size={11} className="text-gray-400" />
+                社内用・送信されません
+              </div>
+              <pre className="whitespace-pre-wrap text-[12px] text-gray-600 font-sans bg-gray-50 rounded-md border border-gray-200 p-3 max-h-48 overflow-auto select-text">
+                {rag.internalPreview}
+              </pre>
+            </div>
+          )}
 
           {/* 引用元 */}
           {rag.citations.length > 0 && (
@@ -230,14 +282,21 @@ export default function ReplyForm({
             <button
               type="button"
               onClick={editRagDraft}
-              className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+              disabled={!rag.parseOk || !rag.draft.trim()}
+              className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Pencil size={12} /> 編集
             </button>
             <button
               type="button"
               onClick={adoptRagDraft}
-              className="inline-flex items-center gap-1.5 rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600"
+              disabled={!rag.parseOk || !rag.draft.trim()}
+              title={
+                !rag.parseOk
+                  ? '自動分離に失敗したため採用できません'
+                  : undefined
+              }
+              className="inline-flex items-center gap-1.5 rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Check size={12} /> 採用
             </button>
@@ -253,6 +312,17 @@ export default function ReplyForm({
           >
             再試行
           </button>
+        </div>
+      )}
+
+      {/* 旧形式 (AI 由来かつ未分離 = 混在の可能性) のドラフトが存在する場合の通知。
+          textarea には入れない (社内テキストが送信欄に混入しない構造保証)。 */}
+      {legacyUnsafe && (
+        <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 flex items-start gap-1.5">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          <span>
+            旧形式の下書きが存在します（混在のため送信欄には入れていません）。再生成してください。
+          </span>
         </div>
       )}
 

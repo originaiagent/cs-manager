@@ -57,7 +57,15 @@ function installFetchStub(opts: StubOpts = {}) {
         status: 200,
         json: async () => ({
           agent: 'customer-reply-writer',
-          text: opts.agentDraft ?? 'こんにちは {{customer_name}} 様。ご注文 {{order_id}} について…',
+          // 既定はセンチネル封筒 (split-reply で parseOk=true になる形)。
+          // 顧客向け本文に placeholder を含め、ローカル復元で raw が戻ることを検証する。
+          text:
+            opts.agentDraft ??
+            [
+              '<<<ORIGIN_CS_CUSTOMER_REPLY_V1>>>',
+              'こんにちは {{customer_name}} 様。ご注文 {{order_id}} について…',
+              '<<<END_ORIGIN_CS_CUSTOMER_REPLY_V1>>>',
+            ].join('\n'),
           model: 'mock',
         }),
       } as any;
@@ -102,12 +110,35 @@ describe('reply-adapter PII boundary (方式A)', () => {
     // placeholder に置換されている
     expect(sent).toContain('{{customer_name}}');
     expect(sent).toContain('{{order_id}}');
-    // 復元はローカル: 最終 draft には raw が戻る
+    // 構造分離成功 (センチネル封筒) → parseOk=true, draft=顧客向け本文のみ
+    expect(result.parseOk).toBe(true);
+    // 復元はローカル: 最終 draft (= 顧客向け本文) には raw が戻る
     expect(result.draft).toContain('山田太郎');
     expect(result.draft).toContain('123-456-7890');
     // 方式A: citation は空・searchHitCount=0 (shape 互換)
     expect(result.citations).toEqual([]);
     expect(result.searchHitCount).toBe(0);
+  });
+
+  it('センチネル無しの agent 出力 → parseOk=false, draft 空 (fail-closed), 社内テキストは draft に入らない', async () => {
+    // agent がセンチネルを付けず raw を返す (混在の可能性) → split-reply が fail-closed
+    restore = installFetchStub({
+      agentDraft: 'こんにちは {{customer_name}} 様。\n根拠: 社内記事#1\n📋 担当者メモ',
+    });
+    const result = await generateRagReply(fakeSb, {
+      subject: '配送',
+      inquiryBody: '山田太郎です。注文 123-456-7890',
+      customerName: '山田太郎',
+      orderNumber: '123-456-7890',
+      category: '配送',
+    });
+    expect(result.ok).toBe(true);
+    // fail-closed: draft は空、社内テキスト/raw は draft に絶対入らない
+    expect(result.parseOk).toBe(false);
+    expect(result.draft).toBe('');
+    // 社内テキストはオペレータ用 internalPreview にのみ載る (raw 全文、PII 復元済)
+    expect(result.internalPreview).toContain('根拠');
+    expect(result.internalPreview).toContain('担当者メモ');
   });
 
   it('表記揺れ (空白入り顧客名) も variant でマスクされる', async () => {

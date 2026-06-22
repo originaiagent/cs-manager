@@ -144,7 +144,12 @@ export async function POST(
 
   return NextResponse.json({
     ok: true,
+    // draft = 顧客向け本文のみ (split-reply 分離後)。parseOk=false なら ''。
     draft: result.draft ?? '',
+    // 社内用プレビュー (読み取り専用表示用)。送信欄には入れない。
+    internalPreview: result.internalPreview ?? '',
+    // 構造分離に成功したか。false なら UI は送信欄を空にし採用を無効化する。
+    parseOk: result.parseOk ?? false,
     citations: result.citations ?? [],
     confidence: result.confidence ?? null,
     noAnswer: result.noAnswer ?? false,

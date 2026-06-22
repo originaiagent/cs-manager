@@ -130,6 +130,58 @@ describe('ingestInboundWithDraft 外部契約', () => {
     expect(r.draftError).toBe('rag_no_draft');
   });
 
+  it('構造分離失敗 (parseOk=false) → ingested_no_draft + rag_parse_failed, 混在 body は保存しない', async () => {
+    // reply-adapter は parseOk=false 時 draft='' を返す。万一 draft に値が来ても保存しない。
+    const draftInsert = vi.fn();
+    const gen = vi.fn(async () =>
+      reply({ ok: true, draft: '', internalPreview: '混在テキスト全文', parseOk: false }),
+    );
+    const sb = makeFakeSb({});
+    // insert が呼ばれないことを検証するため ticket_drafts.insert を spy 化
+    const origFrom = sb.from.bind(sb);
+    sb.from = (table: string) => {
+      if (table === 'ticket_drafts') {
+        return {
+          insert: (...args: unknown[]) => {
+            draftInsert(...args);
+            return { select: () => ({ single: () => Promise.resolve({ data: { id: DRAFT_ID }, error: null }) }) };
+          },
+        };
+      }
+      return origFrom(table);
+    };
+    const r = await ingestInboundWithDraft(sb, { channelId: 'ch-1', ticket, inboundMessage, ragInput, generateReply: gen });
+    expect(r.status).toBe('ingested_no_draft');
+    expect(r.draftError).toBe('rag_parse_failed');
+    expect(r.draftId).toBeUndefined();
+    // 混在 body は ticket_drafts に絶対 insert されない
+    expect(draftInsert).not.toHaveBeenCalled();
+  });
+
+  it('parseOk=true の AI draft → is_separated=true で保存される', async () => {
+    const draftInsert = vi.fn();
+    const gen = vi.fn(async () =>
+      reply({ ok: true, draft: '顧客向け本文', parseOk: true }),
+    );
+    const sb = makeFakeSb({});
+    const origFrom = sb.from.bind(sb);
+    sb.from = (table: string) => {
+      if (table === 'ticket_drafts') {
+        return {
+          insert: (row: Record<string, unknown>) => {
+            draftInsert(row);
+            return { select: () => ({ single: () => Promise.resolve({ data: { id: DRAFT_ID }, error: null }) }) };
+          },
+        };
+      }
+      return origFrom(table);
+    };
+    const r = await ingestInboundWithDraft(sb, { channelId: 'ch-1', ticket, inboundMessage, ragInput, generateReply: gen });
+    expect(r.status).toBe('ingested_with_draft');
+    expect(draftInsert).toHaveBeenCalledOnce();
+    expect(draftInsert.mock.calls[0][0]).toMatchObject({ is_separated: true, body: '顧客向け本文' });
+  });
+
   it('draft 保存失敗 → ingested_draft_failed + draft_persist_error', async () => {
     const gen = vi.fn(async () => reply({ ok: true, draft: '案' }));
     const sb = makeFakeSb({ draftInsertError: { message: 'insert failed' } });

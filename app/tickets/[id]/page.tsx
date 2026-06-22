@@ -49,7 +49,7 @@ export default async function TicketDetailPage({ params }: { params: Params }) {
       .order('sent_at', { ascending: true }),
     sb
       .from('ticket_drafts')
-      .select('id, body, source, created_at')
+      .select('id, body, source, is_separated, created_at')
       .eq('ticket_id', ticket.id)
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
@@ -61,6 +61,24 @@ export default async function TicketDetailPage({ params }: { params: Params }) {
 
   const messages = messagesRes.data ?? [];
   const latestDraft = (draftRes.data ?? [])[0] ?? null;
+
+  // 送信安全ゲート (server-side, single source of truth):
+  // 送信欄 (textarea) に初期値を入れてよいのは SAFE な場合のみ:
+  //   - source==='manual' (オペレータ入力)
+  //   - is_separated===true (split-reply で分離した顧客向け本文のみ)
+  // それ以外で AI 由来 (ai_draft/rag) かつ未分離 (is_separated=false) は旧形式 (混在の
+  // 可能性) → initialBody は空にし legacyUnsafe を立てて UI に再生成を促す (社内テキスト
+  // が送信欄に入らない構造保証)。
+  const draftSource = (latestDraft?.source as string | null) ?? null;
+  const draftIsSeparated = latestDraft?.is_separated === true;
+  const isLegacyUnsafe =
+    !!latestDraft &&
+    (draftSource === 'ai_draft' || draftSource === 'rag') &&
+    !draftIsSeparated;
+  const safeInitialBody =
+    !isLegacyUnsafe && (draftSource === 'manual' || draftIsSeparated)
+      ? latestDraft?.body ?? ''
+      : '';
   const product: CoreProduct | null = productRes.ok ? productRes.product ?? null : null;
   const productError =
     !ticket.product_id || productRes.ok ? null : productRes.error ?? '不明エラー';
@@ -155,8 +173,9 @@ export default async function TicketDetailPage({ params }: { params: Params }) {
       <h2 className="text-xs font-semibold text-gray-500 tracking-wider mb-2">返信</h2>
       <ReplyForm
         ticketId={ticket.id}
-        initialBody={latestDraft?.body ?? ''}
-        initialSource={latestDraft?.source ?? null}
+        initialBody={safeInitialBody}
+        initialSource={draftSource}
+        legacyUnsafe={isLegacyUnsafe}
         productAvailable={!!product}
       />
     </div>
