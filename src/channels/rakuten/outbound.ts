@@ -27,6 +27,25 @@ const MAX_SENDS_PER_RUN = 20;
 const REQUEST_DELAY_MS = 200;
 const BACKOFF_SCHEDULE_MS = [1000, 2000, 4000];
 
+/**
+ * 一般 sweep (sendApprovedDrafts) の送信安全フィルタ (PostgREST `.or()` 式)。
+ *
+ * 送信可能 =
+ *   source = 'manual'  (オペレータ入力)
+ *   OR (source IN ('ai_draft','rag') AND is_separated = true)
+ *      (= split-reply で構造分離した顧客向け本文のみ)
+ *
+ * 設計意図 (codex review P1):
+ *  - 旧 ai_draft/rag (is_separated=false = 社内テキスト混在の可能性) は承認済でも送らない。
+ *  - first_response は **一般 sweep に乗せない**。一次返信は send-first-response.ts の
+ *    営業時間ガード + flag 再確認付き専用単発経路でのみ送る設計のため、ここで拾うと
+ *    (万一 is_separated=true かつ approved でも) 営業時間外ガードを迂回し得る。
+ *    そこで is_separated=true 分岐を source IN (ai_draft,rag) に明示的に絞り、
+ *    first_response が approved+is_separated=true でもこの sweep に載らないようにする。
+ */
+export const SEND_SAFE_OR_FILTER =
+  'source.eq.manual,and(source.in.(ai_draft,rag),is_separated.eq.true)';
+
 interface RakutenChannelRow {
   id: string;
   code: string;
@@ -69,16 +88,8 @@ async function loadApprovedDrafts(
     .select('id, body, ticket_id, ticket:tickets!inner(id, external_id, channel_id)')
     .eq('status', 'approved')
     .eq('ticket.channel_id', channelId)
-    // 送信安全フィルタ (構造保証): 一般 sweep で送信可能なのは
-    //   source = 'manual'        (オペレータ入力)
-    //   OR is_separated = true   (split-reply で分離した顧客向け本文のみ = ai_draft/rag)
-    // のみ。旧 ai_draft/rag (is_separated=false = 混在の可能性) は承認済でも送信しない。
-    //
-    // ※ first_response は **一般 sweep に乗せない** (codex review P1)。一次返信は
-    //   send-first-response.ts の専用単発経路 (営業時間ガード + flag 再確認, fail-closed)
-    //   のみで送る設計のため、ここで allow-list すると営業時間外ガードを迂回し得る。
-    //   first_response は通常 status='pending' のままで、この approved sweep には載らない。
-    .or('source.eq.manual,is_separated.eq.true')
+    // 送信安全フィルタ (SEND_SAFE_OR_FILTER, 構造保証)。
+    .or(SEND_SAFE_OR_FILTER)
     .order('created_at', { ascending: true })
     .limit(limit);
   if (error) throw new Error(`loadApprovedDrafts failed: ${error.message}`);
