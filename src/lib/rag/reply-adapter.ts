@@ -1,25 +1,30 @@
 /**
- * RAG 返信案生成オーケストレーション (cs-manager サーバ側 adapter)
+ * RAG 返信案生成オーケストレーション (cs-manager サーバ側 adapter) — 方式A
  *
  * PII boundary 厳守 (cs-manager-stage2-phase0-design.md §5):
  *  - 外部 (origin-ai) へ送るのは masked テキストのみ
  *  - raw PII は log に出さない
  *  - 顧客名等プレースホルダの復元は **外部呼び出し後にローカルでのみ** 行う
  *
+ * 方式A: ナレッジ検索は origin-ai の managed agent `customer-reply-writer` が
+ *   cs-manager の MCP read tool `knowledge_search` を**自分で**呼んで行う。
+ *   cs-manager 側は (a) ticket をマスク、(b) agent を masked context で起動、
+ *   (c) 返ってきた draft の PII をローカル復元する。
+ *
  * フロー:
- *  (a) origin-ai /api/skills/rag-pii-mask で問い合わせ文をマスク → masked_query + 置換マップ
- *  (b) /api/skills/rag-hybrid-search (db_target='cs', pii_state='masked',
- *      filter_visibility=['public','internal'])
- *  (c) hit の article_id → cs DB から記事 title を解決 (citation 表示用)
- *  (d) /api/skills/rag-reply-draft (masked_query + masked_chunks + pii_state='masked')
- *  (e) 返ってきた draft 内のマスクトークンを **ローカルで** 復元
+ *  (a) origin-ai /api/skills/rag-pii-mask で件名+本文をマスク → masked_text + 置換マップ
+ *      さらに顧客名・注文番号を placeholder 化 ({{customer_name}} / {{order_id}})
+ *  (b) /api/agents/customer-reply-writer/chat (origin-ai v2 managed agent) に
+ *      masked な構造化メッセージ ({message}) を渡す。agent が knowledge_search で
+ *      自前検索し、masked な返信ドラフト本文 (`text`) を返す。
+ *  (c) 返ってきた draft 内のマスクトークンを **ローカルで** 復元 → source='ai_draft' 保存。
  *
- * 認証: origin-ai rag endpoint は `x-internal-api-key` を要求し、Core 解決した
- *       `origin_ai_internal.api_key` と定数時間比較する (案X)。よって本 adapter は
- *       Core 経由で `origin_ai_internal` の鍵を解決して送る (Vercel env 非依存 = B案)。
+ * citation は方式A では cs 側から取得できない (検索は agent 内) → 空 citations を返す。
  *
- * ハードコード禁止: ORIGIN_AI_URL / 認証鍵 / model / filter_visibility は
- *   env or Core or 引数駆動。channel_id / store_id 直書きしない。
+ * 認証: origin-ai agent endpoint は `X-Internal-API-Key` を要求し、Core 解決した
+ *       `origin_ai_internal.api_key` を送る (Vercel env 非依存 = B案)。
+ *
+ * ハードコード禁止: ORIGIN_AI_URL / 認証鍵 は env or Core 駆動。channel_id 直書きしない。
  */
 
 import { getCredential } from '@/lib/credentials';
@@ -38,47 +43,24 @@ interface MaskResult {
   mask_failed: boolean;
 }
 
-interface SearchHit {
-  chunk_id: string;
-  article_id: string;
-  article_version: number;
-  content: string;
-  contextual_prefix: string | null;
-  rrf_score: number;
-  vector_rank: number | null;
-  tsvector_rank: number | null;
-  trgm_rank: number | null;
-}
-
-interface ReplyChunk {
-  chunk_id: string;
-  article_id: string;
-  article_version: number;
-  content: string;
-  title?: string | null;
-}
-
 export interface RagCitation {
   chunk_id: string;
   article_id: string;
   article_version: number;
   title: string | null;
-  /** 検索時の RRF スコア (引用元の relevance 表示用、reply 側は持たないため search から補完) */
+  /** 検索時の RRF スコア (引用元の relevance 表示用)。方式A では非提供。 */
   rrf_score?: number | null;
 }
 
-interface ReplyDraftResponse {
-  draft: string;
-  citations: Array<{
-    chunk_id: string;
-    article_id: string;
-    article_version: number;
-    title?: string | null;
-  }>;
-  no_answer: boolean;
-  needs_human: boolean;
-  confidence: number;
-  model: string;
+/** customer-reply-writer agent chat レスポンス契約 (origin-ai v2) */
+interface AgentChatResponse {
+  agent?: string;
+  /** 生成された返信ドラフト本文 (主フィールド) */
+  text?: string;
+  /** 防御的フォールバック (text 欠落時) */
+  message?: string;
+  draft?: string;
+  model?: string | null;
 }
 
 export interface RagReplyInput {
@@ -88,6 +70,10 @@ export interface RagReplyInput {
   inquiryBody: string;
   /** 顧客名 (raw)。復元用 placeholder 化に使用 */
   customerName: string | null;
+  /** 注文番号 (raw)。{{order_id}} placeholder 化に使用 (origin-ai へは raw 送信禁止) */
+  orderNumber?: string | null;
+  /** カテゴリー (任意、PII ではないため masked メッセージにラベル付きで含める) */
+  category?: string | null;
   /** チャネル絞り込み (任意、UUID)。未指定なら絞り込みなし */
   channelId?: string | null;
   /** テナント絞り込み (任意) */
@@ -114,21 +100,6 @@ export interface RagReplyResult {
 const RAG_INTERNAL_CRED_SERVICE_CODE =
   process.env.RAG_INTERNAL_CRED_SERVICE_CODE?.replace(/\s+$/, '') ||
   'origin_ai_internal';
-
-/** filter_visibility 既定。env で上書き可 (カンマ区切り)。 */
-function resolveFilterVisibility(): string[] {
-  const raw = process.env.RAG_FILTER_VISIBILITY?.trim();
-  if (raw) {
-    const parts = raw
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (parts.length > 0) return parts;
-  }
-  // cs-manager (顧客対応・社内オペレータが draft 確認) は public + internal を許可。
-  // design §3.1: cs は require_acl=false 内部取得。
-  return ['public', 'internal'];
-}
 
 function resolveOriginAiUrl(): string {
   const url = process.env.ORIGIN_AI_URL?.replace(/\s+$/, '');
@@ -174,22 +145,86 @@ async function ragFetch(
 
 // ---- マスク / 復元ヘルパ (復元は外部呼び出し後ローカルのみ) ---------------
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 文字列の全空白 (半角/全角含む) を除去した collapsed 形。 */
+function collapseWhitespace(s: string): string {
+  return s.replace(/[\s　]+/g, '');
+}
+
+/**
+ * 既知 raw 値の「文字間に任意の空白を許す」正規表現を構築する (defense-in-depth, codex blocker)。
+ * collapsed 形 (空白除去) の各文字の間に \s* を挟むことで、`山田太郎` から
+ * `山田 太郎` / `山田　太郎` 等の表記揺れも捕捉する。rag-pii-mask が取り逃しても
+ * 送信前にここで潰す。
+ */
+function buildLooseRegex(rawValue: string, suffixes: string[] = []): RegExp | null {
+  const collapsed = collapseWhitespace(rawValue.trim());
+  if (!collapsed) return null;
+  const chars = Array.from(collapsed).map(escapeRegExp);
+  // 文字間 \s* 許容 (全角空白含む)
+  const core = chars.join('[\\s\\u3000]*');
+  const suffixAlt =
+    suffixes.length > 0
+      ? `(?:[\\s\\u3000]*(?:${suffixes.map(escapeRegExp).join('|')}))?`
+      : '';
+  return new RegExp(core + suffixAlt, 'g');
+}
+
 /**
  * 顧客名を {{customer_name}} placeholder に置換する。
- * masked テキスト中に出現する customerName を全置換し、復元マップに登録。
- * (rag-pii-mask は氏名 NER 未対応のため、顧客名はここで明示的に placeholder 化する)
+ * 文字間空白・敬称 (様/さん/殿/君/ちゃん) の表記揺れも捕捉する (loose regex)。
+ * 返す `probe` は fail-closed assertion 用の collapsed 形 (空白除去後メッセージと照合)。
  */
 function applyCustomerNamePlaceholder(
   text: string,
   customerName: string | null,
-): { text: string; restoreToken?: { token: string; original: string } } {
+): { text: string; restoreToken?: { token: string; original: string }; probe: string | null } {
   const name = customerName?.trim();
-  if (!name) return { text };
-  if (!text.includes(name)) return { text };
+  if (!name) return { text, probe: null };
+  const re = buildLooseRegex(name, ['様', 'さん', '殿', '君', 'ちゃん']);
+  if (!re) return { text, probe: null };
   const token = '{{customer_name}}';
+  const replaced = text.replace(re, token);
   return {
-    text: text.split(name).join(token),
-    restoreToken: { token, original: name },
+    text: replaced,
+    restoreToken: replaced.includes(token) ? { token, original: name } : undefined,
+    probe: collapseWhitespace(name),
+  };
+}
+
+/**
+ * 注文番号を {{order_id}} placeholder に置換する。
+ * 注文番号は PII 境界対象: raw で origin-ai へ送ってはならない (codex blocker)。
+ * ハイフン・空白を跨いだ表記 (123-456 / 123 456) も捕捉する。
+ * 復元トークンは常に返す (## 注文番号 欄に placeholder を載せるため)。
+ * `probe` は fail-closed assertion 用の区切り除去 collapsed 形。
+ */
+function applyOrderNumberPlaceholder(
+  text: string,
+  orderNumber: string | null | undefined,
+): {
+  text: string;
+  token: string | null;
+  restoreToken?: { token: string; original: string };
+  probe: string | null;
+} {
+  const order = orderNumber?.trim();
+  if (!order) return { text, token: null, probe: null };
+  // 区切り (空白/ハイフン) 除去した collapsed 形を基準に loose regex を作る。
+  const collapsed = order.replace(/[\s　-]+/g, '');
+  if (!collapsed) return { text, token: null, probe: null };
+  const chars = Array.from(collapsed).map(escapeRegExp);
+  const re = new RegExp(chars.join('[\\s\\u3000-]*'), 'g');
+  const token = '{{order_id}}';
+  const replaced = text.replace(re, token);
+  return {
+    text: replaced,
+    token,
+    restoreToken: { token, original: order },
+    probe: collapsed,
   };
 }
 
@@ -206,37 +241,15 @@ function restoreLocally(
   return out;
 }
 
-// ---- citation title 解決 (cs DB、外部送信しない) ------------------------
-
-async function fetchArticleTitles(
-  sb: SupabaseClient,
-  articleIds: string[],
-): Promise<Map<string, string | null>> {
-  const map = new Map<string, string | null>();
-  const uniq = Array.from(new Set(articleIds)).filter(Boolean);
-  if (uniq.length === 0) return map;
-  const { data, error } = await sb
-    .from('knowledge_articles')
-    .select('id, title')
-    .in('id', uniq);
-  if (error) {
-    // title 解決失敗は致命ではない (citation は chunk_id で表示可能) → 空 title で継続
-    return map;
-  }
-  for (const row of data ?? []) {
-    map.set((row as { id: string }).id, (row as { title: string | null }).title ?? null);
-  }
-  return map;
-}
-
 // ---- メイン: RAG 返信案生成 ---------------------------------------------
 
 /**
  * RAG 返信案を生成する。PII boundary を厳守し、復元は外部呼び出し後ローカルのみ。
- * @param sb cs-manager service_role クライアント (title 解決に使用、外部送信しない)
+ * @param _sb cs-manager service_role クライアント。方式A では検索が agent 側 (knowledge_search)
+ *   に移ったため本関数内では未使用だが、呼出側シグネチャ互換のため受領する。
  */
 export async function generateRagReply(
-  sb: SupabaseClient,
+  _sb: SupabaseClient,
   input: RagReplyInput,
 ): Promise<RagReplyResult> {
   const startedAt = Date.now();
@@ -266,10 +279,10 @@ export async function generateRagReply(
       texts: [rawQueryParts],
     });
     if (!res.ok) {
-      const t = await res.text().catch(() => '');
+      // upstream error body は echo しない (raw query/PII 再露出防止 — codex blocker)
       return {
         ok: false,
-        error: `rag-pii-mask ${res.status}: ${t.slice(0, 200)}`,
+        error: `rag-pii-mask ${res.status}`,
         durationMs: Date.now() - startedAt,
       };
     }
@@ -293,113 +306,138 @@ export async function generateRagReply(
     };
   }
 
-  // 顧客名を placeholder 化 (regex マスクの後)
-  const { text: maskedQuery, restoreToken: nameToken } = applyCustomerNamePlaceholder(
-    maskRes.masked_text,
-    input.customerName,
-  );
+  // 顧客名を placeholder 化 (regex マスクの後、表記揺れ込み)
+  const {
+    text: nameMaskedQuery,
+    restoreToken: nameToken,
+    probe: nameProbe,
+  } = applyCustomerNamePlaceholder(maskRes.masked_text, input.customerName);
+
+  // 注文番号を placeholder 化 (raw で外部へ出さない — PII 境界)
+  const {
+    text: maskedQuery,
+    token: orderToken,
+    restoreToken: orderRestoreToken,
+    probe: orderProbe,
+  } = applyOrderNumberPlaceholder(nameMaskedQuery, input.orderNumber);
 
   // 復元マップ (外部呼び出し後にローカル復元するためだけに保持。log に出さない)
   const restoreMap: Array<{ token: string; original: string }> = [
     ...maskRes.replacements.map((r) => ({ token: r.token, original: r.original })),
   ];
   if (nameToken) restoreMap.push(nameToken);
+  if (orderRestoreToken) restoreMap.push(orderRestoreToken);
 
-  // (b) hybrid search (masked query)
-  let hits: SearchHit[] = [];
-  try {
-    const res = await ragFetch('/api/skills/rag-hybrid-search', internalKey, {
-      db_target: 'cs',
-      pii_state: 'masked',
-      query_text: maskedQuery,
-      filter_visibility: resolveFilterVisibility(),
-      filter_channel_id: input.channelId ?? null,
-      filter_tenant_id: input.tenantId ?? null,
-      // cs は信頼内部ツール: require_acl=false で internal も取得 (design §3.1)
-      require_acl: false,
-    });
-    if (!res.ok) {
-      const t = await res.text().catch(() => '');
-      return {
-        ok: false,
-        error: `rag-hybrid-search ${res.status}: ${t.slice(0, 200)}`,
-        durationMs: Date.now() - startedAt,
-      };
-    }
-    const j = (await res.json()) as { results?: SearchHit[] };
-    hits = j.results ?? [];
-  } catch (e) {
-    return {
-      ok: false,
-      error: `rag-hybrid-search 呼び出し失敗: ${e instanceof Error ? e.message : String(e)}`,
-      durationMs: Date.now() - startedAt,
-    };
-  }
+  // (b) customer-reply-writer agent で返信ドラフト生成。
+  //     方式A: ナレッジ検索は agent が knowledge_search MCP tool で自前実行する。
+  //     cs 側は masked context ({message}) を渡すだけ (顧客名/注文番号は placeholder 化済み)。
+  const agentMessage = buildAgentMessage({
+    maskedQuery,
+    category: input.category ?? null,
+    orderToken,
+  });
 
-  // (c) article title 解決 (citation 表示用、cs DB ローカル)
-  const titleMap = await fetchArticleTitles(
-    sb,
-    hits.map((h) => h.article_id),
+  // ── 送信直前 fail-closed assertion (codex blocker) ──────────────────────
+  // 既知 raw 値 (顧客名/注文番号) の collapsed 形が agentMessage の collapsed 形に
+  // 残っていないことを確認。残存時は raw PII 露出のため外部送信せず中止する
+  // (rag-pii-mask + loose-regex 取りこぼしの最終防壁)。
+  const collapsedMessage = collapseWhitespace(agentMessage.replace(/-/g, ''));
+  const leaked = [nameProbe, orderProbe].some(
+    (p) => p && collapsedMessage.includes(p),
   );
-
-  const maskedChunks: ReplyChunk[] = hits.map((h) => ({
-    chunk_id: h.chunk_id,
-    article_id: h.article_id,
-    article_version: h.article_version,
-    content: h.content,
-    title: titleMap.get(h.article_id) ?? null,
-  }));
-
-  // (d) reply draft 生成 (masked query + masked chunks)
-  let reply: ReplyDraftResponse;
-  try {
-    const res = await ragFetch('/api/skills/rag-reply-draft', internalKey, {
-      masked_query: maskedQuery,
-      masked_chunks: maskedChunks,
-      pii_state: 'masked',
-    });
-    if (!res.ok) {
-      const t = await res.text().catch(() => '');
-      return {
-        ok: false,
-        error: `rag-reply-draft ${res.status}: ${t.slice(0, 200)}`,
-        searchHitCount: hits.length,
-        durationMs: Date.now() - startedAt,
-      };
-    }
-    reply = (await res.json()) as ReplyDraftResponse;
-  } catch (e) {
+  if (leaked) {
+    // 漏洩値そのものは log/返却しない (PII)。種別のみ記録。
+    console.error(
+      '[rag/reply-adapter] PII redaction leak detected (variant remained) — abort before agent call',
+    );
     return {
       ok: false,
-      error: `rag-reply-draft 呼び出し失敗: ${e instanceof Error ? e.message : String(e)}`,
-      searchHitCount: hits.length,
+      maskFailed: true,
+      error: 'PII マスク (顧客名/注文番号) が不完全なため、安全のため返信案生成を中止しました',
       durationMs: Date.now() - startedAt,
     };
   }
 
-  // (e) draft 内のマスクトークンをローカル復元 (外部送信後)
-  const restoredDraft = restoreLocally(reply.draft ?? '', restoreMap);
+  let agentRes: AgentChatResponse;
+  try {
+    const res = await ragFetch(
+      '/api/agents/customer-reply-writer/chat',
+      internalKey,
+      { message: agentMessage },
+    );
+    if (!res.ok) {
+      // upstream error body は echo しない (送信した masked context の再露出防止)
+      return {
+        ok: false,
+        error: `customer-reply-writer ${res.status}`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+    agentRes = (await res.json()) as AgentChatResponse;
+  } catch (e) {
+    return {
+      ok: false,
+      error: `customer-reply-writer 呼び出し失敗: ${e instanceof Error ? e.message : String(e)}`,
+      durationMs: Date.now() - startedAt,
+    };
+  }
 
-  // citation の rrf_score を search hit から補完 (reply 側は score を返さない)
-  const scoreByChunk = new Map(hits.map((h) => [h.chunk_id, h.rrf_score]));
-  const citations: RagCitation[] = (reply.citations ?? []).map((c) => ({
-    chunk_id: c.chunk_id,
-    article_id: c.article_id,
-    article_version: c.article_version,
-    title: c.title ?? titleMap.get(c.article_id) ?? null,
-    rrf_score: scoreByChunk.get(c.chunk_id) ?? null,
-  }));
+  // 契約: draft は `text`。欠落時のみ防御的に message/draft を試す。
+  const rawDraft =
+    (typeof agentRes.text === 'string' && agentRes.text.trim() && agentRes.text) ||
+    (typeof agentRes.message === 'string' && agentRes.message) ||
+    (typeof agentRes.draft === 'string' && agentRes.draft) ||
+    '';
 
+  if (!rawDraft.trim()) {
+    return {
+      ok: false,
+      error: 'customer-reply-writer が空のドラフトを返しました',
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  // (c) draft 内のマスクトークンをローカル復元 (外部送信後のみ)
+  const restoredDraft = restoreLocally(rawDraft, restoreMap);
+
+  // 方式A: citation は cs 側から取得できない (検索は agent 内 knowledge_search)。
+  //   shape 互換のため空配列を返す。十分な根拠が無い場合は agent 自身が本文で
+  //   その旨を述べる (self-report)。自動送信ゲートは別途、人間 click 必須を維持。
   return {
     ok: true,
     draft: restoredDraft,
-    citations,
-    confidence: reply.confidence,
-    noAnswer: reply.no_answer,
-    needsHuman: reply.needs_human,
-    model: reply.model ?? null,
-    searchHitCount: hits.length,
+    citations: [],
+    confidence: undefined,
+    noAnswer: false,
+    needsHuman: false,
+    model: agentRes.model ?? null,
+    searchHitCount: 0,
     maskFailed: false,
     durationMs: Date.now() - startedAt,
   };
+}
+
+// ---- agent メッセージ構築 (全て masked) -------------------------------------
+
+/**
+ * customer-reply-writer agent へ渡す構造化メッセージを組み立てる。
+ * 含めるのは全て masked な値のみ。注文番号は placeholder ({{order_id}})。
+ * 方式A: ナレッジは含めない (agent が knowledge_search で自前検索する)。
+ */
+function buildAgentMessage(args: {
+  maskedQuery: string;
+  category: string | null;
+  orderToken: string | null;
+}): string {
+  const { maskedQuery, category, orderToken } = args;
+  return [
+    '## 問い合わせ',
+    maskedQuery,
+    '',
+    '## カテゴリー',
+    category?.trim() || '不明',
+    '',
+    '## 注文番号',
+    orderToken ?? '不明',
+  ].join('\n');
 }

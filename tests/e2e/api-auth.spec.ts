@@ -11,7 +11,7 @@
  * 副作用回避:
  *   - PATCH 系は存在しない UUID で 404 を期待 (認証通過 = 401 ではない の証明)
  *   - POST /api/knowledge は最小ペイロードで作成、try/finally で DELETE cleanup
- *   - draft-ai は AI 呼び出しが走るためテストでは skip 相当 (401 だけ確認)
+ *   - draft-rag は AI 呼び出しが走るためテストでは skip 相当 (401 だけ確認)
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { readFileSync, existsSync } from 'fs';
@@ -70,8 +70,8 @@ const ROUTES: RouteCase[] = [
   { method: 'PATCH', path: `/api/tickets/${NONEXISTENT_UUID}`, tier: 'internal', body: { status: 'untouched' } },
   { method: 'GET', path: `/api/tickets/${NONEXISTENT_UUID}/drafts`, tier: 'internal' },
   { method: 'POST', path: `/api/tickets/${NONEXISTENT_UUID}/drafts`, tier: 'internal', body: { body: 'x', source: 'manual' } },
-  // draft-ai は本番では AI を呼ぶので、ここでは認証チェックのみ (404 期待)
-  { method: 'POST', path: `/api/tickets/${NONEXISTENT_UUID}/draft-ai`, tier: 'internal' },
+  // draft-rag は本番では AI を呼ぶので、ここでは認証チェックのみ (404 期待)
+  { method: 'POST', path: `/api/tickets/${NONEXISTENT_UUID}/draft-rag`, tier: 'internal' },
   // knowledge
   { method: 'GET', path: '/api/knowledge', tier: 'internal' },
   { method: 'GET', path: `/api/knowledge/${NONEXISTENT_UUID}`, tier: 'internal' },
@@ -129,8 +129,8 @@ test.describe('/api/* 統一認証 — B: 間違った X-Internal-API-Key は 40
 
 test.describe('/api/* 統一認証 — C: 正しい X-Internal-API-Key は 非 401', () => {
   for (const c of ROUTES.filter((c) => c.tier === 'internal')) {
-    // draft-ai は POST で AI を呼んでしまうのでスキップ (B/A で十分)
-    if (c.path.endsWith('/draft-ai')) continue;
+    // draft-rag は POST で AI を呼んでしまうのでスキップ (B/A で十分)
+    if (c.path.endsWith('/draft-rag')) continue;
     test(`${c.method} ${c.path} (correct key) → 非 401`, async ({ request }) => {
       const r = await call(request, c, { 'X-Internal-API-Key': INTERNAL_API_KEY });
       expect(r.status(), `${c.method} ${c.path} body=${await r.text().catch(() => '')}`).not.toBe(401);
