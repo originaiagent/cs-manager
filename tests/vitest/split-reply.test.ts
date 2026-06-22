@@ -173,6 +173,20 @@ describe('splitReply: fail-closed (parseOk=false → customerReply 必ず空)', 
     expect(r.customerReply).toBe('');
   });
 
+  it('START トークン直後 (同一行 suffix) に narration 連結 → parseOk=false (codex CODE review P1)', () => {
+    // 緩和は START の「前」の narration のみ。START の「後ろ」に narration が連結された
+    // 形は narration が customerBody に滑り込むため fail-closed にする。
+    const raw = [
+      `${CUSTOMER_REPLY_START}まず社内情報を確認します。`,
+      '本文です。',
+      CUSTOMER_REPLY_END,
+    ].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(false);
+    expect(r.customerReply).toBe('');
+    expect(r.internalPreview).toBe(raw);
+  });
+
   it('END トークン欠落 (inline START のみ) → parseOk=false', () => {
     // トークンアンカーでも END 不在は fail-closed (緩和は START/END の locating のみ)
     const raw = [`前置き ${CUSTOMER_REPLY_START}`, '本文だけで END なし'].join('\n');

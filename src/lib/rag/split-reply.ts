@@ -118,9 +118,11 @@ function countOccurrences(haystack: string, needle: string): number {
  *  1. START トークンが raw 全文でちょうど 1 回出現
  *  2. END トークンが raw 全文でちょうど 1 回出現
  *  3. START の位置が END の位置に先行 (START index < END index)
- *  4. START 終端〜END 始端の「厳密に間」の本文が trim 後に非空
- *  5. その本文に既知内部マーカー (FORBIDDEN_IN_CUSTOMER_BODY) を一切含まない
- *  6. その本文に ORIGIN_CS センチネル系 (開始/終了/INTERNAL/CUSTOMER) を一切含まない
+ *  4. START トークン直後 (同一行 suffix) に非空白が無い
+ *     (緩和は「START 前の同一行 narration」のみ。START 後ろの連結は不可)
+ *  5. START 終端〜END 始端の「厳密に間」の本文が trim 後に非空
+ *  6. その本文に既知内部マーカー (FORBIDDEN_IN_CUSTOMER_BODY) を一切含まない
+ *  7. その本文に ORIGIN_CS センチネル系 (開始/終了/INTERNAL/CUSTOMER) を一切含まない
  * いずれか 1 つでも失敗 → parseOk=false (fail-closed)。
  */
 export function splitReply(rawInput: string | null | undefined): SplitReplyResult {
@@ -152,12 +154,27 @@ export function splitReply(rawInput: string | null | undefined): SplitReplyResul
   const endIdx = raw.indexOf(CUSTOMER_REPLY_END);
   const bodyStart = startIdx + CUSTOMER_REPLY_START.length;
 
-  // (3) START が END に先行 (本文 0 文字も後段 (4) で弾く)
+  // (3) START が END に先行 (本文 0 文字も後段 (5) で弾く)
   if (!(startIdx < endIdx)) {
     return failClosed;
   }
 
-  // (4) START 終端〜END 始端の「厳密に間」の本文が trim 後に非空。
+  // (4) START トークン「直後」(同一行 suffix) に非空白があれば fail-closed。
+  //   緩和対象は「START の前(同一行先頭)に連結された narration」のみ。START の
+  //   後ろに narration が連結された形 (<<<START>>>確認します。\n本文) は、その
+  //   narration が customerBody に滑り込むため許容しない (codex CODE review P1)。
+  //   旧「行全体一致」が START 後方に持っていた fail-closed 性を復元する。
+  //   CRLF の \r は空白扱いなので `<<<START>>>\r\n本文` は通る。
+  const startLineEnd = raw.indexOf('\n', bodyStart);
+  const startLineRest = raw.slice(
+    bodyStart,
+    startLineEnd === -1 ? raw.length : startLineEnd,
+  );
+  if (startLineRest.trim() !== '') {
+    return failClosed;
+  }
+
+  // (5) START 終端〜END 始端の「厳密に間」の本文が trim 後に非空。
   //   START と同一行の前置きナレーション・前後空白はこの slice の外なので
   //   customerBody には入らない。END より後ろの全文も入らない。
   const customerBody = raw.slice(bodyStart, endIdx).trim();
@@ -165,14 +182,14 @@ export function splitReply(rawInput: string | null | undefined): SplitReplyResul
     return failClosed;
   }
 
-  // (5) 顧客本文に既知内部マーカーが混入していたら fail-closed
+  // (6) 顧客本文に既知内部マーカーが混入していたら fail-closed
   for (const marker of FORBIDDEN_IN_CUSTOMER_BODY) {
     if (customerBody.includes(marker)) {
       return failClosed;
     }
   }
 
-  // (6) 顧客本文に ORIGIN_CS センチネル系 (開始/終了/INTERNAL/CUSTOMER いずれも) が
+  // (7) 顧客本文に ORIGIN_CS センチネル系 (開始/終了/INTERNAL/CUSTOMER いずれも) が
   //   残存していたら fail-closed (codex CONCERN#2: マーカーなし混入の最低限の防壁。
   //   FORBIDDEN_IN_CUSTOMER_BODY の `<<<ORIGIN_CS_INTERNAL` では END_ 系や入れ子の
   //   CUSTOMER センチネルを取りこぼすため、センチネル接頭辞を網羅的に拒否する)。
