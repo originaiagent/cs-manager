@@ -93,8 +93,9 @@ function supa(): SupabaseClient {
 }
 
 test.describe('送信安全 返信案分離 E2E', () => {
-  // 最大 MAX_GEN_ATTEMPTS 回の生成 (各 ~35-45s) + 採用/DB/リロード分を見込む。
-  test.setTimeout(MAX_GEN_ATTEMPTS * 60_000 + 120_000);
+  // 最大 MAX_GEN_ATTEMPTS 回の生成 (各 wait は GENERATE_TIMEOUT) + 採用/DB/リロード分。
+  // codex review: 各 wait が 120s 上限のため設定 budget を実 wait 上限に合わせる。
+  test.setTimeout(MAX_GEN_ATTEMPTS * GENERATE_TIMEOUT + 120_000);
 
   test('生成 → 送信欄は顧客本文のみ → 社内用は読取専用パネル → 採用 → リロード永続化', async ({
     page,
@@ -127,14 +128,19 @@ test.describe('送信安全 返信案分離 E2E', () => {
     // 各試行で必ず Server Action 200 を観測する (= draft-rag がサーバ側で 200)。
     // 描画結果は 2 通り:
     //   (a) parseOk=true  → 「顧客向け返信 (この内容のみ送信されます)」見出し描画
-    //   (b) parseOk=false → fail-closed (送信欄空 + 採用 disabled + 通知)
-    // (b) は送信安全契約どおりの正しい挙動なので、その場で「送信欄が空」を
-    // 確認 (送信安全の二重証明) してから「再生成」で (a) を狙う。
+    //   (b) parseOk=false → fail-closed (送信欄に内部テキストを入れない + 採用 disabled + 通知)
+    // (b) は送信安全契約どおりの正しい挙動。codex review: この固定 prod ticket は
+    // 過去採用 ai_draft が初期 textarea に復元されうるため「送信欄が空」前提は誤り。
+    // 正しい不変条件は「生成しても送信欄は生成前から不変 (生成は textarea を上書き
+    // しない) かつ内部マーカーを含まない」。それを (b) で検証する。
     const customerOnlyHeader = replyCard.getByText(
       '顧客向け返信 (この内容のみ送信されます)',
     );
     const failClosedNotice = replyCard.getByText(/自動分離に失敗しました/);
     const adoptBtn = replyCard.getByRole('button', { name: '採用' });
+    // 生成前の送信欄値 (過去採用ドラフトの復元値 or 空)。fail-closed 不変条件の基準。
+    const sendFieldBeforeGen = await replyCard.locator('textarea').inputValue();
+    assertNoInternalMarkers('生成前 送信欄', sendFieldBeforeGen);
 
     let parseOk = false;
     let lastActionStatus = 0;
@@ -173,15 +179,17 @@ test.describe('送信安全 返信案分離 E2E', () => {
         break;
       }
 
-      // fail-closed: 送信欄が空のまま & 採用が無効 (送信安全の二重証明)。
+      // fail-closed: 送信欄は生成前から不変 (生成は textarea を上書きしない) &
+      // 内部マーカー非混入 & 採用無効 (送信安全の二重証明)。
       const sendFieldOnFail = await replyCard.locator('textarea').inputValue();
       expect(
-        sendFieldOnFail.trim(),
-        'fail-closed 時、送信欄は空のまま (社内テキスト非混入)',
-      ).toBe('');
+        sendFieldOnFail,
+        'fail-closed 時、送信欄は生成前から不変 (社内テキスト非混入)',
+      ).toBe(sendFieldBeforeGen);
+      assertNoInternalMarkers('fail-closed 時 送信欄', sendFieldOnFail);
       await expect(adoptBtn).toBeDisabled();
       console.log(
-        `[evidence] attempt=${attempt} fail-closed (送信欄空 + 採用 disabled) → 再生成`,
+        `[evidence] attempt=${attempt} fail-closed (送信欄不変 + 採用 disabled) → 再生成`,
       );
     }
 
@@ -249,18 +257,25 @@ test.describe('送信安全 返信案分離 E2E', () => {
     });
 
     // ── Step 5: 採用 → 送信欄は顧客本文のみ (clean) + source ラベル + DB 行 ──
-    const beforeAdopt = await sendTextarea.inputValue();
-
     await replyCard.getByRole('button', { name: '採用' }).click();
 
-    // 採用後 textarea は顧客本文を保持し、採用前から変化していること。
+    // 採用後 textarea は顧客本文を保持していること。
     await expect(sendTextarea).toHaveValue(
       /お世話になっております|交換|お詫び|ご注文|誠に|申し訳/,
       { timeout: 30_000 },
     );
     const adoptedValue = await sendTextarea.inputValue();
     expect(adoptedValue.trim().length).toBeGreaterThan(0);
-    expect(adoptedValue, '採用で textarea が更新される').not.toBe(beforeAdopt);
+    // codex review: 固定 prod data + 実 agent では再生成結果が前回採用本文と
+    // 一致しうるため「採用前から変化」は flaky。安全契約に必要なのは
+    // 「採用本文 = プレビューに表示された顧客本文 (送信される唯一のテキスト)」。
+    // <pre> innerText は空白正規化が入るため正規化一致で照合する。
+    const normPreview = (s: string) =>
+      s.replace(/\r\n/g, '\n').replace(/[ \t]+/g, '').trim();
+    expect(
+      normPreview(adoptedValue),
+      '採用本文は顧客向けプレビューと一致 (送信される唯一のテキスト)',
+    ).toBe(normPreview(customerText));
     // 送信欄に内部マーカー 0 ヒット (採用後も clean)。
     assertNoInternalMarkers('採用後 送信欄', adoptedValue);
 
