@@ -54,8 +54,13 @@ export interface IngestInboundParams {
   ticket: NormalizedTicket;
   inboundMessage: NormalizedMessage;
   ragInput: RagReplyInput;
-  /** draft の source ラベル (既定 'rag') */
-  draftSource?: string;
+  /**
+   * draft の source ラベル (既定 'rag')。
+   * 本関数は AI 生成 draft を is_separated=true で保存するため、AI 由来 source
+   * (rag / ai_draft) のみ許す。manual / first_response 等を渡すと is_separated の
+   * 意味が壊れる (これらは is_separated を立てない契約) ため型で禁止する (codex review P3)。
+   */
+  draftSource?: 'rag' | 'ai_draft';
   /** テスト注入用。未指定なら origin-ai 経由の generateRagReply。 */
   generateReply?: (sb: SupabaseClient, input: RagReplyInput) => Promise<RagReplyResult>;
 }

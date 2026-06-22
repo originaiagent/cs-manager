@@ -12,7 +12,10 @@
 --   - is_separated=false : 旧形式 (混在の可能性) or 手動/テンプレ (manual/first_response)。
 --
 -- 送信安全規約 (アプリ層で強制):
---   - 送信可能 = source IN ('manual','first_response') OR is_separated = true
+--   - 楽天一般 sweep (sendApprovedDrafts) で送信可能 =
+--       source = 'manual' OR (source IN ('ai_draft','rag') AND is_separated = true)
+--   - first_response は一般 sweep に乗せず、send-first-response.ts の営業時間ガード付き
+--     専用単発経路でのみ送る (一般 sweep への allow-list は営業時間外ガードを迂回し得る)。
 --   - 旧 ai_draft/rag (is_separated=false) は承認済でも送信欄に入らず・送信もされない。
 --   - 汎用 /drafts POST は ai_draft/rag を is_separated=true 必須にする (parser 迂回防止)。
 --
@@ -25,4 +28,6 @@ ALTER TABLE public.ticket_drafts
 
 COMMENT ON COLUMN public.ticket_drafts.is_separated IS
   '構造分離済みフラグ。true=body は顧客向け本文のみ (送信安全)。'
-  'false=旧形式(混在の可能性) or 手動/テンプレ。送信可否: source IN (manual,first_response) OR is_separated=true。';
+  'false=旧形式(混在の可能性) or 手動/テンプレ。一般 sweep 送信可否: '
+  'source=manual OR (source IN (ai_draft,rag) AND is_separated=true)。'
+  'first_response は一般 sweep 非対象 (専用経路のみ)。';
