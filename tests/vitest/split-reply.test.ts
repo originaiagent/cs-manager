@@ -113,6 +113,17 @@ describe('splitReply: 正常系', () => {
     expect(r.internalPreview).toContain('担当者向けの社内メモ');
   });
 
+  it('END トークン直前が空白のみ (行頭インデント) → parseOk=true', () => {
+    const raw = [
+      CUSTOMER_REPLY_START,
+      'ご返信します。',
+      `   ${CUSTOMER_REPLY_END}`,
+    ].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(true);
+    expect(r.customerReply).toBe('ご返信します。');
+  });
+
   it('CRLF 行末でもトークンアンカーが成立する', () => {
     const raw = [
       CUSTOMER_REPLY_START,
@@ -180,6 +191,20 @@ describe('splitReply: fail-closed (parseOk=false → customerReply 必ず空)', 
       `${CUSTOMER_REPLY_START}まず社内情報を確認します。`,
       '本文です。',
       CUSTOMER_REPLY_END,
+    ].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(false);
+    expect(r.customerReply).toBe('');
+    expect(r.internalPreview).toBe(raw);
+  });
+
+  it('END トークン直前 (同一行 prefix) に narration 連結 → parseOk=false (codex CODE review P1)', () => {
+    // END 直前へ narration が連結された形は narration が customerBody に滑り込むため
+    // fail-closed (START 側と対称、旧 END 行全体一致の fail-closed 性を復元)。
+    const raw = [
+      CUSTOMER_REPLY_START,
+      '顧客本文です。',
+      `次に処理状況を確認します${CUSTOMER_REPLY_END}`,
     ].join('\n');
     const r = splitReply(raw);
     expect(r.parseOk).toBe(false);

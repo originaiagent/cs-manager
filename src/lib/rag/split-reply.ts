@@ -120,6 +120,7 @@ function countOccurrences(haystack: string, needle: string): number {
  *  3. START の位置が END の位置に先行 (START index < END index)
  *  4. START トークン直後 (同一行 suffix) に非空白が無い
  *     (緩和は「START 前の同一行 narration」のみ。START 後ろの連結は不可)
+ *  4b. END トークン直前 (同一行 prefix) に非空白が無い (END は実質行頭)
  *  5. START 終端〜END 始端の「厳密に間」の本文が trim 後に非空
  *  6. その本文に既知内部マーカー (FORBIDDEN_IN_CUSTOMER_BODY) を一切含まない
  *  7. その本文に ORIGIN_CS センチネル系 (開始/終了/INTERNAL/CUSTOMER) を一切含まない
@@ -171,6 +172,20 @@ export function splitReply(rawInput: string | null | undefined): SplitReplyResul
     startLineEnd === -1 ? raw.length : startLineEnd,
   );
   if (startLineRest.trim() !== '') {
+    return failClosed;
+  }
+
+  // (4b) END トークン「直前」(同一行 prefix) に非空白があれば fail-closed (START 側と対称)。
+  //   <<<START>>>\n本文\n次に確認します<<<END>>> のように END 直前へ narration が
+  //   連結されると customerBody に滑り込むため許容しない (codex CODE review P1)。
+  //   END 始端直前の最後の改行から END 始端までが空白のみなら OK (= END が実質行頭)。
+  //   CRLF の \r は空白扱いなので `本文\r\n<<<END>>>` は通る。
+  const endLineStart = raw.lastIndexOf('\n', endIdx - 1);
+  const endLinePrefix = raw.slice(
+    endLineStart === -1 ? 0 : endLineStart + 1,
+    endIdx,
+  );
+  if (endLinePrefix.trim() !== '') {
     return failClosed;
   }
 
