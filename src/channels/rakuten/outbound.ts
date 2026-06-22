@@ -69,11 +69,16 @@ async function loadApprovedDrafts(
     .select('id, body, ticket_id, ticket:tickets!inner(id, external_id, channel_id)')
     .eq('status', 'approved')
     .eq('ticket.channel_id', channelId)
-    // 送信安全フィルタ (構造保証): 送信可能なのは
-    //   source IN ('manual','first_response')  (オペレータ入力 / テンプレ)
-    //   OR is_separated = true                 (split-reply で分離した顧客向け本文のみ)
+    // 送信安全フィルタ (構造保証): 一般 sweep で送信可能なのは
+    //   source = 'manual'        (オペレータ入力)
+    //   OR is_separated = true   (split-reply で分離した顧客向け本文のみ = ai_draft/rag)
     // のみ。旧 ai_draft/rag (is_separated=false = 混在の可能性) は承認済でも送信しない。
-    .or('source.in.(manual,first_response),is_separated.eq.true')
+    //
+    // ※ first_response は **一般 sweep に乗せない** (codex review P1)。一次返信は
+    //   send-first-response.ts の専用単発経路 (営業時間ガード + flag 再確認, fail-closed)
+    //   のみで送る設計のため、ここで allow-list すると営業時間外ガードを迂回し得る。
+    //   first_response は通常 status='pending' のままで、この approved sweep には載らない。
+    .or('source.eq.manual,is_separated.eq.true')
     .order('created_at', { ascending: true })
     .limit(limit);
   if (error) throw new Error(`loadApprovedDrafts failed: ${error.message}`);
