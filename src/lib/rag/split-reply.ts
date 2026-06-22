@@ -41,6 +41,14 @@ export const FORBIDDEN_IN_CUSTOMER_BODY = [
   'ナレッジ',
   '⚠️',
   '📋',
+  // 代表的な社内ラベル (codex review P1: agent が CUSTOMER block 内に混ぜた場合や
+  //   /drafts へ直接送られた場合の漏洩を塞ぐ)。UI パネル label「社内用・送信されません」
+  //   と同じ語も含め、これらが本文にあれば顧客向けとして安全とは見なさない。
+  '社内用',
+  '社内向け',
+  '内部メモ',
+  'オペレーター向け',
+  'オペレータ向け',
 ] as const;
 
 /**

@@ -43,7 +43,8 @@ function extractOrderNumber(channelMeta: unknown): string | null {
  * - cs-manager 内には LLM 直接呼出・プロンプトを書かない (AI 集約原則)
  * - origin-ai の RAG skill (pii-mask → hybrid-search → reply-draft) を adapter で
  *   オーケストレーション。PII boundary 厳守 (外部送信は masked のみ、復元はローカル)
- * - 戻りドラフトは保存せず、UI が「採用」した時点で /drafts に source='rag' で保存される
+ * - 戻りドラフト (= split-reply で分離した顧客向け本文のみ) は保存せず、UI が「採用」
+ *   した時点で /drafts に source='ai_draft' / is_separated=true で保存される
  * - 営業時間判定: is_within_business_hours(channel_id) を併せて返す
  *   (営業時間内は draft 限定 = 人間 click。営業時間外フローの自動送信は Phase2 対象外)
  *

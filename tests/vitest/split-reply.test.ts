@@ -244,4 +244,29 @@ describe('isCustomerSafeBody (サーバ側 /drafts POST 用ゲート, parser 迂
       isCustomerSafeBody('回答 <<<END_ORIGIN_CS_INTERNAL_GROUNDING_V1>>>'),
     ).toBe(false);
   });
+
+  it('社内ラベル (社内用/社内向け/内部メモ/オペレーター向け) を含む → false (codex review P1)', () => {
+    for (const bad of [
+      '顧客向け本文\n\n社内用: 管理画面で確認',
+      '回答。社内向け補足あり',
+      '回答。内部メモ: 在庫薄',
+      '回答。オペレーター向け注記',
+      '回答。オペレータ向け注記',
+    ]) {
+      expect(isCustomerSafeBody(bad), bad).toBe(false);
+    }
+  });
+});
+
+describe('splitReply: 社内ラベル混入も fail-closed (codex review P1)', () => {
+  it('CUSTOMER block 内に「社内用:」混入 → parseOk=false, customerReply=', () => {
+    const raw = [
+      CUSTOMER_REPLY_START,
+      '承りました。\n社内用: 管理画面で確認',
+      CUSTOMER_REPLY_END,
+    ].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(false);
+    expect(r.customerReply).toBe('');
+  });
 });
