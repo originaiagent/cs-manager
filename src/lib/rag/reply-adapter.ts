@@ -28,6 +28,7 @@
  */
 
 import { getCredential } from '@/lib/credentials';
+import { splitReply } from '@/lib/rag/split-reply';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 // ---- 型 (origin-ai rag endpoint 契約に一致) ----------------------------
@@ -82,8 +83,20 @@ export interface RagReplyInput {
 
 export interface RagReplyResult {
   ok: boolean;
-  /** マスク復元済みの返信ドラフト本文 (UI / 保存用) */
+  /**
+   * 顧客向け返信本文 (UI / 保存 / 送信用)。
+   * **split-reply パーサで分離した顧客向け部分のみ**。社内テキスト (根拠/メモ) は
+   * 含まない。parseOk=false 時は '' (fail-closed = 送信欄空)。生の agent 全文を
+   * draft に入れることは絶対にない。
+   */
   draft?: string;
+  /**
+   * 社内用プレビュー (読み取り専用表示用、根拠/メモ/narration 含む)。
+   * parseOk=false 時は agent の raw 全文 (オペレータが手動切り出しできるよう)。
+   */
+  internalPreview?: string;
+  /** split-reply の構造分離に成功したか。false = fail-closed (draft 空)。 */
+  parseOk?: boolean;
   citations?: RagCitation[];
   confidence?: number;
   noAnswer?: boolean;
@@ -400,12 +413,20 @@ export async function generateRagReply(
   // (c) draft 内のマスクトークンをローカル復元 (外部送信後のみ)
   const restoredDraft = restoreLocally(rawDraft, restoreMap);
 
+  // (d) 構造分離 (唯一の安全境界): agent 出力をセンチネルでパースし、
+  //     顧客向け本文のみを draft とする。社内テキスト (根拠/メモ) は draft に入れない。
+  //     parseOk=false → fail-closed (draft='' = 送信欄空)。raw 全文は internalPreview のみ。
+  const split = splitReply(restoredDraft);
+
   // 方式A: citation は cs 側から取得できない (検索は agent 内 knowledge_search)。
   //   shape 互換のため空配列を返す。十分な根拠が無い場合は agent 自身が本文で
   //   その旨を述べる (self-report)。自動送信ゲートは別途、人間 click 必須を維持。
   return {
     ok: true,
-    draft: restoredDraft,
+    // draft は顧客向け本文のみ (parseOk=false なら '')。raw 全文は決して入らない。
+    draft: split.customerReply,
+    internalPreview: split.internalPreview,
+    parseOk: split.parseOk,
     citations: [],
     confidence: undefined,
     noAnswer: false,

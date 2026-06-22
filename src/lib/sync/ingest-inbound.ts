@@ -31,6 +31,7 @@ import { generateRagReply, type RagReplyInput, type RagReplyResult } from '@/lib
 export type DraftErrorCode =
   | 'rag_upstream_error' // RAG エンドポイントが非 OK / draft 不正
   | 'rag_no_draft' // RAG は成功したが draft 空 (no_answer 等)
+  | 'rag_parse_failed' // RAG は成功したが構造分離に失敗 (混在のため保存しない、fail-closed)
   | 'rag_exception' // RAG 呼び出し自体が例外 (ネットワーク等)
   | 'draft_persist_error'; // ticket_drafts への保存失敗
 
@@ -53,8 +54,13 @@ export interface IngestInboundParams {
   ticket: NormalizedTicket;
   inboundMessage: NormalizedMessage;
   ragInput: RagReplyInput;
-  /** draft の source ラベル (既定 'rag') */
-  draftSource?: string;
+  /**
+   * draft の source ラベル (既定 'rag')。
+   * 本関数は AI 生成 draft を is_separated=true で保存するため、AI 由来 source
+   * (rag / ai_draft) のみ許す。manual / first_response 等を渡すと is_separated の
+   * 意味が壊れる (これらは is_separated を立てない契約) ため型で禁止する (codex review P3)。
+   */
+  draftSource?: 'rag' | 'ai_draft';
   /** テスト注入用。未指定なら origin-ai 経由の generateRagReply。 */
   generateReply?: (sb: SupabaseClient, input: RagReplyInput) => Promise<RagReplyResult>;
 }
@@ -92,14 +98,25 @@ export async function ingestInboundWithDraft(
   if (!ragResult.ok) {
     return { status: 'ingested_draft_failed', ticketId, draftError: 'rag_upstream_error' };
   }
+
+  // 構造分離 fail-closed (codex CONCERN#3 + review P2):
+  //   reply-adapter は split-reply で分離済み。is_separated=true で保存してよいのは
+  //   parseOk が **厳密に true** の場合のみ (parseOk が false / 未設定のいずれも不許可)。
+  //   parseOk!==true の場合 ragResult.draft は信頼できない (混在の可能性) ため、
+  //   絶対に保存しない (fail-closed)。draft を作らず parse 失敗として記録する。
+  //   ※ parseOk===true の ragResult.draft は「顧客向け本文のみ」(parser 通過済)。
+  if (ragResult.parseOk !== true) {
+    return { status: 'ingested_no_draft', ticketId, draftError: 'rag_parse_failed' };
+  }
   if (!ragResult.draft || !ragResult.draft.trim()) {
     // RAG は成功したが回答なし (no_answer 等)。失敗ではないが draft は保存しない。
     return { status: 'ingested_no_draft', ticketId, draftError: 'rag_no_draft' };
   }
 
+  // 保存する body は「顧客向け本文のみ」。AI 由来 (source 既定 'rag') のため is_separated=true。
   const { data: draft, error: draftErr } = await sb
     .from('ticket_drafts')
-    .insert({ ticket_id: ticketId, body: ragResult.draft, source })
+    .insert({ ticket_id: ticketId, body: ragResult.draft, source, is_separated: true })
     .select('id')
     .single();
   if (draftErr) {

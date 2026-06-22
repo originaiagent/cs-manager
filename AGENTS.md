@@ -57,6 +57,22 @@ channels / tickets / messages / channel_sync_state / ticket_drafts.
 全テーブル RLS 有効、service_role のみ読み書き可（Phase 1.2 で UI 用ポリシー追加予定）。
 `channel_credentials` は廃止 (Core /api/credentials 経由に移行済)。
 
+### 返信ドラフト構造分離 (社内テキストが送信欄に入らない構造保証)
+- `ticket_drafts.is_separated boolean NOT NULL DEFAULT false`: `body` が「構造分離した
+  顧客向け本文のみ」なら true。送信安全境界の唯一の正は `src/lib/rag/split-reply.ts`
+  (純関数パーサ)。origin-ai `customer-reply-writer` のセンチネル封筒出力を **サーバ側**で
+  パースし、顧客向け本文のみを抽出する。fail-closed (parse 失敗 → 送信欄空)。
+- `POST /api/tickets/[id]/draft-rag`: `{ draft(顧客向け本文のみ), internalPreview(社内用,
+  読取専用表示), parseOk }` を返す。`parseOk=false` 時 `draft=''`。
+- `POST /api/tickets/[id]/drafts`: `source IN ('ai_draft','rag')` は `is_separated=true` 必須、
+  かつ `body` が `isCustomerSafeBody` (内部マーカー/センチネル不在のサーバ側検証) を通過
+  しない限り 400。`first_response` は許可せず orchestrator 専用 (parser 迂回防止)。
+- `GET /api/tickets/[id]/drafts`: 最新が `ai_draft`/`rag` かつ `is_separated=false` (旧形式・
+  混在の可能性) は `body=''` + `legacyUnsafe:true` を返す (混在 body を返さない)。
+- 送信可否: 楽天一般 sweep (`sendApprovedDrafts`) は `source='manual' OR is_separated=true`
+  のみ。`first_response` は一般 sweep に乗せず `send-first-response.ts` の営業時間ガード付き
+  専用経路で送る。旧 `ai_draft/rag`(is_separated=false) は承認済でも送信しない。
+
 ## Channel Adapters
 - `src/channels/_lib/`: ChannelAdapter インターフェース・正規化型・registry
 - `src/channels/rakuten/`: 楽天 R-MessE (InquiryManagementAPI) adapter

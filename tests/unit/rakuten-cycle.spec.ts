@@ -260,6 +260,9 @@ test.beforeAll(async () => {
       body: 'mock approved reply',
       source: 'ai_draft',
       status: 'approved',
+      // 送信安全フィルタ (source IN (manual,first_response) OR is_separated=true) に
+      // 適合させる。ai_draft は分離済み顧客向け本文として承認された前提。
+      is_separated: true,
     })
     .select('id, status')
     .single();

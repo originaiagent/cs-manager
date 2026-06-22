@@ -164,14 +164,14 @@ test.describe('統合ナレッジ参照 返信案生成 E2E', () => {
 
     // 保存は非同期 (await saveDraft) のため、DB 反映を最大 30s poll で待つ
     // (保存完了前に query が走る race を排除)。
-    type DraftRow = { id: string; body: string; source: string; created_at: string };
+    type DraftRow = { id: string; body: string; source: string; created_at: string; is_separated: boolean };
     let match: DraftRow | undefined;
     await expect
       .poll(
         async () => {
           const { data, error } = await sb
             .from('ticket_drafts')
-            .select('id, body, source, created_at')
+            .select('id, body, source, created_at, is_separated')
             .eq('ticket_id', TICKET_ID)
             .eq('source', 'ai_draft')
             .gte('created_at', testStart)
@@ -191,6 +191,9 @@ test.describe('統合ナレッジ参照 返信案生成 E2E', () => {
       )
       .toBe('found');
     expect(match!.body).toMatch(/最強配送|発送|日本郵便|配送/);
+    // 安全契約の回帰検知 (codex review P3): 採用された ai_draft は構造分離済み顧客向け
+    // 本文として is_separated=true で永続化される (混在 body の送信安全扱いを防ぐ)。
+    expect(match!.is_separated, '採用 ai_draft は is_separated=true').toBe(true);
     console.log(
       `[evidence] persisted ticket_drafts: id=${match!.id} source=${match!.source} created_at=${match!.created_at}`,
     );

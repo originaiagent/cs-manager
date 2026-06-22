@@ -49,7 +49,7 @@ export default async function TicketDetailPage({ params }: { params: Params }) {
       .order('sent_at', { ascending: true }),
     sb
       .from('ticket_drafts')
-      .select('id, body, source, created_at')
+      .select('id, body, source, is_separated, created_at')
       .eq('ticket_id', ticket.id)
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
@@ -61,6 +61,29 @@ export default async function TicketDetailPage({ params }: { params: Params }) {
 
   const messages = messagesRes.data ?? [];
   const latestDraft = (draftRes.data ?? [])[0] ?? null;
+
+  // 表示安全ゲート (server-side): textarea (送信欄) に初期表示してよい本文か。
+  //   表示安全 = source IN ('manual','first_response') OR is_separated === true
+  //   - manual          : オペレータ入力 (生テキスト)
+  //   - first_response   : テンプレ生成 (orchestrator、社内テキスト混在なし)。手動レビュー用に表示
+  //   - is_separated=true: split-reply で分離した顧客向け本文のみ (ai_draft/rag)
+  // 旧形式 = AI 由来 (ai_draft/rag) かつ未分離 (is_separated=false) は混在の可能性
+  //   → initialBody は空にし legacyUnsafe を立てて再生成を促す。
+  // ※ ここは「社内テキストが textarea に出ないこと」を保証する表示ゲート。実送信の
+  //   可否 (outbound 一般 sweep) とは別レイヤ: first_response は表示安全だが一般 sweep には
+  //   乗らず専用経路で送る (outbound.ts 参照)。表示安全 ⊇ 一般 sweep 送信可。
+  const draftSource = (latestDraft?.source as string | null) ?? null;
+  const draftIsSeparated = latestDraft?.is_separated === true;
+  const isSendSafe =
+    draftSource === 'manual' ||
+    draftSource === 'first_response' ||
+    draftIsSeparated;
+  // legacyUnsafe = AI 由来かつ未分離 (= 送信不可、混在の可能性) のみ。
+  const isLegacyUnsafe =
+    !!latestDraft &&
+    (draftSource === 'ai_draft' || draftSource === 'rag') &&
+    !draftIsSeparated;
+  const safeInitialBody = isSendSafe ? latestDraft?.body ?? '' : '';
   const product: CoreProduct | null = productRes.ok ? productRes.product ?? null : null;
   const productError =
     !ticket.product_id || productRes.ok ? null : productRes.error ?? '不明エラー';
@@ -155,8 +178,9 @@ export default async function TicketDetailPage({ params }: { params: Params }) {
       <h2 className="text-xs font-semibold text-gray-500 tracking-wider mb-2">返信</h2>
       <ReplyForm
         ticketId={ticket.id}
-        initialBody={latestDraft?.body ?? ''}
-        initialSource={latestDraft?.source ?? null}
+        initialBody={safeInitialBody}
+        initialSource={draftSource}
+        legacyUnsafe={isLegacyUnsafe}
         productAvailable={!!product}
       />
     </div>

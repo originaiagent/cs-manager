@@ -17,13 +17,20 @@ export async function saveDraft(
   ticketId: string,
   body: string,
   source: 'manual' | 'ai_draft' | 'rag',
+  opts?: { is_separated?: boolean },
 ): Promise<SaveDraftResult> {
   try {
     const res = await internalFetch(
       `/api/tickets/${encodeURIComponent(ticketId)}/drafts`,
       {
         method: 'POST',
-        body: JSON.stringify({ body, source }),
+        // is_separated は指定時のみ送る (manual は既定 false のまま)。
+        // AI 由来 (ai_draft/rag) は呼び出し側が顧客向け本文のみで true を渡す契約。
+        body: JSON.stringify(
+          opts?.is_separated === undefined
+            ? { body, source }
+            : { body, source, is_separated: opts.is_separated },
+        ),
       },
     );
     const j = (await res.json().catch(() => ({}))) as Record<string, unknown>;

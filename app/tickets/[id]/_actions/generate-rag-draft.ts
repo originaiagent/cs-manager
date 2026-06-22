@@ -12,7 +12,12 @@ export interface RagCitation {
 
 export interface GenerateRagDraftResult {
   ok: boolean;
+  /** 顧客向け本文のみ (split-reply 分離後)。parseOk=false 時は ''。 */
   draft?: string;
+  /** 社内用プレビュー (読み取り専用)。送信欄には入れない。 */
+  internalPreview?: string;
+  /** 構造分離に成功したか。false = fail-closed (送信欄空 / 採用不可)。 */
+  parseOk?: boolean;
   citations?: RagCitation[];
   confidence?: number | null;
   noAnswer?: boolean;
@@ -57,6 +62,9 @@ export async function generateRagDraft(
     return {
       ok: true,
       draft: typeof j.draft === 'string' ? j.draft : '',
+      internalPreview:
+        typeof j.internalPreview === 'string' ? j.internalPreview : '',
+      parseOk: j.parseOk === true,
       citations: Array.isArray(j.citations) ? (j.citations as RagCitation[]) : [],
       confidence: typeof j.confidence === 'number' ? j.confidence : null,
       noAnswer: j.noAnswer === true,

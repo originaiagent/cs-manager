@@ -78,6 +78,9 @@ test.beforeAll(async () => {
     ticket_id: ticketId,
     body: DRAFT_BODY,
     source: 'rag',
+    // 分離済み顧客向け本文として seed (page の送信安全ゲートで textarea に表示される)。
+    // 未指定だと is_separated=false=legacy 扱いとなり textarea が空になる。
+    is_separated: true,
     // status は既定 'pending' (実送信されない)
   });
 });
