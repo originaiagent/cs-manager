@@ -38,21 +38,33 @@ vi.mock('@/lib/credentials', () => ({
 }));
 
 // --- Supabase admin モック (knowledge_articles published title 解決) ----------
-const articleStore: Record<string, { id: string; title: string; status: string }> = {
-  'art-1': { id: 'art-1', title: '配送についてのFAQ', status: 'published' },
-  'art-2': { id: 'art-2', title: '下書き記事', status: 'draft' },
+const articleStore: Record<
+  string,
+  { id: string; title: string; status: string; deleted_at: string | null }
+> = {
+  'art-1': { id: 'art-1', title: '配送についてのFAQ', status: 'published', deleted_at: null },
+  'art-2': { id: 'art-2', title: '下書き記事', status: 'draft', deleted_at: null },
+  // published だが soft delete 済み → 検索結果から除外されること
+  'art-3': {
+    id: 'art-3',
+    title: '削除済み記事',
+    status: 'published',
+    deleted_at: '2026-01-01T00:00:00Z',
+  },
 };
 vi.mock('@/lib/db/supabase-admin', () => ({
   getSupabaseAdmin: vi.fn(async () => ({
     from: (_table: string) => ({
       select: (_cols: string) => ({
         in: (_col: string, ids: string[]) => ({
-          eq: (_statusCol: string, status: string) => {
-            const data = ids
-              .map((id) => articleStore[id])
-              .filter((r) => r && r.status === status);
-            return Promise.resolve({ data, error: null });
-          },
+          eq: (_statusCol: string, status: string) => ({
+            is: (_delCol: string, _v: null) => {
+              const data = ids
+                .map((id) => articleStore[id])
+                .filter((r) => r && r.status === status && r.deleted_at === null);
+              return Promise.resolve({ data, error: null });
+            },
+          }),
         }),
       }),
     }),
@@ -170,6 +182,23 @@ describe('§A 静的キーで knowledge_search が動作', () => {
     // chunk/title が返る
     expect(payload.results[0].chunk_id).toBe('c1');
     expect(payload.results[0]).toHaveProperty('title');
+  });
+
+  it('soft delete (deleted_at) 済みの published 記事は除外される', async () => {
+    restoreFetch = installFetchStub({
+      hits: [
+        { chunk_id: 'c1', article_id: 'art-1', article_version: 1, content: '配送は2-3日です' },
+        { chunk_id: 'c3', article_id: 'art-3', article_version: 1, content: '削除済み本文' },
+      ],
+    });
+    const res = await POST(
+      rpc('tools/call', { name: 'knowledge_search', arguments: { query: '配送' } }, bearer(KNOWLEDGE_TOKEN)) as any,
+    );
+    const j = await res.json();
+    const payload = JSON.parse(j.result.content[0].text);
+    // art-3 は deleted_at 非 null のため除外され art-1 のみ
+    expect(payload.count).toBe(1);
+    expect(payload.results[0].article_id).toBe('art-1');
   });
 
   it('認証なしは 401', async () => {

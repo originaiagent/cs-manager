@@ -35,6 +35,16 @@ export const CUSTOMER_REPLY_START = '<<<ORIGIN_CS_CUSTOMER_REPLY_V1>>>';
 export const CUSTOMER_REPLY_END = '<<<END_ORIGIN_CS_CUSTOMER_REPLY_V1>>>';
 
 /**
+ * 社内用 (読み取り専用) ブロックのセンチネル。顧客送信には一切使わない。
+ * agent 出力契約 (別 repo) と完全一致させること。中身は構造化表示用に
+ * marker 除去して取り出す (internalGroundingText / internalNotesText)。
+ */
+export const INTERNAL_GROUNDING_START = '<<<ORIGIN_CS_INTERNAL_GROUNDING_V1>>>';
+export const INTERNAL_GROUNDING_END = '<<<END_ORIGIN_CS_INTERNAL_GROUNDING_V1>>>';
+export const INTERNAL_NOTES_START = '<<<ORIGIN_CS_INTERNAL_NOTES_V1>>>';
+export const INTERNAL_NOTES_END = '<<<END_ORIGIN_CS_INTERNAL_NOTES_V1>>>';
+
+/**
  * 顧客向け本文に含まれていたら parseOk=false にする既知の内部マーカー/見出し。
  * agent が誤って社内テキストを CUSTOMER_REPLY ブロック内に混入させた場合の
  * 二重防壁 (defense-in-depth)。
@@ -91,6 +101,35 @@ export interface SplitReplyResult {
   internalPreview: string;
   /** 構造分離に成功したか。false の場合は fail-closed (送信欄空)。 */
   parseOk: boolean;
+  /**
+   * INTERNAL_GROUNDING ブロックの **marker 除去済み中身** (trim 後)。
+   * ブロックが無い / 不正形 (START/END が各 1 回かつ START<END でない) → ''。
+   * 社内 read-only 表示の「AI の参照メモ」用。顧客送信には絶対に使わない。
+   * 注: この値はあくまで agent の言い換え prose であり記事 ID は含まない。
+   */
+  internalGroundingText: string;
+  /**
+   * INTERNAL_NOTES ブロックの **marker 除去済み中身** (trim 後)。
+   * ブロックが無い / 不正形 → ''。社内 read-only 表示の「対応メモ」用。
+   * 顧客送信には絶対に使わない。
+   */
+  internalNotesText: string;
+}
+
+/**
+ * START/END センチネルの「厳密に間」の中身を抽出する (marker 除去 + trim)。
+ * 安全要件: START と END が各々ちょうど 1 回出現し START が END に先行する場合のみ
+ * 中身を返す。それ以外 (欠落 / 重複 / 順序逆) は '' (fail-safe = 表示しない)。
+ * customerReply の安全判定とは独立 (これは read-only 表示専用)。
+ */
+function extractBetween(text: string, start: string, end: string): string {
+  if (countOccurrences(text, start) !== 1 || countOccurrences(text, end) !== 1) {
+    return '';
+  }
+  const startIdx = text.indexOf(start);
+  const endIdx = text.indexOf(end);
+  if (!(startIdx < endIdx)) return '';
+  return text.slice(startIdx + start.length, endIdx).trim();
 }
 
 /** raw 全文中に sentinel トークンが現れる回数を数える (リテラル部分文字列一致)。 */
@@ -129,24 +168,40 @@ function countOccurrences(haystack: string, needle: string): number {
 export function splitReply(rawInput: string | null | undefined): SplitReplyResult {
   const raw = typeof rawInput === 'string' ? rawInput : '';
 
-  // fail-closed の既定形 (どの早期 return もこれを基準にする)
-  const failClosed: SplitReplyResult = {
-    customerReply: '',
-    internalPreview: raw,
-    parseOk: false,
-  };
-
-  if (!raw.trim()) {
-    // 空入力: 顧客本文も社内プレビューも無い。fail-closed (送信欄空)。
-    return failClosed;
-  }
-
   // 行末を正規化 (\r\n / 単独 \r → \n) してから以降の index 計算・slice を行う。
   //   旧 splitLines が \r\n と単独 \r を共に \n 扱いしていたのと同じ前提を維持し、
   //   START/END 行の境界探索 (indexOf/lastIndexOf '\n') が CR-only 出力でも成立する
   //   ようにする (codex CODE review P3: CR-only envelope の取りこぼし回避)。
   //   センチネルトークンは \r/\n を含まないため index 整合性は保たれる。
   const text = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  // 社内ブロックの marker 除去済み中身 (read-only 表示専用、parseOk と独立に抽出)。
+  //   ブロック欠落/不正形は '' (fail-safe = 表示しない)。顧客送信には絶対に使わない。
+  const internalGroundingText = extractBetween(
+    text,
+    INTERNAL_GROUNDING_START,
+    INTERNAL_GROUNDING_END,
+  );
+  const internalNotesText = extractBetween(
+    text,
+    INTERNAL_NOTES_START,
+    INTERNAL_NOTES_END,
+  );
+
+  // fail-closed の既定形 (どの早期 return もこれを基準にする)。
+  //   internalGrounding/NotesText は read-only 表示用に常に additive で含める。
+  const failClosed: SplitReplyResult = {
+    customerReply: '',
+    internalPreview: raw,
+    parseOk: false,
+    internalGroundingText,
+    internalNotesText,
+  };
+
+  if (!raw.trim()) {
+    // 空入力: 顧客本文も社内プレビューも無い。fail-closed (送信欄空)。
+    return failClosed;
+  }
 
   // (1)(2) START/END トークンが各々ちょうど 1 回出現することを要件にする。
   //   START トークンは END トークンの部分文字列ではない (`<<<ORIGIN_CS_...` vs
@@ -230,5 +285,7 @@ export function splitReply(rawInput: string | null | undefined): SplitReplyResul
     customerReply: customerBody,
     internalPreview,
     parseOk: true,
+    internalGroundingText,
+    internalNotesText,
   };
 }

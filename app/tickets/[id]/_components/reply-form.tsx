@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import {
   Save,
   Loader2,
@@ -11,12 +12,16 @@ import {
   BookOpen,
   AlertTriangle,
   Lock,
+  Info,
+  ExternalLink,
 } from 'lucide-react';
 import {
   generateRagDraft,
   type RagCitation,
+  type GroundingArticle,
 } from '../_actions/generate-rag-draft';
 import { saveDraft } from '../_actions/save-draft';
+import KnowledgeMetaPopover from './knowledge-meta-popover';
 
 interface Props {
   ticketId: string;
@@ -42,6 +47,12 @@ type RagState =
       internalPreview: string;
       /** 構造分離に成功したか。false = 採用/編集不可 (送信欄空)。 */
       parseOk: boolean;
+      /** 社内枠「関連ナレッジ候補」(読み取り専用表示)。送信/保存しない。 */
+      groundingArticles: GroundingArticle[];
+      /** 社内枠「AI の参照メモ」(marker 除去済み)。送信/保存しない。 */
+      internalGroundingText: string;
+      /** 社内枠「対応メモ」(marker 除去済み)。送信/保存しない。 */
+      internalNotesText: string;
       citations: RagCitation[];
       confidence: number | null;
       needsHuman: boolean;
@@ -57,6 +68,19 @@ type RagState =
 /** 低 confidence 警告の既定閾値 (サーバ rag_config 未取得時のみのフォールバック) */
 const DEFAULT_LOW_CONFIDENCE_THRESHOLD = 0.5;
 
+/**
+ * 対応メモ文字列を箇条書き行に整形する。
+ * - 行ごとに分割し空行を除去。
+ * - 先頭の箇条書き記号 (・/-/*) と続く空白を 1 つ除去 (二重マーカー防止)。
+ * マーカー/ナレーションの解釈はしない (構造化済み NOTES 中身のみ受け取る)。
+ */
+function toBullets(text: string): string[] {
+  return text
+    .split('\n')
+    .map((l) => l.replace(/^\s*[・\-*]\s*/, '').trim())
+    .filter((l) => l.length > 0);
+}
+
 export default function ReplyForm({
   ticketId,
   initialBody,
@@ -70,6 +94,8 @@ export default function ReplyForm({
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [rag, setRag] = useState<RagState>({ kind: 'idle' });
+  // 社内枠 Info ポップオーバーで開いている記事 (read-only 表示用)。
+  const [openArticle, setOpenArticle] = useState<GroundingArticle | null>(null);
   const [, startTransition] = useTransition();
 
   async function saveManual() {
@@ -104,6 +130,9 @@ export default function ReplyForm({
       draft: result.draft,
       internalPreview: result.internalPreview ?? '',
       parseOk: result.parseOk === true,
+      groundingArticles: result.groundingArticles ?? [],
+      internalGroundingText: result.internalGroundingText ?? '',
+      internalNotesText: result.internalNotesText ?? '',
       citations: result.citations ?? [],
       confidence: result.confidence ?? null,
       needsHuman: result.needsHuman ?? false,
@@ -229,17 +258,106 @@ export default function ReplyForm({
             </>
           )}
 
-          {/* 社内用パネル (読み取り専用、絶対に送信されない)。根拠/メモ/narration。 */}
-          {rag.internalPreview.trim() && (
-            <div className="mt-2">
-              <div className="text-[10px] font-semibold text-gray-500 tracking-wider mb-1 inline-flex items-center gap-1">
+          {/* 社内用パネル (読み取り専用、絶対に送信されない)。
+              parseOk=true: 構造化表示 (関連ナレッジ候補 / 対応メモ)。マーカー/ナレーション非表示。
+              parseOk=false: fail-closed の稀な経路。オペレータが手動切り出しできるよう raw 全文を表示。 */}
+          {rag.parseOk ? (
+            <div className="mt-2 space-y-3">
+              <div className="text-[10px] font-semibold text-gray-500 tracking-wider inline-flex items-center gap-1">
                 <Lock size={11} className="text-gray-400" />
                 社内用・送信されません
               </div>
-              <pre className="whitespace-pre-wrap text-[12px] text-gray-600 font-sans bg-gray-50 rounded-md border border-gray-200 p-3 max-h-48 overflow-auto select-text">
-                {rag.internalPreview}
-              </pre>
+
+              {/* 関連ナレッジ候補 (行 = 日本語タイトル + Info + リンク)。
+                  方式1 再検索のため「候補」であり「AI が実際に使った記事」ではない旨を明示。 */}
+              {rag.groundingArticles.length > 0 && (
+                <div>
+                  <div className="text-[10px] font-semibold text-gray-500 tracking-wider mb-1">
+                    関連ナレッジ候補（送信されません）
+                  </div>
+                  <ul className="space-y-1">
+                    {rag.groundingArticles.map((art) => (
+                      <li
+                        key={art.id}
+                        className="rounded-md border border-gray-200 bg-gray-50 px-2 py-1.5 text-[12px] text-gray-700 flex items-center justify-between gap-2"
+                      >
+                        <span className="inline-flex items-center gap-1.5 min-w-0">
+                          <BookOpen
+                            size={12}
+                            className="shrink-0 text-gray-400"
+                          />
+                          <span className="truncate">
+                            {art.title?.trim() || '(タイトルなし)'}
+                          </span>
+                        </span>
+                        <span className="shrink-0 inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setOpenArticle(art)}
+                            aria-label="記事の詳細を表示"
+                            title="記事の詳細を表示"
+                            className="rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-700"
+                          >
+                            <Info size={14} />
+                          </button>
+                          <Link
+                            href={`/knowledge/${art.id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            aria-label="ナレッジ詳細を開く"
+                            title="ナレッジ詳細を開く"
+                            className="rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-700"
+                          >
+                            <ExternalLink size={14} />
+                          </Link>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* 対応メモ (NOTES ブロックを箇条書き)。 */}
+              {rag.internalNotesText.trim() && (
+                <div>
+                  <div className="text-[10px] font-semibold text-gray-500 tracking-wider mb-1">
+                    対応メモ（送信されません）
+                  </div>
+                  <ul className="list-disc pl-5 space-y-0.5 text-[12px] text-gray-700">
+                    {toBullets(rag.internalNotesText).map((line, i) => (
+                      <li key={i} className="whitespace-pre-wrap">
+                        {line}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* AI の参照メモ (GROUNDING の marker 除去済み prose、任意・muted)。 */}
+              {rag.internalGroundingText.trim() && (
+                <div>
+                  <div className="text-[10px] font-semibold text-gray-400 tracking-wider mb-1">
+                    AIの参照メモ（送信されません）
+                  </div>
+                  <p className="text-[11px] text-gray-500 whitespace-pre-wrap">
+                    {rag.internalGroundingText}
+                  </p>
+                </div>
+              )}
             </div>
+          ) : (
+            // fail-closed の稀な経路: 構造化できないため raw 全文を提示 (手動切り出し用)。
+            rag.internalPreview.trim() && (
+              <div className="mt-2">
+                <div className="text-[10px] font-semibold text-gray-500 tracking-wider mb-1 inline-flex items-center gap-1">
+                  <Lock size={11} className="text-gray-400" />
+                  社内用・送信されません（自動分離に失敗したため全文表示）
+                </div>
+                <pre className="whitespace-pre-wrap text-[12px] text-gray-600 font-sans bg-gray-50 rounded-md border border-gray-200 p-3 max-h-48 overflow-auto select-text">
+                  {rag.internalPreview}
+                </pre>
+              </div>
+            )
           )}
 
           {/* 引用元 */}
@@ -371,6 +489,18 @@ export default function ReplyForm({
       <p className="text-[11px] text-gray-400 mt-3">
         ※ 楽天への実送信は本フェーズでは未対応です。下書きは ticket_drafts に保存されます。
       </p>
+
+      {/* 社内枠 Info ポップオーバー (read-only、渡されたメタのみ表示)。 */}
+      {openArticle && (
+        <KnowledgeMetaPopover
+          id={openArticle.id}
+          title={openArticle.title}
+          question={openArticle.question}
+          answer={openArticle.answer}
+          status={openArticle.status}
+          onClose={() => setOpenArticle(null)}
+        />
+      )}
     </div>
   );
 }

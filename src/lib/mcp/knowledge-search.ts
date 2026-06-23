@@ -90,6 +90,22 @@ export interface KnowledgeSearchResultItem {
   chunk_id: string;
 }
 
+/**
+ * published 記事のみに絞り込んだ検索ヒット (raw title 付き)。
+ * MCP/agent path (handleKnowledgeSearch) はこれを基に title マスクを掛ける。
+ * reply-adapter (社内枠表示) は article_id のみ取り出して使う。
+ * - title は **生 (非マスク)**。MCP path 側でマスクする責務 (helper はマスクしない)。
+ * - 全件 published かつ deleted_at IS NULL のみ (soft delete 除外)。
+ */
+export interface PublishedSearchHit {
+  chunk_id: string;
+  article_id: string;
+  article_version: number;
+  content: string;
+  /** cs DB の生タイトル (null 可)。MCP path はこれをマスクして返す。 */
+  rawTitle: string | null;
+}
+
 export type KnowledgeSearchOutcome =
   | { ok: true; payload: { results: KnowledgeSearchResultItem[]; count: number } }
   | { ok: false; error: string };
@@ -235,6 +251,113 @@ function emitAudit(args: {
   );
 }
 
+// ---- 共有検索コア (MCP path / reply-adapter 共用) ---------------------------
+
+/**
+ * masked query で rag-hybrid-search を実行し、published かつ未削除 (deleted_at IS NULL) の
+ * 記事ヒットのみを raw title 付きで返す共有ヘルパ。
+ *
+ * **不変条件 (security-critical):**
+ *  - サーバ固定パラメータ (db_target='cs' / pii_state='masked' /
+ *    filter_visibility=['public','internal'] / status='published' / deleted_at IS NULL) は
+ *    呼出側から変更できない (引数で受けない)。
+ *  - title は **生 (非マスク)** で返す。マスクは呼出側 (MCP/agent path) の責務。
+ *    reply-adapter は社内 read-only 表示用に生 title/メタを使う (外部送信しない)。
+ *  - MCP 専用の token 検証 / レート制限はここに混ぜない (route / handler の責務)。
+ *  - query は呼出側で再マスク済みである前提 (この helper は素の検索コアのみ)。
+ *
+ * @param maskedQuery  PII マスク済みクエリ (呼出側で rag-pii-mask 済み)。
+ * @param limit        1..MAX_LIMIT に clamp 済みであること (呼出側責務)。
+ * @param internalKey  origin-ai rag skill 認証鍵 (呼出側で Core 解決済み)。
+ * @returns published かつ未削除のヒットのみ (raw title 付き)。
+ * @throws rag-hybrid-search / knowledge_articles 参照に失敗した場合。
+ */
+export async function searchPublishedKnowledgeHits(
+  maskedQuery: string,
+  limit: number,
+  internalKey: string,
+): Promise<PublishedSearchHit[]> {
+  // (1) hybrid search (サーバ固定パラメータ)。
+  const res = await ragFetch('/api/skills/rag-hybrid-search', internalKey, {
+    db_target: FIXED_DB_TARGET,
+    pii_state: FIXED_PII_STATE,
+    query_text: maskedQuery,
+    filter_visibility: [...FIXED_FILTER_VISIBILITY],
+    require_acl: false,
+    limit,
+  });
+  if (!res.ok) {
+    // upstream error body は echo しない (一貫した PII 非露出方針)
+    throw new Error(`rag-hybrid-search ${res.status}`);
+  }
+  const j = (await res.json()) as { results?: SearchHit[] };
+  const hits = (j.results ?? []).slice(0, limit);
+
+  // (2) published かつ deleted_at IS NULL に絞り、title を解決 (cs DB ローカル)。
+  //     soft delete (deleted_at) を除外しないと削除済み記事を拾う恐れがある。
+  const articleIds = Array.from(new Set(hits.map((h) => h.article_id))).filter(Boolean);
+  if (articleIds.length === 0) return [];
+
+  const sb = await getSupabaseAdmin();
+  const { data, error } = await sb
+    .from('knowledge_articles')
+    .select('id, title, status, deleted_at')
+    .in('id', articleIds)
+    .eq('status', FIXED_ARTICLE_STATUS)
+    .is('deleted_at', null);
+  if (error) {
+    throw new Error(`knowledge_articles 参照失敗: ${error.message}`);
+  }
+  const publishedTitles = new Map<string, string | null>();
+  for (const row of data ?? []) {
+    publishedTitles.set(
+      (row as { id: string }).id,
+      (row as { title: string | null }).title ?? null,
+    );
+  }
+
+  // published かつ未削除のヒットのみ、元の検索順を保って返す。
+  return hits
+    .filter((h) => publishedTitles.has(h.article_id))
+    .map((h) => ({
+      chunk_id: h.chunk_id,
+      article_id: h.article_id,
+      article_version: h.article_version,
+      content: h.content ?? '',
+      rawTitle: publishedTitles.get(h.article_id) ?? null,
+    }));
+}
+
+/**
+ * 社内枠表示 (reply-adapter / 方式1 再検索) 用: masked query で再検索し、
+ * published かつ未削除の **full article_id (重複除去)** のみを検索順で返す。
+ *
+ * title/content は返さない (呼出側が cs DB から実メタを別途取得するため)。
+ * `searchPublishedKnowledgeHits` の薄いラッパ。失敗は throw (呼出側で握り潰す方針)。
+ *
+ * @param maskedQuery PII マスク済みクエリ。
+ * @param limit       検索 limit (呼出側で clamp 推奨)。
+ * @param internalKey origin-ai rag 認証鍵 (Core 解決済み)。
+ */
+export async function searchKnowledgeArticleIds(
+  maskedQuery: string,
+  limit: number,
+  internalKey: string,
+): Promise<string[]> {
+  const clamped = Math.max(1, Math.min(MAX_LIMIT, Math.floor(limit)));
+  const hits = await searchPublishedKnowledgeHits(maskedQuery, clamped, internalKey);
+  // 検索順を保ったまま article_id を重複除去。
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const h of hits) {
+    if (h.article_id && !seen.has(h.article_id)) {
+      seen.add(h.article_id);
+      ids.push(h.article_id);
+    }
+  }
+  return ids;
+}
+
 // ---- ハンドラ (read-only) ---------------------------------------------------
 
 /**
@@ -293,61 +416,29 @@ export async function handleKnowledgeSearch(
     };
   }
 
-  // (2) hybrid search (サーバ固定パラメータ)。
+  // (2)(3) hybrid search (サーバ固定パラメータ) → published かつ未削除のヒットのみ。
+  //     検索コア + published/deleted_at 絞り込みは共有ヘルパに集約 (reply-adapter と共用)。
   //     channel/tenant のハード絞り込みはしない (単一企業マルチストア KB; store scope は
   //     relevance のためのものでテナント境界ではない — 設計トレードオフ)。
-  let hits: SearchHit[] = [];
+  let publishedHits: PublishedSearchHit[];
   try {
-    const res = await ragFetch('/api/skills/rag-hybrid-search', internalKey, {
-      db_target: FIXED_DB_TARGET,
-      pii_state: FIXED_PII_STATE,
-      query_text: maskedQuery,
-      filter_visibility: [...FIXED_FILTER_VISIBILITY],
-      require_acl: false,
-      limit,
-    });
-    if (!res.ok) {
-      // upstream error body は echo しない (一貫した PII 非露出方針)
-      return { ok: false, error: `rag-hybrid-search ${res.status}` };
-    }
-    const j = (await res.json()) as { results?: SearchHit[] };
-    hits = (j.results ?? []).slice(0, limit);
+    publishedHits = await searchPublishedKnowledgeHits(maskedQuery, limit, internalKey);
   } catch (e) {
     return {
       ok: false,
-      error: `rag-hybrid-search 呼び出し失敗: ${e instanceof Error ? e.message : String(e)}`,
+      error: e instanceof Error ? e.message : String(e),
     };
   }
 
-  // (3) published 記事のみに絞り、title を解決 (cs DB ローカル)。
-  const articleIds = Array.from(new Set(hits.map((h) => h.article_id))).filter(Boolean);
+  // published hit の article_id → raw title マップ (マスク前)。
   const publishedTitles = new Map<string, string | null>();
-  if (articleIds.length > 0) {
-    const sb = await getSupabaseAdmin();
-    const { data, error } = await sb
-      .from('knowledge_articles')
-      .select('id, title, status')
-      .in('id', articleIds)
-      .eq('status', FIXED_ARTICLE_STATUS);
-    if (error) {
-      return { ok: false, error: `knowledge_articles 参照失敗: ${error.message}` };
-    }
-    for (const row of data ?? []) {
-      publishedTitles.set(
-        (row as { id: string }).id,
-        (row as { title: string | null }).title ?? null,
-      );
-    }
-  }
-
-  // published のみ残す
-  const publishedHits = hits.filter((h) => publishedTitles.has(h.article_id));
+  for (const h of publishedHits) publishedTitles.set(h.article_id, h.rawTitle);
 
   // (4) title を rag-pii-mask でマスク (free-text → defense-in-depth)。
   const rawTitles = Array.from(
     new Set(
       publishedHits
-        .map((h) => publishedTitles.get(h.article_id))
+        .map((h) => h.rawTitle)
         .filter((t): t is string => typeof t === 'string' && t.trim().length > 0),
     ),
   );
