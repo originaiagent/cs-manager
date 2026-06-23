@@ -18,6 +18,42 @@ vi.mock('@/lib/credentials', () => ({
   getCredential: vi.fn(async () => ({ credentials: { api_key: 'rag-internal-key' } })),
 }));
 
+// 社内枠 grounding 候補取得が叩く cs DB (knowledge_articles) をモック。
+// 方式1: rag-hybrid-search のヒット article_id を published/未削除でフィルタしメタを返す。
+// full UUID fixture: /knowledge/<id> リンクが full UUID を使うことの回帰検知。
+const ARTICLE_UUID = '11111111-2222-4333-8444-555555555555';
+const articleStore: Record<
+  string,
+  { id: string; title: string; question: string; answer: string; status: string; deleted_at: string | null }
+> = {
+  [ARTICLE_UUID]: {
+    id: ARTICLE_UUID,
+    title: '配送日数について',
+    question: '配送はどれくらいかかりますか',
+    answer: '通常2-3営業日です',
+    status: 'published',
+    deleted_at: null,
+  },
+};
+vi.mock('@/lib/db/supabase-admin', () => ({
+  getSupabaseAdmin: vi.fn(async () => ({
+    from: (_t: string) => ({
+      select: (_c: string) => ({
+        in: (_col: string, ids: string[]) => ({
+          eq: (_statusCol: string, status: string) => ({
+            is: (_delCol: string, _v: null) => {
+              const data = ids
+                .map((id) => articleStore[id])
+                .filter((r) => r && r.status === status && r.deleted_at === null);
+              return Promise.resolve({ data, error: null });
+            },
+          }),
+        }),
+      }),
+    }),
+  })),
+}));
+
 const { generateRagReply } = await import('@/lib/rag/reply-adapter');
 
 // サブ用の偽 SupabaseClient (方式A では未使用)
@@ -47,6 +83,18 @@ function installFetchStub(opts: StubOpts = {}) {
             replacements: [],
             mask_failed: false,
           })),
+        }),
+      } as any;
+    }
+    if (u.endsWith('/api/skills/rag-hybrid-search')) {
+      // 社内枠 grounding 候補の再検索 (方式1)。UUID 記事のみヒットさせる。
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          results: [
+            { chunk_id: 'c1', article_id: ARTICLE_UUID, article_version: 1, content: '配送…' },
+          ],
         }),
       } as any;
     }
@@ -118,6 +166,63 @@ describe('reply-adapter PII boundary (方式A)', () => {
     // 方式A: citation は空・searchHitCount=0 (shape 互換)
     expect(result.citations).toEqual([]);
     expect(result.searchHitCount).toBe(0);
+    // 社内枠: parseOk=true → 方式1 再検索で関連ナレッジ候補 (実メタ) が付く
+    expect(result.groundingArticles).toHaveLength(1);
+    // full UUID がそのまま返る (/knowledge/<full-id> リンク用)
+    expect(result.groundingArticles?.[0].id).toBe(ARTICLE_UUID);
+    expect(result.groundingArticles?.[0].title).toBe('配送日数について');
+    expect(result.groundingArticles?.[0].question).toBe('配送はどれくらいかかりますか');
+    expect(result.groundingArticles?.[0].answer).toBe('通常2-3営業日です');
+    // 表示専用フィールドは draft (送信本文) に絶対入らない
+    expect(result.draft).not.toContain('配送日数について');
+    expect(result.draft).not.toContain('通常2-3営業日です');
+  });
+
+  it('parseOk=false (fail-closed) では grounding 候補を取得しない (再検索を呼ばない)', async () => {
+    let hybridCalled = false;
+    const orig = global.fetch;
+    global.fetch = (async (url: any, init?: any) => {
+      const u = String(url);
+      const body = init?.body ? JSON.parse(init.body) : {};
+      if (u.endsWith('/api/skills/rag-pii-mask')) {
+        const texts: string[] = body.texts ?? [];
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            results: texts.map((t) => ({ masked_text: t, replacements: [], mask_failed: false })),
+          }),
+        } as any;
+      }
+      if (u.endsWith('/api/skills/rag-hybrid-search')) {
+        hybridCalled = true;
+        return { ok: true, status: 200, json: async () => ({ results: [] }) } as any;
+      }
+      if (u.endsWith('/api/agents/customer-reply-writer/chat')) {
+        // センチネル無し → split-reply が fail-closed
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ text: 'マーカー無しの素の本文', model: 'mock' }),
+        } as any;
+      }
+      throw new Error(`unexpected ${u}`);
+    }) as any;
+    restore = () => {
+      global.fetch = orig;
+    };
+    const result = await generateRagReply(fakeSb, {
+      subject: '配送',
+      inquiryBody: 'いつ届きますか',
+      customerName: null,
+      orderNumber: null,
+      category: null,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.parseOk).toBe(false);
+    // fail-closed では grounding 再検索を行わない (rag-hybrid-search 未呼出)
+    expect(hybridCalled).toBe(false);
+    expect(result.groundingArticles).toEqual([]);
   });
 
   it('センチネル無しの agent 出力 → parseOk=false, draft 空 (fail-closed), 社内テキストは draft に入らない', async () => {

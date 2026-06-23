@@ -343,6 +343,70 @@ describe('isCustomerSafeBody (サーバ側 /drafts POST 用ゲート, parser 迂
   });
 });
 
+describe('splitReply: 追加フィールド internalGroundingText / internalNotesText', () => {
+  it('GROUNDING/NOTES ブロックの中身が marker 除去 + trim で取り出される', () => {
+    const raw = wrap({
+      customer: 'ご返信します。',
+      grounding: '返品ポリシー記事を参照しました。',
+      notes: '・在庫を確認\n・配送状況を確認',
+    });
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(true);
+    // marker (<<<...>>>) は含まれない
+    expect(r.internalGroundingText).toBe('返品ポリシー記事を参照しました。');
+    expect(r.internalGroundingText).not.toContain('<<<');
+    expect(r.internalNotesText).toBe('・在庫を確認\n・配送状況を確認');
+    expect(r.internalNotesText).not.toContain('<<<');
+  });
+
+  it('ブロックが無ければ空文字列', () => {
+    const r = splitReply(wrap({ customer: '本文のみ' }));
+    expect(r.parseOk).toBe(true);
+    expect(r.internalGroundingText).toBe('');
+    expect(r.internalNotesText).toBe('');
+  });
+
+  it('GROUNDING のみ存在 → grounding 取得 / notes は空', () => {
+    const r = splitReply(
+      wrap({ customer: '本文', grounding: '根拠prose' }),
+    );
+    expect(r.internalGroundingText).toBe('根拠prose');
+    expect(r.internalNotesText).toBe('');
+  });
+
+  it('parseOk=false でも GROUNDING/NOTES が抽出できれば取り出される (read-only 表示用)', () => {
+    // CUSTOMER ブロックを壊して parseOk=false にしつつ、内部ブロックは正常配置
+    const raw = [
+      `${CUSTOMER_REPLY_START}本文後置きで fail`,
+      '<<<ORIGIN_CS_INTERNAL_NOTES_V1>>>',
+      '担当者向けメモ本体',
+      '<<<END_ORIGIN_CS_INTERNAL_NOTES_V1>>>',
+    ].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(false);
+    expect(r.customerReply).toBe('');
+    // fail-closed でも社内ブロックは additive に抽出される
+    expect(r.internalNotesText).toBe('担当者向けメモ本体');
+  });
+
+  it('内部ブロックの START/END が不正形 (重複) → 空文字列 (fail-safe)', () => {
+    const raw = [
+      CUSTOMER_REPLY_START,
+      '本文',
+      CUSTOMER_REPLY_END,
+      '<<<ORIGIN_CS_INTERNAL_NOTES_V1>>>',
+      'メモ1',
+      '<<<ORIGIN_CS_INTERNAL_NOTES_V1>>>',
+      'メモ2',
+      '<<<END_ORIGIN_CS_INTERNAL_NOTES_V1>>>',
+    ].join('\n');
+    const r = splitReply(raw);
+    expect(r.parseOk).toBe(true);
+    // NOTES START が 2 回 → 抽出せず空 (fail-safe)
+    expect(r.internalNotesText).toBe('');
+  });
+});
+
 describe('splitReply: 社内ラベル混入も fail-closed (codex review P1)', () => {
   it('CUSTOMER block 内に「社内用:」混入 → parseOk=false, customerReply=', () => {
     const raw = [

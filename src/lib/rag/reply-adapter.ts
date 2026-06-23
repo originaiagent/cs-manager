@@ -29,6 +29,8 @@
 
 import { getCredential } from '@/lib/credentials';
 import { splitReply } from '@/lib/rag/split-reply';
+import { searchKnowledgeArticleIds } from '@/lib/mcp/knowledge-search';
+import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 // ---- 型 (origin-ai rag endpoint 契約に一致) ----------------------------
@@ -81,6 +83,28 @@ export interface RagReplyInput {
   tenantId?: string | null;
 }
 
+/**
+ * 社内枠 (読み取り専用) に表示する「関連ナレッジ候補」1 件のメタ。
+ *
+ * **方式1 (server-side 再検索) の産物**: agent が実際に参照した記事と完全一致するとは限らない
+ * (agent 出力に記事 ID が無いため、cs 側で masked query を再検索して候補を出す)。
+ * → UI は「候補」「参照済みではない」旨を明示すること (「実使用記事」と誤認させない)。
+ *
+ * 値は cs DB `knowledge_articles` の **実メタ (非マスク)**。社内認証済み UI のみに表示し、
+ * draft / 保存 / 送信 / log には絶対に流さない (顧客 PII ではなく社内 KB メタ)。
+ */
+export interface GroundingArticle {
+  /** 記事 full UUID (/knowledge/<id> 詳細リンク用)。 */
+  id: string;
+  title: string | null;
+  /** 想定問い合わせ。 */
+  question: string | null;
+  /** 対応方針。 */
+  answer: string | null;
+  /** ステータス (published 固定だが表示用に保持)。 */
+  status: string | null;
+}
+
 export interface RagReplyResult {
   ok: boolean;
   /**
@@ -97,6 +121,15 @@ export interface RagReplyResult {
   internalPreview?: string;
   /** split-reply の構造分離に成功したか。false = fail-closed (draft 空)。 */
   parseOk?: boolean;
+  /**
+   * 社内枠 (読み取り専用) 表示用「関連ナレッジ候補」。方式1 (masked query 再検索) で取得。
+   * **表示専用**: draft / 保存 / 送信 path には絶対に入れない。search 失敗時は []。
+   */
+  groundingArticles?: GroundingArticle[];
+  /** 社内枠「AI の参照メモ」(GROUNDING ブロックの marker 除去済み中身)。表示専用。 */
+  internalGroundingText?: string;
+  /** 社内枠「対応メモ」(NOTES ブロックの marker 除去済み中身)。表示専用。 */
+  internalNotesText?: string;
   citations?: RagCitation[];
   confidence?: number;
   noAnswer?: boolean;
@@ -418,6 +451,25 @@ export async function generateRagReply(
   //     parseOk=false → fail-closed (draft='' = 送信欄空)。raw 全文は internalPreview のみ。
   const split = splitReply(restoredDraft);
 
+  // (e) 社内枠「関連ナレッジ候補」(方式1): parseOk 成功時のみ、保持済み maskedQuery で
+  //     再検索 → article_id → cs DB から実メタ取得。**表示専用** で draft/保存/送信には
+  //     一切流さない。検索失敗は握り潰して [] (生成全体は失敗させない — root cause は
+  //     別経路の本文生成であり、候補表示の失敗で返信案を捨てない)。
+  //     注: agent が実際に使った記事と完全一致しない「候補」(agent 出力に ID が無い)。
+  let groundingArticles: GroundingArticle[] = [];
+  if (split.parseOk) {
+    try {
+      groundingArticles = await fetchGroundingArticles(internalKey, maskedQuery);
+    } catch (e) {
+      // 候補取得失敗は致命ではない。種別のみ記録 (query/PII は出さない)。
+      console.warn(
+        '[rag/reply-adapter] grounding article 候補取得失敗 (表示なしで継続):',
+        e instanceof Error ? e.message : String(e),
+      );
+      groundingArticles = [];
+    }
+  }
+
   // 方式A: citation は cs 側から取得できない (検索は agent 内 knowledge_search)。
   //   shape 互換のため空配列を返す。十分な根拠が無い場合は agent 自身が本文で
   //   その旨を述べる (self-report)。自動送信ゲートは別途、人間 click 必須を維持。
@@ -427,6 +479,10 @@ export async function generateRagReply(
     draft: split.customerReply,
     internalPreview: split.internalPreview,
     parseOk: split.parseOk,
+    // ↓ 全て社内 read-only 表示専用。draft/保存/送信には絶対に入れない。
+    groundingArticles,
+    internalGroundingText: split.internalGroundingText,
+    internalNotesText: split.internalNotesText,
     citations: [],
     confidence: undefined,
     noAnswer: false,
@@ -436,6 +492,61 @@ export async function generateRagReply(
     maskFailed: false,
     durationMs: Date.now() - startedAt,
   };
+}
+
+/** grounding 候補の最大表示件数 (社内枠が冗長にならないよう cap)。 */
+const MAX_GROUNDING_ARTICLES = 5;
+
+/**
+ * 方式1: masked query で knowledge_search の検索コアを **直接関数呼び出し** し
+ * (HTTP 自己呼出しない)、published かつ未削除の article_id を取得 → cs DB
+ * `knowledge_articles` から実メタ (id/title/question/answer/status) を引く。
+ *
+ * - published かつ deleted_at IS NULL のみ (壊れたリンク防止)。
+ * - id で重複除去し検索順を保ったまま最大 MAX_GROUNDING_ARTICLES 件。
+ * - 実メタ (非マスク) を返すが **社内 read-only 表示専用** で外部送信しない。
+ */
+async function fetchGroundingArticles(
+  internalKey: string,
+  maskedQuery: string,
+): Promise<GroundingArticle[]> {
+  const ids = await searchKnowledgeArticleIds(
+    maskedQuery,
+    MAX_GROUNDING_ARTICLES,
+    internalKey,
+  );
+  if (ids.length === 0) return [];
+
+  const sb = await getSupabaseAdmin();
+  const { data, error } = await sb
+    .from('knowledge_articles')
+    .select('id, title, question, answer, status')
+    .in('id', ids)
+    .eq('status', 'published')
+    .is('deleted_at', null);
+  if (error) {
+    throw new Error(`knowledge_articles メタ取得失敗: ${error.message}`);
+  }
+
+  // id → 行のマップを作り、検索順 (ids の順) を保って並べる。
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const row of data ?? []) {
+    byId.set((row as { id: string }).id, row as Record<string, unknown>);
+  }
+  const out: GroundingArticle[] = [];
+  for (const id of ids) {
+    const row = byId.get(id);
+    if (!row) continue; // published/未削除でない (= 表示しない、壊れたリンク防止)
+    out.push({
+      id: String(row.id),
+      title: (row.title as string | null) ?? null,
+      question: (row.question as string | null) ?? null,
+      answer: (row.answer as string | null) ?? null,
+      status: (row.status as string | null) ?? null,
+    });
+    if (out.length >= MAX_GROUNDING_ARTICLES) break;
+  }
+  return out;
 }
 
 // ---- agent メッセージ構築 (全て masked) -------------------------------------
