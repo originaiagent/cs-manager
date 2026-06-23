@@ -20,12 +20,14 @@ vi.mock('@/lib/credentials', () => ({
 
 // 社内枠 grounding 候補取得が叩く cs DB (knowledge_articles) をモック。
 // 方式1: rag-hybrid-search のヒット article_id を published/未削除でフィルタしメタを返す。
+// full UUID fixture: /knowledge/<id> リンクが full UUID を使うことの回帰検知。
+const ARTICLE_UUID = '11111111-2222-4333-8444-555555555555';
 const articleStore: Record<
   string,
   { id: string; title: string; question: string; answer: string; status: string; deleted_at: string | null }
 > = {
-  'art-1': {
-    id: 'art-1',
+  [ARTICLE_UUID]: {
+    id: ARTICLE_UUID,
     title: '配送日数について',
     question: '配送はどれくらいかかりますか',
     answer: '通常2-3営業日です',
@@ -85,13 +87,13 @@ function installFetchStub(opts: StubOpts = {}) {
       } as any;
     }
     if (u.endsWith('/api/skills/rag-hybrid-search')) {
-      // 社内枠 grounding 候補の再検索 (方式1)。art-1 のみヒットさせる。
+      // 社内枠 grounding 候補の再検索 (方式1)。UUID 記事のみヒットさせる。
       return {
         ok: true,
         status: 200,
         json: async () => ({
           results: [
-            { chunk_id: 'c1', article_id: 'art-1', article_version: 1, content: '配送…' },
+            { chunk_id: 'c1', article_id: ARTICLE_UUID, article_version: 1, content: '配送…' },
           ],
         }),
       } as any;
@@ -166,7 +168,8 @@ describe('reply-adapter PII boundary (方式A)', () => {
     expect(result.searchHitCount).toBe(0);
     // 社内枠: parseOk=true → 方式1 再検索で関連ナレッジ候補 (実メタ) が付く
     expect(result.groundingArticles).toHaveLength(1);
-    expect(result.groundingArticles?.[0].id).toBe('art-1');
+    // full UUID がそのまま返る (/knowledge/<full-id> リンク用)
+    expect(result.groundingArticles?.[0].id).toBe(ARTICLE_UUID);
     expect(result.groundingArticles?.[0].title).toBe('配送日数について');
     expect(result.groundingArticles?.[0].question).toBe('配送はどれくらいかかりますか');
     expect(result.groundingArticles?.[0].answer).toBe('通常2-3営業日です');
