@@ -8,6 +8,12 @@ import { updateRecord } from '../_actions/update-record';
 import { deleteRecord } from '../_actions/delete-record';
 import { listDefectTypes } from '../_actions/list-defect-types';
 import ProductPicker, { type ProductPickerValue } from '@/app/_components/product-picker';
+import Link from 'next/link';
+import {
+  AUTH_EXPIRED_MESSAGE,
+  loginHrefForHere,
+  runAction,
+} from '@/lib/client/auth-recovery';
 
 const ACTION_TYPE_OPTIONS = [
   { value: 'reply_only', label: '返信のみ' },
@@ -169,13 +175,20 @@ export default function RecordForm({
       ticket_id: ticketId || null,
     };
 
-    const result =
+    // 認証切れ (middleware が action を 401/403 で弾く) は throw / 戻り値なしになる。
+    // runAction で捕捉しないと submitting が解除されずボタンが無限ローディングのまま固着する。
+    const r =
       mode === 'create'
-        ? await createRecord(payload)
-        : await updateRecord(initial!.id!, payload);
+        ? await runAction(() => createRecord(payload))
+        : await runAction(() => updateRecord(initial!.id!, payload));
 
-    if (!result.ok) {
-      setError(result.error ?? '保存に失敗しました');
+    if (r.authExpired) {
+      setError(AUTH_EXPIRED_MESSAGE);
+      setSubmitting(false);
+      return;
+    }
+    if (!r.result.ok) {
+      setError(r.result.error ?? '保存に失敗しました');
       setSubmitting(false);
       return;
     }
@@ -188,9 +201,14 @@ export default function RecordForm({
     if (!confirm('この対応記録を削除しますか?')) return;
     setSubmitting(true);
     setError(null);
-    const r = await deleteRecord(initial.id);
-    if (!r.ok) {
-      setError(r.error ?? '削除に失敗しました');
+    const r = await runAction(() => deleteRecord(initial.id!));
+    if (r.authExpired) {
+      setError(AUTH_EXPIRED_MESSAGE);
+      setSubmitting(false);
+      return;
+    }
+    if (!r.result.ok) {
+      setError(r.result.error ?? '削除に失敗しました');
       setSubmitting(false);
       return;
     }
@@ -359,6 +377,14 @@ export default function RecordForm({
       {error && (
         <p className="text-xs text-rose-600 rounded-lg bg-rose-50 border border-rose-200 px-3 py-2">
           {error}
+          {error === AUTH_EXPIRED_MESSAGE && (
+            <Link
+              href={loginHrefForHere()}
+              className="ml-1.5 underline hover:no-underline font-medium"
+            >
+              再ログイン
+            </Link>
+          )}
         </p>
       )}
 

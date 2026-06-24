@@ -2,8 +2,14 @@
 
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { Sparkles } from 'lucide-react';
 import { runInquiryToRecord } from '../_actions/run-inquiry-to-record';
+import {
+  AUTH_EXPIRED_MESSAGE,
+  loginHrefForHere,
+  runAction,
+} from '@/lib/client/auth-recovery';
 
 interface Props {
   ticketId: string;
@@ -28,9 +34,13 @@ export default function InquiryToRecordButton({ ticketId }: Props) {
     setRunning(true);
     setError(null);
     try {
-      const result = await runInquiryToRecord(ticketId);
-      if (!result.ok) {
-        setError(result.error ?? 'AI 起票に失敗しました');
+      const r = await runAction(() => runInquiryToRecord(ticketId));
+      if (r.authExpired) {
+        setError(AUTH_EXPIRED_MESSAGE);
+        return;
+      }
+      if (!r.result.ok) {
+        setError(r.result.error ?? 'AI 起票に失敗しました');
         return;
       }
       // 起票結果 (対応記録) を反映するため再取得。
@@ -55,7 +65,16 @@ export default function InquiryToRecordButton({ ticketId }: Props) {
         <Sparkles size={14} />
         {running ? 'AI 起票中…' : 'AI で対応記録を起票'}
       </button>
-      {error && <p className="text-[10px] text-rose-600 mt-1 max-w-[16rem] text-right">{error}</p>}
+      {error && (
+        <p className="text-[10px] text-rose-600 mt-1 max-w-[16rem] text-right">
+          {error}
+          {error === AUTH_EXPIRED_MESSAGE && (
+            <Link href={loginHrefForHere()} className="ml-1 underline hover:no-underline font-medium">
+              再ログイン
+            </Link>
+          )}
+        </p>
+      )}
     </div>
   );
 }
