@@ -121,98 +121,119 @@ export async function generateRagReply(
   input: RagReplyInput,
 ): Promise<RagReplyResult> {
   const startedAt = Date.now();
+  // defense-in-depth (codex code review): 想定外の throw を呼出側(draft-rag route は catch 無し)に
+  //   伝播させず PII-safe ラベルで握る。種別のみログ・raw は出さない。
+  try {
+    const ticketId = input.ticketId?.trim();
+    if (!ticketId) {
+      return { ok: false, error: 'no_target_ticket', durationMs: Date.now() - startedAt };
+    }
 
-  const ticketId = input.ticketId?.trim();
-  if (!ticketId) {
-    return { ok: false, error: 'no_target_ticket', durationMs: Date.now() - startedAt };
-  }
+    // inquiry_text = 件名 + 本文 (raw)。マスクは origin-ai 側。
+    const inquiryText = [input.subject?.trim(), input.inquiryBody?.trim()]
+      .filter(Boolean)
+      .join('\n\n');
+    if (!inquiryText) {
+      return { ok: false, error: 'empty_inquiry', durationMs: Date.now() - startedAt };
+    }
 
-  // inquiry_text = 件名 + 本文 (raw)。マスクは origin-ai 側。
-  const inquiryText = [input.subject?.trim(), input.inquiryBody?.trim()]
-    .filter(Boolean)
-    .join('\n\n');
-  if (!inquiryText) {
-    return { ok: false, error: 'empty_inquiry', durationMs: Date.now() - startedAt };
-  }
+    // embed input: skill skill-mqort4oa の input_text_keys=[inquiry_text, customer_name] +
+    //   product_status_lookup args_from {product_id}。それ以外 (order_number 等) は送らない。
+    const embedInput: Record<string, unknown> = { inquiry_text: inquiryText };
+    if (input.customerName?.trim()) embedInput.customer_name = input.customerName.trim();
+    if (input.productId?.trim()) embedInput.product_id = input.productId.trim();
 
-  // embed input: skill skill-mqort4oa の input_text_keys=[inquiry_text, customer_name] +
-  //   product_status_lookup args_from {product_id}。それ以外 (order_number 等) は送らない。
-  const embedInput: Record<string, unknown> = { inquiry_text: inquiryText };
-  if (input.customerName?.trim()) embedInput.customer_name = input.customerName.trim();
-  if (input.productId?.trim()) embedInput.product_id = input.productId.trim();
+    // ── 唯一の AI 起動: origin-ai embed (cs-reply:draft) ────────────────────────
+    const run = await runEmbedOneshotAndPoll({
+      slug: WORK_SLUG,
+      targetType: TARGET_TYPE,
+      targetId: ticketId,
+      input: embedInput,
+    });
+    if (!run.ok || !run.result) {
+      return {
+        ok: false,
+        error: run.reason ?? 'embed_run_failed',
+        durationMs: Date.now() - startedAt,
+      };
+    }
 
-  // ── 唯一の AI 起動: origin-ai embed (cs-reply:draft) ────────────────────────
-  const run = await runEmbedOneshotAndPoll({
-    slug: WORK_SLUG,
-    targetType: TARGET_TYPE,
-    targetId: ticketId,
-    input: embedInput,
-  });
-  if (!run.ok || !run.result) {
+    // ── 契約検証 (codex code review FAIL#1): origin-ai の契約崩れを正常応答に丸めない ──
+    //   output_schema は reply_draft(string)/needs_escalation(boolean) を必須化。型不一致は
+    //   契約破壊として ok:false(PII-safe ラベル)で返す。※空文字 reply_draft は valid な string で
+    //   あり契約破壊ではない → 後段の送信安全ゲートで parseOk=false に倒す(別事象)。
+    const r = run.result;
+    if (typeof r.reply_draft !== 'string' || typeof r.needs_escalation !== 'boolean') {
+      return {
+        ok: false,
+        error: 'embed_result_invalid_shape',
+        durationMs: Date.now() - startedAt,
+      };
+    }
+    const replyDraft = r.reply_draft;
+    const needsEscalation = r.needs_escalation;
+    const escalationReason = typeof r.escalation_reason === 'string' ? r.escalation_reason : '';
+    // codex code review FAIL#2: sources の null/非object/配列要素で後段が throw しないよう先に絞る。
+    const sources = (Array.isArray(r.sources) ? r.sources : []).filter(
+      (s): s is Record<string, unknown> => !!s && typeof s === 'object' && !Array.isArray(s),
+    );
+
+    // 送信安全ゲート (codex CONCERN): 構造化 reply_draft の最終バリデーション。
+    // fail-closed: unsafe → draft='' / parseOk=false / internalPreview=reply_draft (手動切出用)。
+    const safe = replyDraft.trim().length > 0 && isCustomerSafeBody(replyDraft);
+
+    // sources → 表示用 citations (knowledge source = article_id を持つもののみ。lookup source は除外)。
+    const citations: RagCitation[] = sources
+      .filter((s) => typeof s.article_id === 'string' && s.article_id)
+      .map((s) => ({
+        chunk_id: typeof s.chunk_id === 'string' ? s.chunk_id : '',
+        article_id: String(s.article_id),
+        article_version: typeof s.article_version === 'number' ? s.article_version : 0,
+        title: null,
+        rrf_score: typeof s.score === 'number' ? s.score : null,
+      }));
+
+    // 社内枠「関連ナレッジ候補」: knowledge source の article_id を cs DB 実メタへ解決 (表示専用・非AI)。
+    //   失敗は致命でない (候補表示の失敗で返信案を捨てない)。raw/PII は出さず種別のみ記録。
+    let groundingArticles: GroundingArticle[] = [];
+    try {
+      groundingArticles = await fetchGroundingMeta(
+        sb,
+        citations.map((c) => c.article_id),
+      );
+    } catch (e) {
+      console.warn('[rag/reply-adapter] grounding メタ取得失敗 (表示なしで継続):', {
+        name: e instanceof Error ? e.name : 'unknown',
+      });
+      groundingArticles = [];
+    }
+
     return {
-      ok: false,
-      error: run.reason ?? 'embed_run_failed',
+      ok: true,
+      // 顧客向け本文のみ (parseOk=false なら '')。raw 全文/社内テキストは draft に入らない。
+      draft: safe ? replyDraft : '',
+      parseOk: safe,
+      // 内枠参照表示用 (送信 path 非流入)。unsafe 時もオペレータが手動切り出しできるよう全文。
+      internalPreview: replyDraft,
+      // ↓ 全て社内 read-only 表示専用。draft/保存/送信には絶対に入れない。
+      groundingArticles,
+      internalGroundingText: '',
+      internalNotesText: needsEscalation ? escalationReason : '',
+      citations,
+      confidence: undefined,
+      noAnswer: false,
+      needsHuman: needsEscalation,
+      model: null,
+      searchHitCount: sources.length,
+      maskFailed: false,
       durationMs: Date.now() - startedAt,
     };
-  }
-
-  // ── 結果写像 (顧客/社内分離) ────────────────────────────────────────────────
-  const r = run.result;
-  const replyDraft = typeof r.reply_draft === 'string' ? r.reply_draft : '';
-  const needsEscalation = r.needs_escalation === true;
-  const escalationReason = typeof r.escalation_reason === 'string' ? r.escalation_reason : '';
-  const sources = Array.isArray(r.sources) ? (r.sources as Record<string, unknown>[]) : [];
-
-  // 送信安全ゲート (codex CONCERN): 構造化 reply_draft の最終バリデーション。
-  // fail-closed: unsafe → draft='' / parseOk=false / internalPreview=reply_draft (手動切出用)。
-  const safe = replyDraft.trim().length > 0 && isCustomerSafeBody(replyDraft);
-
-  // sources → 表示用 citations (knowledge source = article_id を持つもののみ。lookup source は除外)。
-  const citations: RagCitation[] = sources
-    .filter((s) => typeof s.article_id === 'string' && s.article_id)
-    .map((s) => ({
-      chunk_id: typeof s.chunk_id === 'string' ? s.chunk_id : '',
-      article_id: String(s.article_id),
-      article_version: typeof s.article_version === 'number' ? s.article_version : 0,
-      title: null,
-      rrf_score: typeof s.score === 'number' ? s.score : null,
-    }));
-
-  // 社内枠「関連ナレッジ候補」: knowledge source の article_id を cs DB 実メタへ解決 (表示専用・非AI)。
-  //   失敗は致命でない (候補表示の失敗で返信案を捨てない)。raw/PII は出さず種別のみ記録。
-  let groundingArticles: GroundingArticle[] = [];
-  try {
-    groundingArticles = await fetchGroundingMeta(
-      sb,
-      citations.map((c) => c.article_id),
-    );
   } catch (e) {
-    console.warn('[rag/reply-adapter] grounding メタ取得失敗 (表示なしで継続):', {
+    console.error('[rag/reply-adapter] reply_generation_error', {
       name: e instanceof Error ? e.name : 'unknown',
     });
-    groundingArticles = [];
+    return { ok: false, error: 'reply_generation_error', durationMs: Date.now() - startedAt };
   }
-
-  return {
-    ok: true,
-    // 顧客向け本文のみ (parseOk=false なら '')。raw 全文/社内テキストは draft に入らない。
-    draft: safe ? replyDraft : '',
-    parseOk: safe,
-    // 内枠参照表示用 (送信 path 非流入)。unsafe 時もオペレータが手動切り出しできるよう全文。
-    internalPreview: replyDraft,
-    // ↓ 全て社内 read-only 表示専用。draft/保存/送信には絶対に入れない。
-    groundingArticles,
-    internalGroundingText: '',
-    internalNotesText: needsEscalation ? escalationReason : '',
-    citations,
-    confidence: undefined,
-    noAnswer: false,
-    needsHuman: needsEscalation,
-    model: null,
-    searchHitCount: sources.length,
-    maskFailed: false,
-    durationMs: Date.now() - startedAt,
-  };
 }
 
 /**

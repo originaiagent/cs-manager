@@ -121,8 +121,10 @@ export async function runEmbedOneshotAndPoll(
       continue;
     }
     if (json.status === 'completed') {
+      // 汎用ヘルパのため result は「非null object」までを保証する。作業固有の shape 検証
+      // (cs-reply なら reply_draft:string / needs_escalation:boolean) は呼出側の責務。
       const result =
-        json.result && typeof json.result === 'object'
+        json.result && typeof json.result === 'object' && !Array.isArray(json.result)
           ? (json.result as Record<string, unknown>)
           : null;
       if (!result) return { ok: false, reason: 'embed_run_empty_result' };

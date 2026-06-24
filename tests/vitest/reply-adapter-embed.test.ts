@@ -209,6 +209,50 @@ describe('reply-adapter (embed 一本化)', () => {
     expect(mockRun).not.toHaveBeenCalled();
   });
 
+  it('契約破壊 (reply_draft 欠落/型違い) は ok=false / embed_result_invalid_shape (正常応答に丸めない)', async () => {
+    mockRun.mockResolvedValue({
+      ok: true,
+      result: { needs_escalation: false, sources: [] }, // reply_draft 欠落
+    });
+
+    const result = await generateRagReply(fakeSb, baseInput);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('embed_result_invalid_shape');
+  });
+
+  it('契約破壊 (needs_escalation 非boolean) も ok=false / embed_result_invalid_shape', async () => {
+    mockRun.mockResolvedValue({
+      ok: true,
+      result: { reply_draft: SAFE_DRAFT, needs_escalation: 'no', sources: [] },
+    });
+
+    const result = await generateRagReply(fakeSb, baseInput);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('embed_result_invalid_shape');
+  });
+
+  it('malformed sources (null / 非object 要素) でも throw せず安全に処理', async () => {
+    mockRun.mockResolvedValue({
+      ok: true,
+      result: {
+        reply_draft: SAFE_DRAFT,
+        needs_escalation: false,
+        sources: [null, 'x', 123, { kind: 'cs_knowledge', article_id: ARTICLE_UUID, score: 0.5 }],
+      },
+    });
+
+    const result = await generateRagReply(fakeSb, baseInput);
+
+    expect(result.ok).toBe(true);
+    expect(result.parseOk).toBe(true);
+    // 有効 object source のみ反映 (null/'x'/123 は除外)
+    expect(result.searchHitCount).toBe(1);
+    expect(result.citations).toHaveLength(1);
+    expect(result.groundingArticles).toHaveLength(1);
+  });
+
   it('embed 失敗は ok=false + PII-safe ラベル (raw 非露出)', async () => {
     mockRun.mockResolvedValue({ ok: false, reason: 'embed_run_poll_deadline' });
 
