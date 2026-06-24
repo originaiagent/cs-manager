@@ -83,10 +83,11 @@ export async function ingestInboundWithDraft(
     return { status: 'duplicate', ticketId };
   }
 
-  // origin-ai RAG でドラフト生成 (PII boundary は adapter 内で厳守)
+  // origin-ai embed (cs-reply:draft) でドラフト生成。embed target_id には upsert 済 ticketId を渡す
+  // (ragInput は ticket 作成前に組まれるため ticketId を持たない。ここで注入する)。
   let ragResult: RagReplyResult;
   try {
-    ragResult = await generate(sb, params.ragInput);
+    ragResult = await generate(sb, { ...params.ragInput, ticketId });
   } catch (e) {
     // 例外メッセージは外部に出さない (PII 安全)。種別のみログ。
     console.error('[ingest-inbound] rag_exception', {

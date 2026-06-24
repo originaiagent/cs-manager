@@ -119,7 +119,7 @@ export async function POST(
   //     専用カラムは無い。よくあるキーを case-insensitive で探索し最初の非空値を採用。
   const orderNumber = extractOrderNumber(ticket.channel_meta);
 
-  // 4. RAG 返信案生成 (PII boundary は adapter 内で厳守)
+  // 4. RAG 返信案生成 (PII マスク/検索/生成は origin-ai embed cs-reply:draft が担う)
   const result = await generateRagReply(sb, {
     subject: ticket.subject ?? null,
     inquiryBody,
@@ -128,6 +128,9 @@ export async function POST(
     category: ticket.case_category ?? null,
     channelId: ticket.channel_id ?? null,
     tenantId: null,
+    // embed target + product lookup 用 (origin-ai 側 product_status_lookup の引数)。
+    ticketId: ticket.id,
+    productId: (ticket.product_id as string | null) ?? null,
   });
 
   if (!result.ok) {
