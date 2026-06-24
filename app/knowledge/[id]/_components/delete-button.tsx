@@ -2,8 +2,14 @@
 
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { Trash2, Loader2 } from 'lucide-react';
 import { deleteArticle } from '../../_actions/delete-article';
+import {
+  AUTH_EXPIRED_MESSAGE,
+  loginHrefForHere,
+  runAction,
+} from '@/lib/client/auth-recovery';
 
 interface Props {
   articleId: string;
@@ -24,9 +30,14 @@ export default function DeleteButton({ articleId, articleTitle }: Props) {
     setSubmitting(true);
     setError(null);
     try {
-      const result = await deleteArticle(articleId);
-      if (!result.ok) {
-        throw new Error(result.error ?? 'delete failed');
+      const r = await runAction(() => deleteArticle(articleId));
+      if (r.authExpired) {
+        setError(AUTH_EXPIRED_MESSAGE);
+        setSubmitting(false);
+        return;
+      }
+      if (!r.result.ok) {
+        throw new Error(r.result.error ?? 'delete failed');
       }
       startTransition(() => router.push('/knowledge'));
       router.refresh();
@@ -48,7 +59,14 @@ export default function DeleteButton({ articleId, articleTitle }: Props) {
         削除
       </button>
       {error && (
-        <p className="text-xs text-rose-600 mt-1">{error}</p>
+        <p className="text-xs text-rose-600 mt-1">
+          {error}
+          {error === AUTH_EXPIRED_MESSAGE && (
+            <Link href={loginHrefForHere()} className="ml-1.5 underline hover:no-underline font-medium">
+              再ログイン
+            </Link>
+          )}
+        </p>
       )}
     </div>
   );

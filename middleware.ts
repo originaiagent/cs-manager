@@ -27,6 +27,37 @@ import {
  */
 const PUBLIC_PATHS = ['/login', '/api'];
 
+/**
+ * Server Action の POST リクエストか判定する。
+ *
+ * Server Action (client から呼ぶ import/onClick 型) は現在ページ経路への POST として飛び、
+ * Next.js が `Next-Action` ヘッダを付与する (Next 14.2.x: server-action-request-meta.js)。
+ * この種のリクエストを middleware が `NextResponse.redirect` で弾くと、Next.js が action 応答を
+ * redirect 先へ forward しようとして edge で失敗し ("failed to forward action response:
+ * fetch failed")、ブラウザ側の action Promise が永久に未解決 → UI 無限ローディングになる。
+ * → Server Action だけは redirect せず素の 401/403 を返す (下記 actionAuthResponse)。
+ *
+ * 注意: 将来 `<form action={serverAction}>` 型 (urlencoded/multipart) を使う場合、本判定では
+ * 取りこぼし得るため Next 本体の判定ロジックに寄せる必要がある (現状は onClick/import 型のみ)。
+ */
+function isServerActionRequest(req: NextRequest): boolean {
+  return req.method === 'POST' && req.headers.has('next-action');
+}
+
+/**
+ * Server Action 認証失敗時の応答。redirect は forward 不能で無限ハングを招くため使わない。
+ * body / header に token / PII を一切載せない。client は 401/403 (もしくは戻り値なし) を
+ * 認証切れとして扱い、ローディング解除 + 再ログイン誘導で復帰する。
+ */
+function actionAuthResponse(status: number, opts?: { clearCookie?: boolean }): NextResponse {
+  const res = new NextResponse(null, { status });
+  res.headers.set('Cache-Control', 'no-store');
+  if (opts?.clearCookie) {
+    res.cookies.set(sessionCookieName(), '', { path: '/', maxAge: 0 });
+  }
+  return res;
+}
+
 export async function middleware(req: NextRequest) {
   if (!isCoreAuthEnabled()) {
     return NextResponse.next();
@@ -37,9 +68,12 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
+  const isAction = isServerActionRequest(req);
+
   const token = extractAccessToken(req.cookies.get(sessionCookieName())?.value);
 
   if (!token) {
+    if (isAction) return actionAuthResponse(401);
     const url = req.nextUrl.clone();
     url.pathname = '/login';
     url.search = '';
@@ -52,6 +86,7 @@ export async function middleware(req: NextRequest) {
     user = await verifyCoreAccessToken(token);
   } catch {
     // 無効・期限切れトークン: cookie を削除しつつ再ログインへ。
+    if (isAction) return actionAuthResponse(401, { clearCookie: true });
     const url = req.nextUrl.clone();
     url.pathname = '/login';
     url.search = '';
@@ -62,6 +97,8 @@ export async function middleware(req: NextRequest) {
   }
 
   if (user.toolAccess?.[TOOL_KEY] !== true) {
+    // 認可不足は認証切れとは別 (403)。再ログインでは解決しないため redirect も error=forbidden。
+    if (isAction) return actionAuthResponse(403);
     const url = req.nextUrl.clone();
     url.pathname = '/login';
     url.search = '';

@@ -7,6 +7,12 @@ import ProductSuggest from './product-suggest';
 import ProductPicker, { type ProductPickerValue } from '@/app/_components/product-picker';
 import { createArticle } from '../_actions/create-article';
 import { updateArticle } from '../_actions/update-article';
+import Link from 'next/link';
+import {
+  AUTH_EXPIRED_MESSAGE,
+  loginHrefForHere,
+  runAction,
+} from '@/lib/client/auth-recovery';
 
 interface ChannelOption {
   code: string;
@@ -132,12 +138,17 @@ export default function ArticleForm({ channels, initial, mode }: Props) {
       return;
     }
     try {
-      const result =
+      const r =
         mode === 'edit'
-          ? await updateArticle(initial!.id!, payload)
-          : await createArticle(payload);
-      if (!result.ok) throw new Error(result.error ?? '保存失敗');
-      const id = result.article?.id ?? initial?.id;
+          ? await runAction(() => updateArticle(initial!.id!, payload))
+          : await runAction(() => createArticle(payload));
+      if (r.authExpired) {
+        setError(AUTH_EXPIRED_MESSAGE);
+        setSaving(false);
+        return;
+      }
+      if (!r.result.ok) throw new Error(r.result.error ?? '保存失敗');
+      const id = r.result.article?.id ?? initial?.id;
       startTransition(() => router.push(`/knowledge/${id}`));
     } catch (e: any) {
       setError(e?.message ?? 'unknown error');
@@ -347,6 +358,14 @@ export default function ArticleForm({ channels, initial, mode }: Props) {
       {error && (
         <p className="text-xs text-rose-600 rounded-lg bg-rose-50 border border-rose-200 px-3 py-2">
           {error}
+          {error === AUTH_EXPIRED_MESSAGE && (
+            <Link
+              href={loginHrefForHere()}
+              className="ml-1.5 underline hover:no-underline font-medium"
+            >
+              再ログイン
+            </Link>
+          )}
         </p>
       )}
 

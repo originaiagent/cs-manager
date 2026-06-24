@@ -21,6 +21,11 @@ import {
   type GroundingArticle,
 } from '../_actions/generate-rag-draft';
 import { saveDraft } from '../_actions/save-draft';
+import {
+  AUTH_EXPIRED_MESSAGE,
+  loginHrefForHere,
+  runAction,
+} from '@/lib/client/auth-recovery';
 import KnowledgeMetaPopover from './knowledge-meta-popover';
 
 interface Props {
@@ -63,7 +68,7 @@ type RagState =
       lowConfidenceThreshold: number;
       durationMs: number;
     }
-  | { kind: 'error'; error: string };
+  | { kind: 'error'; error: string; authExpired?: boolean };
 
 /** 低 confidence 警告の既定閾値 (サーバ rag_config 未取得時のみのフォールバック) */
 const DEFAULT_LOW_CONFIDENCE_THRESHOLD = 0.5;
@@ -103,9 +108,13 @@ export default function ReplyForm({
     setSavingManual(true);
     setSaveError(null);
     try {
-      const result = await saveDraft(ticketId, body, 'manual');
-      if (!result.ok) {
-        throw new Error(result.error ?? 'save failed');
+      const r = await runAction(() => saveDraft(ticketId, body, 'manual'));
+      if (r.authExpired) {
+        setSaveError(AUTH_EXPIRED_MESSAGE);
+        return;
+      }
+      if (!r.result.ok) {
+        throw new Error(r.result.error ?? 'save failed');
       }
       setSavedAt(new Date().toISOString());
       setSource('manual');
@@ -120,7 +129,14 @@ export default function ReplyForm({
   async function generateRag() {
     setRag({ kind: 'loading' });
     const startedAt = Date.now();
-    const result = await generateRagDraft(ticketId);
+    // 認証切れ (middleware が action を 401/403 で弾く) は throw / 戻り値なしになるため、
+    // runAction で捕捉して loading を解除し再ログイン導線を出す (無限ローディング固着の防止)。
+    const r = await runAction(() => generateRagDraft(ticketId));
+    if (r.authExpired) {
+      setRag({ kind: 'error', error: AUTH_EXPIRED_MESSAGE, authExpired: true });
+      return;
+    }
+    const result = r.result;
     if (!result.ok || typeof result.draft !== 'string') {
       setRag({ kind: 'error', error: result.error ?? 'unknown error' });
       return;
@@ -156,11 +172,15 @@ export default function ReplyForm({
     setRag({ kind: 'idle' });
     // 採用 = source='ai_draft' で、顧客向け本文のみを is_separated=true で永続化。
     try {
-      const r = await saveDraft(ticketId, adopted, 'ai_draft', {
-        is_separated: true,
-      });
-      if (!r.ok) {
-        setSaveError(r.error ?? '保存に失敗しました');
+      const r = await runAction(() =>
+        saveDraft(ticketId, adopted, 'ai_draft', { is_separated: true }),
+      );
+      if (r.authExpired) {
+        setSaveError(AUTH_EXPIRED_MESSAGE);
+        return;
+      }
+      if (!r.result.ok) {
+        setSaveError(r.result.error ?? '保存に失敗しました');
         return;
       }
       setSavedAt(new Date().toISOString());
@@ -424,12 +444,21 @@ export default function ReplyForm({
       {rag.kind === 'error' && (
         <div className="mb-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
           返信案生成失敗: {rag.error}
-          <button
-            onClick={generateRag}
-            className="ml-2 underline hover:no-underline"
-          >
-            再試行
-          </button>
+          {rag.authExpired ? (
+            <Link
+              href={loginHrefForHere()}
+              className="ml-2 underline hover:no-underline font-medium"
+            >
+              再ログイン
+            </Link>
+          ) : (
+            <button
+              onClick={generateRag}
+              className="ml-2 underline hover:no-underline"
+            >
+              再試行
+            </button>
+          )}
         </div>
       )}
 
@@ -468,7 +497,17 @@ export default function ReplyForm({
 
         <div className="flex items-center gap-2">
           {saveError && (
-            <span className="text-[11px] text-rose-600">{saveError}</span>
+            <span className="text-[11px] text-rose-600">
+              {saveError}
+              {saveError === AUTH_EXPIRED_MESSAGE && (
+                <Link
+                  href={loginHrefForHere()}
+                  className="ml-1.5 underline hover:no-underline font-medium"
+                >
+                  再ログイン
+                </Link>
+              )}
+            </span>
           )}
           <button
             type="button"

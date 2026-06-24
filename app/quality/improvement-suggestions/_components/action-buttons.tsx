@@ -4,6 +4,7 @@ import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { Check, X, Pencil, Loader2 } from 'lucide-react';
 import { updateProposalStatus, type ProposalKind } from '@/app/quality/_actions/update-proposal-status';
+import { AUTH_EXPIRED_MESSAGE, runAction } from '@/lib/client/auth-recovery';
 
 interface Props {
   id: string;
@@ -35,9 +36,13 @@ export default function ActionButtons({ id, kind, status, options }: Props) {
     if (busy) return;
     setBusy(next);
     try {
-      const result = await updateProposalStatus(kind, id, next);
-      if (!result.ok) {
-        throw new Error(result.error ?? '更新に失敗しました');
+      const r = await runAction(() => updateProposalStatus(kind, id, next));
+      if (r.authExpired) {
+        alert(AUTH_EXPIRED_MESSAGE);
+        return;
+      }
+      if (!r.result.ok) {
+        throw new Error(r.result.error ?? '更新に失敗しました');
       }
       startTransition(() => router.refresh());
     } catch (e: any) {
