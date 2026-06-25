@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authorizeApiRoute } from '@/lib/auth/api-auth';
+import { getEntryKeys, fetchWithEntryKeys } from '@/lib/core-entry-keys';
 
 /**
  * 親グループ検索エンドポイント (PR-EF: Core 親子構造に厳密準拠)。
@@ -14,7 +15,6 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const CORE_API_URL = process.env.CORE_API_URL?.replace(/\s+$/, '');
-const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
 
 interface CacheEntry {
   ts: number;
@@ -41,7 +41,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, items: cached.items, cached: true });
   }
 
-  if (!CORE_API_URL || !INTERNAL_API_KEY) {
+  const entryKeys = getEntryKeys();
+  if (!CORE_API_URL || entryKeys.length === 0) {
     return NextResponse.json(
       { ok: false, items: [], error: 'CORE_API_URL / INTERNAL_API_KEY not configured' },
       { status: 503 },
@@ -50,13 +51,19 @@ export async function GET(req: NextRequest) {
 
   const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/product-groups?q=${encodeURIComponent(q)}&limit=${FETCH_LIMIT}&fields=${encodeURIComponent(FIELDS)}`;
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { 'X-Internal-API-Key': INTERNAL_API_KEY, Accept: 'application/json' },
-      cache: 'no-store',
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await fetchWithEntryKeys(
+      url,
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(10_000),
+      },
+      { entryKeys },
+    );
     if (!res.ok) {
+      // 非 2xx の body は反射しない (status のみ)。
+      try { await res.arrayBuffer(); } catch { /* ignore */ }
       return NextResponse.json(
         { ok: false, items: [], error: `Core ${res.status}` },
         { status: 502 },

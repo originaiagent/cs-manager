@@ -4,17 +4,17 @@
  * 設計レビュー: Gemini APPROVE (2026-05-07)
  *
  * - エンドポイント: GET ${CORE_API_URL}/api/credentials/:service_code?scope_key=...&as_of=...
- * - 認証: X-Internal-API-Key (process.env.INTERNAL_API_KEY)
+ * - 認証: X-Internal-API-Key。entry 鍵は CORE_CREDENTIAL_KEY(scoped, 優先) → INTERNAL_API_KEY(global)
+ *   を順試行し、401/403 で次鍵へ retry する (接続鍵 Core 集約 staged rollout)。詳細は core-entry-keys.ts。
  * - キャッシュ: プロセス内 Map (TTL 5 分)。Vercel Functions のコールドスタートで失効する想定で OK
  * - cs-manager 内に楽天等の鍵類は持たない (env も含めて)
  */
+import { getEntryKeys, fetchWithEntryKeys } from '@/lib/core-entry-keys';
+
 // CORE_API_URL / INTERNAL_API_KEY は call-time に解決する (module-init 固定にしない)。
 // 本番では env は静的なため挙動不変。テスト/複数 import 時の env 上書き順序に依存しないため。
 function envCoreApiUrl(): string | undefined {
   return process.env.CORE_API_URL?.replace(/\s+$/, '');
-}
-function envInternalApiKey(): string | undefined {
-  return process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
 }
 const CORE_API_TIMEOUT_MS = process.env.CORE_API_TIMEOUT_MS
   ? parseInt(process.env.CORE_API_TIMEOUT_MS, 10)
@@ -84,11 +84,18 @@ export async function getCredential<T = Record<string, unknown>>(
   opts: GetCredentialOptions = {},
 ): Promise<CredentialResponse<T>> {
   const coreUrl = opts.coreApiUrl ?? envCoreApiUrl();
-  const apiKey = opts.internalApiKey ?? envInternalApiKey();
+  // entry 鍵: scoped (CORE_CREDENTIAL_KEY) 優先・global (INTERNAL_API_KEY) fallback を順試行し
+  // 401/403 で次鍵へ retry する (staged rollout 安全)。テストは opts.internalApiKey で単一鍵注入可。
+  const entryKeys =
+    opts.internalApiKey !== undefined
+      ? opts.internalApiKey
+        ? [opts.internalApiKey]
+        : []
+      : getEntryKeys();
   if (!coreUrl) {
     throw new CredentialFetchError('CORE_API_URL is not set', null, serviceCode, scopeKey);
   }
-  if (!apiKey) {
+  if (entryKeys.length === 0) {
     throw new CredentialFetchError(
       'INTERNAL_API_KEY is not set',
       null,
@@ -111,16 +118,18 @@ export async function getCredential<T = Record<string, unknown>>(
   );
   if (scopeKey) url.searchParams.set('scope_key', scopeKey);
 
+  // entry 鍵を順試行し 401/403 で次鍵 retry。network/timeout は即 throw。
   let res: Response;
   try {
-    res = await fetchFn(url.toString(), {
-      method: 'GET',
-      headers: {
-        'X-Internal-API-Key': apiKey,
-        Accept: 'application/json',
+    res = await fetchWithEntryKeys(
+      url.toString(),
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
       },
-      signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
-    });
+      { fetchImpl: fetchFn, entryKeys },
+    );
   } catch (err: any) {
     const isTimeout = err?.name === 'TimeoutError' || err?.name === 'AbortError';
     throw new CredentialFetchError(
@@ -134,9 +143,14 @@ export async function getCredential<T = Record<string, unknown>>(
   }
 
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
+    // 非 2xx の body は呼出元へ反射しない (secret/内部情報の反射防止)。status のみ扱う。
+    try {
+      await res.arrayBuffer();
+    } catch {
+      /* ignore */
+    }
     throw new CredentialFetchError(
-      `Core ${res.status} ${res.statusText}: ${text.slice(0, 300)}`,
+      `Core ${res.status} ${res.statusText}`,
       res.status,
       serviceCode,
       scopeKey,
@@ -164,6 +178,37 @@ export async function getCredentialsParallel<T = Record<string, unknown>>(
   return Promise.all(
     requests.map((r) => getCredential<T>(r.serviceCode, r.scopeKey ?? null, opts)),
   );
+}
+
+/**
+ * inbound 検証用の共有内部鍵の照合候補を返す。
+ *
+ * origin-core が本ツールの /api/ai/manifest・/api/ai/capabilities/* 等を叩く際に送る
+ * X-Internal-API-Key の正本値 (= 旧 global INTERNAL_API_KEY) を Core から取得する。
+ * service_code='core_internal_shared'(全ツール共通値・scoped 入口鍵とは別物)。
+ *
+ * 移行期は env INTERNAL_API_KEY / INTERNAL_API_KEY_NEW も候補に含める (Phase5 で除去)。
+ * Core 未登録/未到達時も env fallback で継続する (fail-open しない: 候補が空なら呼出側で 401)。
+ * 値・取得失敗理由はログに出さない。呼出側は定数時間比較すること。
+ *
+ * 接続鍵 Core 集約 (origin-core #332)。代表ツール ys-staff-tool の getInboundVerifyKeys と同型。
+ */
+export async function getInboundVerifyKeys(): Promise<string[]> {
+  const keys: string[] = [];
+  try {
+    const cred = await getCredential<{ api_key?: string }>('core_internal_shared');
+    const v = cred.credentials?.api_key?.replace(/\s+$/, '');
+    if (v) keys.push(v);
+  } catch {
+    // Core 未登録/未到達は移行期 env fallback のみで継続。値・理由は出さない。
+  }
+  const envOld = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
+  const envNew = process.env.INTERNAL_API_KEY_NEW?.replace(/\s+$/, '');
+  // 重複除外しつつ追加。
+  for (const v of [envOld, envNew]) {
+    if (v && !keys.includes(v)) keys.push(v);
+  }
+  return keys;
 }
 
 /** テスト用: キャッシュ全クリア */

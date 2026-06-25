@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authorizeApiRoute } from '@/lib/auth/api-auth';
+import { getEntryKeys, fetchWithEntryKeys } from '@/lib/core-entry-keys';
 
 /**
  * 親グループの子バリエーション一覧取得 (PR-EF)。
@@ -10,7 +11,6 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const CORE_API_URL = process.env.CORE_API_URL?.replace(/\s+$/, '');
-const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
 
 interface CacheEntry {
   ts: number;
@@ -31,7 +31,8 @@ export async function GET(req: NextRequest, { params }: { params: { groupId: str
   if (cached && now - cached.ts < TTL_MS) {
     return NextResponse.json({ ok: true, variations: cached.variations, cached: true });
   }
-  if (!CORE_API_URL || !INTERNAL_API_KEY) {
+  const entryKeys = getEntryKeys();
+  if (!CORE_API_URL || entryKeys.length === 0) {
     return NextResponse.json(
       { ok: false, variations: [], error: 'CORE_API_URL / INTERNAL_API_KEY not configured' },
       { status: 503 },
@@ -39,13 +40,19 @@ export async function GET(req: NextRequest, { params }: { params: { groupId: str
   }
   const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/product-groups/${encodeURIComponent(groupId)}?include=products&productFields=${encodeURIComponent('id,product_name,variation,jan_code')}`;
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: { 'X-Internal-API-Key': INTERNAL_API_KEY, Accept: 'application/json' },
-      cache: 'no-store',
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await fetchWithEntryKeys(
+      url,
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(10_000),
+      },
+      { entryKeys },
+    );
     if (!res.ok) {
+      // 非 2xx の body は反射しない (status のみ)。
+      try { await res.arrayBuffer(); } catch { /* ignore */ }
       return NextResponse.json({ ok: false, variations: [], error: `Core ${res.status}` }, { status: 502 });
     }
     const data = await res.json();
