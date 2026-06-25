@@ -30,14 +30,18 @@ export type LineSendOutcome = 'sent' | 'transient' | 'permanent';
  *
  * - 2xx: 送信成功。
  * - 409: 同一 X-Line-Retry-Key が既に受理済 (= 配送済) → 送信成功扱い。
+ * - 401: channel_access_token の失効/ローテーション (Core credential 5分キャッシュが旧トークンを
+ *        保持している場合を含む) = チャネル単位の修復可能な認証問題 → transient (token 修正後に再送)。
+ *        codex review P2: permanent にすると顧客返信が手動修復まで恒久 drop されるため retryable にする。
  * - 429: rate limit は transient (再送可)。月間送信上限超過は当月再送不可なので permanent
  *        (cron 連打を防ぐ。本文の "monthly limit" で判別)。
  * - 5xx: transient。
- * - その他 4xx (400/401/403/404 等): permanent (再送しても成功しない)。
+ * - その他 4xx (400/403/404 等): permanent (per-draft の不正/宛先不可で再送しても成功しない)。
  */
 export function classifyLineSend(status: number, rawBody: string): LineSendOutcome {
   if (status >= 200 && status < 300) return 'sent';
   if (status === 409) return 'sent';
+  if (status === 401) return 'transient';
   if (status === 429) return isMonthlyLimitExceeded(rawBody) ? 'permanent' : 'transient';
   if (status >= 500) return 'transient';
   return 'permanent';

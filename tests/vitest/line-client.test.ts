@@ -101,15 +101,17 @@ describe('classifyLineSend', () => {
     expect(classifyLineSend(500, '')).toBe('transient');
     expect(classifyLineSend(503, '')).toBe('transient');
   });
+  it('401 (token失効/ローテーション) は transient (修復可能なチャネル認証問題)', () => {
+    expect(classifyLineSend(401, '{"message":"Authentication failed"}')).toBe('transient');
+  });
   it('429 rate-limit は transient、月間上限は permanent', () => {
     expect(classifyLineSend(429, '{"message":"Too Many Requests"}')).toBe('transient');
     expect(classifyLineSend(429, '{"message":"You have reached your monthly limit."}')).toBe(
       'permanent',
     );
   });
-  it('その他 4xx は permanent', () => {
+  it('その他 4xx (400/403/404) は permanent', () => {
     expect(classifyLineSend(400, '')).toBe('permanent');
-    expect(classifyLineSend(401, '')).toBe('permanent');
     expect(classifyLineSend(403, '')).toBe('permanent');
     expect(classifyLineSend(404, '')).toBe('permanent');
   });

@@ -263,3 +263,8 @@ alter table public.ticket_drafts add constraint ticket_drafts_status_check
   → **ingest を source.type='user' (1:1) に限定** (`isReplyableUserTextEvent`、inbound route で gate)。
   group/room は 1:1 push で返信不能のため取り込まない (会話単位束ねは別設計)。衝突源を断ち、
   channel_meta から宛先を解決しても誤送しない。resolvePushUserId (sourceType='user' ガード) は多層防御で残置。
+
+3回目 (credits 回復後の最終 re-review) で P2 を 1 件指摘 → 修正:
+- **P2 401 を terminal failed にしない**: channel_access_token 失効/ローテーション (Core 5分キャッシュが旧トークン
+  保持を含む) の 401 を permanent 扱いすると、token 修正後も顧客返信が再送されず恒久 drop。
+  → `classifyLineSend` で **401=transient** (approved 維持・次 cron 再送)。400/403/404 は per-draft permanent のまま。

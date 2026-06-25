@@ -215,6 +215,15 @@ describe('sendApprovedLineDrafts orchestration', () => {
     expect(repo.drafts.get('d1')!.status).toBe('failed');
   });
 
+  it('401 (token失効) → approved に戻す (failedにせず再送 codex P2)', async () => {
+    const repo = new FakeRepo([draft('d1')]);
+    const client = clientReturning(() => new Response(JSON.stringify({ message: 'auth failed' }), { status: 401 }));
+    const res = await runSend(repo, client);
+    expect(res.failed).toBe(1);
+    // token 修正後に再送できるよう approved 維持 (顧客返信を恒久 drop しない)。
+    expect(repo.drafts.get('d1')!.status).toBe('approved');
+  });
+
   it('429 月間上限 → failed (再送しない)', async () => {
     const repo = new FakeRepo([draft('d1')]);
     const client = clientReturning(
