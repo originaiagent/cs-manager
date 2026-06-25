@@ -78,6 +78,22 @@ export function extractRawUserId(channelMeta: unknown): string | null {
 }
 
 /**
+ * channel_meta から「push してよい 1:1 ユーザーの userId」を解決する (純関数)。
+ *
+ * source.type='user' かつ userId が 1:1 形式 ('U' 始まり) の時のみ userId を返す。
+ * group/room は sender の userId が入っていても 1:1 宛先ではない (private 誤送になる) ため null。
+ * codex review P2: source.type を確認せず userId だけで push すると group/room の返信が
+ * 送信者個人へ private 送信されてしまうのを防ぐ。
+ */
+export function resolvePushUserId(channelMeta: unknown): string | null {
+  if (!channelMeta || typeof channelMeta !== 'object') return null;
+  const meta = channelMeta as Record<string, unknown>;
+  if (meta.sourceType !== 'user') return null;
+  const userId = extractRawUserId(channelMeta);
+  return isValidPushUserId(userId) ? userId : null;
+}
+
+/**
  * external_message_id を組み立てる (純関数)。
  * 優先: sentMessages[0].id > (409: x-line-accepted-request-id) > (2xx: x-line-request-id) > draftId fallback。
  * x-line-request-id は再試行リクエスト側 ID なので配送識別子としては弱く、409 では accepted を優先する。
@@ -130,6 +146,8 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
     if (error) throw new Error(`reclaimStaleSending(select) failed: ${error.message}`);
 
     const now = Date.now();
+    const releaseCutoffIso = new Date(now - STALE_RECLAIM_MS).toISOString(); // 15min 前
+    const failCutoffIso = new Date(now - RETRY_KEY_EXPIRY_MS).toISOString(); // 24h 前
     const releaseIds: string[] = [];
     const failIds: string[] = [];
     for (const row of (data ?? []) as Array<{ id: string; updated_at: string }>) {
@@ -139,6 +157,9 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
       else if (ageMs > STALE_RECLAIM_MS) releaseIds.push(row.id);
     }
 
+    // codex review P1: id 限定だけだと、SELECT 後に別 cron が同一行を再 claim/送信した場合に
+    // fresh な 'sending' / 'sent' 行を踏み潰し得る。UPDATE 側にも status='sending' かつ
+    // 「閾値より古い updated_at」を再ガードし、再 claim (updated_at=now) / 送信済 を除外する。
     if (releaseIds.length > 0) {
       const { error: relErr } = await supa
         .from('ticket_drafts')
@@ -147,7 +168,9 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
           updated_at: new Date().toISOString(),
           last_error: 'line: reclaimed stale sending (>15m, retry-key still valid)',
         })
-        .in('id', releaseIds);
+        .in('id', releaseIds)
+        .eq('status', 'sending')
+        .lt('updated_at', releaseCutoffIso);
       if (relErr) throw new Error(`reclaimStaleSending(release) failed: ${relErr.message}`);
     }
     if (failIds.length > 0) {
@@ -157,7 +180,9 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
           status: 'failed',
           last_error: 'line: sending stale >24h (retry-key expired, manual review)',
         })
-        .in('id', failIds);
+        .in('id', failIds)
+        .eq('status', 'sending')
+        .lt('updated_at', failCutoffIso);
       if (failErr) throw new Error(`reclaimStaleSending(fail) failed: ${failErr.message}`);
     }
     return { released: releaseIds.length, failed: failIds.length };
@@ -204,7 +229,8 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
         id: r.id,
         body: r.body,
         ticketId: meta?.ticketId ?? '',
-        toUserId: extractRawUserId(meta?.channelMeta),
+        // source.type='user' の 1:1 のみ push 宛先に解決 (group/room は null → 送信側で failed)。
+        toUserId: resolvePushUserId(meta?.channelMeta),
       };
     });
   }
@@ -362,21 +388,34 @@ export async function sendApprovedLineDrafts(
 
       // 3c. 分類して状態遷移
       if (outcome === 'sent') {
+        // codex review P2: push は配信成功済。ここでの DB 失敗で approved に戻すと
+        // (markSent/upsert が 24h 超え続けて失敗した場合) retry-key 失効後に再配信され二重送信になる。
+        // → DB 失敗時は requeue せず 'sending' のまま残す。
+        //   15m–24h は stale 再回収で approved→再送→409(既受理)で安全に収束、
+        //   >24h は stale 再回収で failed (再送せず手動レビュー)。
         const sentAt = new Date().toISOString();
         const externalMessageId = buildExternalMessageId(result, draft.id);
-        await repo.markSent(draft.id, externalMessageId, sentAt);
-        await repo.upsertOutboundMessage(
-          draft.ticketId,
-          formatChannelMessageId('line-reply', draft.id),
-          draft.body,
-          sentAt,
-        );
-        succeeded += 1;
-        logger.info('line.outbound.sent', {
-          draftId: draft.id,
-          status: result.status,
-          externalMessageId,
-        });
+        try {
+          await repo.markSent(draft.id, externalMessageId, sentAt);
+          await repo.upsertOutboundMessage(
+            draft.ticketId,
+            formatChannelMessageId('line-reply', draft.id),
+            draft.body,
+            sentAt,
+          );
+          succeeded += 1;
+          logger.info('line.outbound.sent', {
+            draftId: draft.id,
+            status: result.status,
+            externalMessageId,
+          });
+        } catch (dbErr) {
+          // 配信済 / DB 記録失敗。status は 'sending' のまま (requeue しない)。
+          failed += 1;
+          const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
+          errors.push({ draftId: draft.id, error: `sent-but-record-failed: ${msg}` });
+          logger.error('line.outbound.sent_record_failed', { draftId: draft.id, error: msg });
+        }
       } else if (outcome === 'permanent') {
         const msg = `line push permanent ${result.status}: ${result.rawBody.slice(0, 300)}`;
         await repo.markFailed(draft.id, msg);

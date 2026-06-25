@@ -245,3 +245,13 @@ alter table public.ticket_drafts add constraint ticket_drafts_status_check
 
 **1回目 CONCERN の要旨**: 「大枠承認可。ただし userId欠落・恒久4xx の approved 維持は無限再送リスク →
 非リトライ失敗状態と送信排他を設計に明記すべき」。→ §3.2 (claim + 失敗分類) / §3.5 (status 追加) で解消済み。
+
+### 7.1 実装後 codex code review (codex review --commit, 2026-06-25)
+1回目 3 指摘 → 全て修正 → PASS:
+- **P1 stale 再回収レース**: SELECT→id 限定 UPDATE だけだと並行 cron が再 claim した fresh 'sending' を
+  踏み潰し得る。→ UPDATE に `status='sending'` + `updated_at < 閾値` を再ガード (outbound.ts reclaimStaleSending)。
+- **P2a group/room 誤送**: group/room の source にも sender userId が入るため userId だけで push すると
+  個人へ private 誤送。→ normalize で `channel_meta.sourceType` を保存し、送信は `resolvePushUserId`
+  (sourceType='user' の 1:1 のみ push、それ以外 null→failed) を使う。
+- **P2b 配信済の再 queue**: push 成功後の DB 記録失敗で approved に戻すと retry-key 失効後 (>24h) に再配信。
+  → 配信成功後の DB 失敗は requeue せず 'sending' のまま残す (15m–24h は再送→409 で収束 / >24h は failed)。

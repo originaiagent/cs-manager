@@ -90,6 +90,9 @@ export function normalizeLineTextEvent(
     status: 'untouched',
     channelMeta: {
       source: 'line',
+      // source.type ('user'|'group'|'room')。送信側はこれが 'user' の時のみ userId へ push する
+      // (group/room は sender userId が入っていても 1:1 ではないため private 誤送を防ぐ)。
+      sourceType: ev.source.type ?? null,
       // userId は PII。channel_meta (service_role 限定 RLS) にのみ保持し、ログ/エラーには出さない。
       userId: userId ?? null,
       webhookEventId: ev.webhookEventId ?? null,

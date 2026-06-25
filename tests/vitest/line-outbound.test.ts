@@ -10,6 +10,7 @@ import {
   sendApprovedLineDrafts,
   isValidPushUserId,
   extractRawUserId,
+  resolvePushUserId,
   buildExternalMessageId,
   type LineDraftRepo,
   type ClaimedLineDraft,
@@ -41,6 +42,22 @@ describe('extractRawUserId', () => {
     expect(extractRawUserId({})).toBeNull();
     expect(extractRawUserId(null)).toBeNull();
     expect(extractRawUserId('nope')).toBeNull();
+  });
+});
+
+describe('resolvePushUserId (source.type=user の 1:1 のみ)', () => {
+  it('source.type=user + 有効 userId → userId', () => {
+    expect(resolvePushUserId({ sourceType: 'user', userId: 'U_abc' })).toBe('U_abc');
+  });
+  it('group/room は sender userId があっても null (private 誤送防止)', () => {
+    expect(resolvePushUserId({ sourceType: 'group', userId: 'U_sender' })).toBeNull();
+    expect(resolvePushUserId({ sourceType: 'room', userId: 'U_sender' })).toBeNull();
+  });
+  it('sourceType 欠落 / userId 欠落 / 非 U は null', () => {
+    expect(resolvePushUserId({ userId: 'U_abc' })).toBeNull();
+    expect(resolvePushUserId({ sourceType: 'user' })).toBeNull();
+    expect(resolvePushUserId({ sourceType: 'user', userId: 'C_grp' })).toBeNull();
+    expect(resolvePushUserId(null)).toBeNull();
   });
 });
 
@@ -85,6 +102,7 @@ class FakeRepo implements LineDraftRepo {
   drafts = new Map<string, DraftState>();
   outbound: Array<{ ticketId: string; channelMessageId: string; body: string }> = [];
   claimCalls = 0;
+  throwOnMarkSent = false;
 
   constructor(initial: DraftState[]) {
     for (const d of initial) this.drafts.set(d.id, { ...d });
@@ -99,6 +117,7 @@ class FakeRepo implements LineDraftRepo {
     return claimed.map((d) => ({ id: d.id, body: d.body, ticketId: d.ticketId, toUserId: d.toUserId }));
   }
   async markSent(draftId: string, externalMessageId: string, sentAtIso: string) {
+    if (this.throwOnMarkSent) throw new Error('db down');
     const d = this.drafts.get(draftId)!;
     d.status = 'sent';
     d.externalMessageId = externalMessageId;
@@ -230,6 +249,18 @@ describe('sendApprovedLineDrafts orchestration', () => {
     const res = await runSend(repo, client);
     expect(res.failed).toBe(1);
     expect(repo.drafts.get('d1')!.status).toBe('approved');
+  });
+
+  it('配信成功後のDB記録失敗は approved に戻さず sending のまま (二重配信防止 codex P2)', async () => {
+    const repo = new FakeRepo([draft('d1')]);
+    repo.throwOnMarkSent = true;
+    const client = clientReturning(() =>
+      new Response(JSON.stringify({ sentMessages: [{ id: 'mm1' }] }), { status: 200 }),
+    );
+    const res = await runSend(repo, client);
+    expect(res.failed).toBe(1);
+    // 配信済なので approved に戻さない (retry-key 失効後の再配信を避ける)。
+    expect(repo.drafts.get('d1')!.status).toBe('sending');
   });
 
   it('二重送信防止: claim で sending 化、再 claim で approved が無く送らない', async () => {
