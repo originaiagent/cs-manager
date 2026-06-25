@@ -261,6 +261,9 @@ describe('sendApprovedLineDrafts orchestration', () => {
     expect(res.failed).toBe(1);
     // 配信済なので approved に戻さない (retry-key 失効後の再配信を避ける)。
     expect(repo.drafts.get('d1')!.status).toBe('sending');
+    // outbound message は markSent 前に記録済 (audit 欠落しない / codex P2)。
+    expect(repo.outbound).toHaveLength(1);
+    expect(repo.outbound[0].channelMessageId).toBe('line-reply:d1');
   });
 
   it('二重送信防止: claim で sending 化、再 claim で approved が無く送らない', async () => {

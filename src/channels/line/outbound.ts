@@ -396,13 +396,17 @@ export async function sendApprovedLineDrafts(
         const sentAt = new Date().toISOString();
         const externalMessageId = buildExternalMessageId(result, draft.id);
         try {
-          await repo.markSent(draft.id, externalMessageId, sentAt);
+          // codex review P2: 先に outbound message を記録 (onConflict で idempotent) してから
+          // draft を 'sent' 確定する。逆順だと markSent 成功・upsert 失敗時に「配信済だが thread に
+          // 無い」行が sent のまま残り再送もされない。この順なら upsert 失敗時は 'sending' のままで、
+          // 15m–24h 再送→409→upsert(idempotent)→markSent でメッセージ欠落なく収束する。
           await repo.upsertOutboundMessage(
             draft.ticketId,
             formatChannelMessageId('line-reply', draft.id),
             draft.body,
             sentAt,
           );
+          await repo.markSent(draft.id, externalMessageId, sentAt);
           succeeded += 1;
           logger.info('line.outbound.sent', {
             draftId: draft.id,
