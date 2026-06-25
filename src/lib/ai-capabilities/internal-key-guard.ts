@@ -76,11 +76,16 @@ export async function authorizeAiManifestRequest(
   req: NextRequest,
 ): Promise<NextResponse | null> {
   const provided = trimRight(req.headers.get(HEADER_NAME));
-  const hasProvided = typeof provided === 'string' && provided.length > 0;
 
-  // (1) env 候補を先に評価 (Core 非依存・hot path)。
+  // (0) ヘッダ非 string / 空 → Core 呼出前に即 401 (DoS 耐性: 未認証 probe で Core を叩かない。
+  //     どの env/Core 鍵とも一致し得ないため候補取得は不要。codex P2)。
+  if (typeof provided !== 'string' || provided.length === 0) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  // (1) env 候補を先に評価 (Core 非依存・hot path)。一致すれば Core 取得をスキップ。
   const envKeys = getInboundVerifyEnvKeys();
-  if (hasProvided && envKeys.length > 0 && matchesAny(provided, envKeys)) {
+  if (envKeys.length > 0 && matchesAny(provided, envKeys)) {
     return null;
   }
 
@@ -90,11 +95,6 @@ export async function authorizeAiManifestRequest(
   // 期待値が一つも無い = サーバ設定不備 (fail-closed)。Core 未到達 かつ env 両方未設定の場合のみ。
   if (envKeys.length === 0 && coreKeys.length === 0) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
-  }
-
-  // ヘッダ非 string / 空 → 401 (Core misconfig 判定後・ヒント文言なし)。
-  if (!hasProvided) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
   if (coreKeys.length > 0 && matchesAny(provided, coreKeys)) {
