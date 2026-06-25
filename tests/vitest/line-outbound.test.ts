@@ -238,7 +238,7 @@ describe('sendApprovedLineDrafts orchestration', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(4); // 初回 + backoff 3 回
   });
 
-  it('network 例外 → approved に戻す (transient)', async () => {
+  it('network/timeout (配信不明) → approved に戻さず sending のまま (24hガード維持 codex P2)', async () => {
     const repo = new FakeRepo([draft('d1')]);
     const client = new LineMessagingClient({
       credentials: { channel_access_token: 'tok' },
@@ -248,7 +248,8 @@ describe('sendApprovedLineDrafts orchestration', () => {
     });
     const res = await runSend(repo, client);
     expect(res.failed).toBe(1);
-    expect(repo.drafts.get('d1')!.status).toBe('approved');
+    // 配信したか不明なため 'sending' のまま (reclaim が 15m-24h→再送→409 / >24h→failed で収束)。
+    expect(repo.drafts.get('d1')!.status).toBe('sending');
   });
 
   it('配信成功後のDB記録失敗は approved に戻さず sending のまま (二重配信防止 codex P2)', async () => {

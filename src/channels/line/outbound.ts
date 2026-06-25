@@ -435,19 +435,31 @@ export async function sendApprovedLineDrafts(
         logger.warn('line.outbound.transient_retry_later', { draftId: draft.id, status: result.status });
       }
     } catch (err) {
-      // LineTransportError (backoff 尽き) or DB エラー → transient 扱いで approved に戻す
       failed += 1;
       const errMsg = err instanceof Error ? err.message : String(err);
       errors.push({ draftId: draft.id, error: errMsg });
-      try {
-        await repo.releaseToApproved(draft.id, `line push exception: ${errMsg}`);
-      } catch (relErr) {
-        logger.error('line.outbound.release_failed', {
+      if (err instanceof LineTransportError) {
+        // codex review P2: network/timeout は配信したか不明。approved に戻すと 'sending' 限定の
+        // 24h retry-key ガードを失い、LINE が受理済だった場合に窓超え再送で二重配信し得る。
+        // → 'sending' のまま残す。15m–24h は再送→409 で安全収束 / >24h は stale 再回収で failed。
+        logger.error('line.outbound.transport_ambiguous_keep_sending', {
           draftId: draft.id,
-          error: relErr instanceof Error ? relErr.message : String(relErr),
+          error: errMsg,
         });
+      } else {
+        // 非 transport (markFailed/releaseToApproved の DB エラー等)。push は配信していない
+        // (sent path は内側 try で完結) ため approved に戻して次 cron で再試行。
+        try {
+          await repo.releaseToApproved(draft.id, `line push exception: ${errMsg}`);
+        } catch (relErr) {
+          // approved 戻しも失敗 → 'sending' のまま (reclaim が拾う)。
+          logger.error('line.outbound.release_failed', {
+            draftId: draft.id,
+            error: relErr instanceof Error ? relErr.message : String(relErr),
+          });
+        }
+        logger.error('line.outbound.exception', { draftId: draft.id, error: errMsg });
       }
-      logger.error('line.outbound.exception', { draftId: draft.id, error: errMsg });
     }
     await sleep(REQUEST_DELAY_MS);
   }
