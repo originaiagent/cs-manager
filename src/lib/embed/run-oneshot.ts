@@ -41,6 +41,11 @@ export interface RunEmbedOneshotArgs {
 
 const POLL_DEADLINE_MS = 150_000;
 
+// 個別 HTTP リクエスト上限 (codex code review): per-request timeout が無いと、hung な接続で
+//   POLL_DEADLINE_MS が「fetch が返った後」にしか効かず、安定 reason へ fail-closed できず
+//   Vercel 側の function kill 待ちになる。各 fetch を AbortSignal.timeout で個別に中断する。
+const REQUEST_TIMEOUT_MS = 15_000;
+
 // poll 間隔は既定 2s。テスト時のみ EMBED_RUN_POLL_INTERVAL_MS で短縮 (本番未設定=2s)。
 function pollIntervalMs(): number {
   return Number(process.env.EMBED_RUN_POLL_INTERVAL_MS) || 2000;
@@ -75,6 +80,8 @@ export async function runEmbedOneshotAndPoll(
         input: args.input,
       }),
       cache: 'no-store',
+      // hung 接続でも個別に中断 (deadline まで掴みっぱなしにしない)。
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (runResp.status !== 202) {
       return { ok: false, reason: `embed_run_start_${runResp.status}` };
@@ -98,15 +105,20 @@ export async function runEmbedOneshotAndPoll(
       pollResp = await fetch(`${baseUrl}/api/embed/runs/${runId}`, {
         headers: { 'X-Embed-Key': key },
         cache: 'no-store',
+        // hung 接続でも個別に中断 → transient 扱いで deadline まで retry。
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch {
-      continue; // transient network → retry until deadline
+      continue; // transient network / per-request timeout → retry until deadline
     }
     if (pollResp.status === 404) {
-      // 書込直後の伝播遅延を許容 (>3 回連続で確定 not-found)。
+      // 書込直後の伝播遅延を許容 (連続 >3 回で確定 not-found)。
+      // 非404 が一度でも返れば下で notFound=0 にリセットするため「連続」回数で判定される。
       if (++notFound > 3) return { ok: false, reason: 'embed_run_not_found' };
       continue;
     }
+    // 非404 応答が来た → 連続 404 カウンタをリセット (断続的 404 での誤 not-found を防ぐ)。
+    notFound = 0;
     // transient: 408 / 429 / 5xx は deadline まで retry。
     if (pollResp.status === 408 || pollResp.status === 429 || pollResp.status >= 500) {
       continue;
