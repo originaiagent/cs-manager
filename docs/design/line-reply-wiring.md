@@ -255,3 +255,11 @@ alter table public.ticket_drafts add constraint ticket_drafts_status_check
   (sourceType='user' の 1:1 のみ push、それ以外 null→failed) を使う。
 - **P2b 配信済の再 queue**: push 成功後の DB 記録失敗で approved に戻すと retry-key 失効後 (>24h) に再配信。
   → 配信成功後の DB 失敗は requeue せず 'sending' のまま残す (15m–24h は再送→409 で収束 / >24h は failed)。
+
+2回目 (上記反映後の再 review) で更に深い P1 を指摘 → 修正:
+- **P1 ticket 衝突による誤送**: LINE ticket は externalId=userId で keying するため、同一 userId の
+  group/room と 1:1 メッセージが 1 ticket に衝突し、ticket.channel_meta が後着で上書き → group 由来 draft が
+  1:1 へ private 誤送、または 1:1 draft が group 更新後に failed 化し得る。
+  → **ingest を source.type='user' (1:1) に限定** (`isReplyableUserTextEvent`、inbound route で gate)。
+  group/room は 1:1 push で返信不能のため取り込まない (会話単位束ねは別設計)。衝突源を断ち、
+  channel_meta から宛先を解決しても誤送しない。resolvePushUserId (sourceType='user' ガード) は多層防御で残置。

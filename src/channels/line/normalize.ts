@@ -62,6 +62,19 @@ export function isTextMessageEvent(ev: LineWebhookEvent): boolean {
 }
 
 /**
+ * 取り込み対象の text message event か **かつ 1:1 (source.type='user')** か判定する。
+ *
+ * codex review P1 (2026-06-25): LINE ticket は externalId=userId で keying するため、同一 userId の
+ * group/room メッセージと 1:1 メッセージが 1 ticket に衝突し、ticket.channel_meta が後着イベントで
+ * 上書きされる。送信は channel_meta から宛先を解決するので、group 由来の draft が 1:1 へ private 誤送
+ * され得る。返信 MVP は 1:1 push のみ対応のため、**ingest を source.type='user' に限定**して衝突源を断つ。
+ * (group/room はそもそも 1:1 push で返信できない。会話単位束ねの正式対応は別途設計 — normalize TODO 参照。)
+ */
+export function isReplyableUserTextEvent(ev: LineWebhookEvent): boolean {
+  return isTextMessageEvent(ev) && ev.source?.type === 'user';
+}
+
+/**
  * text message event を正規化する。
  *
  * @param ev text message event (isTextMessageEvent が true のもの)
