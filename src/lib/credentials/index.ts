@@ -181,32 +181,55 @@ export async function getCredentialsParallel<T = Record<string, unknown>>(
 }
 
 /**
- * inbound 検証用の共有内部鍵の照合候補を返す。
+ * inbound 検証用の移行期 env 鍵候補 (同期・Core 非依存)。
+ *
+ * env INTERNAL_API_KEY / INTERNAL_API_KEY_NEW を trim・空除外・重複除外して返す。
+ * 呼出側はこれを **先に** 定数時間比較し、一致すれば Core 取得をスキップする
+ * (Core 障害時に env 署名済みリクエストが Core タイムアウトを待たない: 可用性回帰の回避。codex P2)。
+ */
+export function getInboundVerifyEnvKeys(): string[] {
+  const keys: string[] = [];
+  const envOld = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
+  const envNew = process.env.INTERNAL_API_KEY_NEW?.replace(/\s+$/, '');
+  for (const v of [envOld, envNew]) {
+    if (v && !keys.includes(v)) keys.push(v);
+  }
+  return keys;
+}
+
+/**
+ * inbound 検証用の Core 共有内部鍵 (1 件 or 0 件) を取得する。
  *
  * origin-core が本ツールの /api/ai/manifest・/api/ai/capabilities/* 等を叩く際に送る
- * X-Internal-API-Key の正本値 (= 旧 global INTERNAL_API_KEY) を Core から取得する。
+ * X-Internal-API-Key の正本値を Core から取得する。
  * service_code='core_internal_shared'(全ツール共通値・scoped 入口鍵とは別物)。
- *
- * 移行期は env INTERNAL_API_KEY / INTERNAL_API_KEY_NEW も候補に含める (Phase5 で除去)。
- * Core 未登録/未到達時も env fallback で継続する (fail-open しない: 候補が空なら呼出側で 401)。
+ * Core 未登録/未到達時は空配列を返す (fail-open しない: 呼出側で env 不一致なら 401)。
  * 値・取得失敗理由はログに出さない。呼出側は定数時間比較すること。
  *
- * 接続鍵 Core 集約 (origin-core #332)。代表ツール ys-staff-tool の getInboundVerifyKeys と同型。
+ * 接続鍵 Core 集約 (origin-core #332)。
  */
-export async function getInboundVerifyKeys(): Promise<string[]> {
-  const keys: string[] = [];
+export async function getInboundVerifyCoreKeys(): Promise<string[]> {
   try {
     const cred = await getCredential<{ api_key?: string }>('core_internal_shared');
     const v = cred.credentials?.api_key?.replace(/\s+$/, '');
-    if (v) keys.push(v);
+    if (v) return [v];
   } catch {
-    // Core 未登録/未到達は移行期 env fallback のみで継続。値・理由は出さない。
+    // Core 未登録/未到達は env fallback のみで継続。値・理由は出さない。
   }
-  const envOld = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
-  const envNew = process.env.INTERNAL_API_KEY_NEW?.replace(/\s+$/, '');
-  // 重複除外しつつ追加。
-  for (const v of [envOld, envNew]) {
-    if (v && !keys.includes(v)) keys.push(v);
+  return [];
+}
+
+/**
+ * inbound 検証の全候補 (env + Core)。env を先頭に、Core 値を末尾に重複除外で連結する。
+ *
+ * 注意: Core 取得を含むため Core 障害時はレイテンシが増える。可用性が重要な hot path では
+ * getInboundVerifyEnvKeys() で先に env を比較し、不一致時のみ getInboundVerifyCoreKeys() を
+ * 呼ぶこと (代表ツール ys-staff-tool の getInboundVerifyKeys 同型だが本ツールは env-first 最適化済)。
+ */
+export async function getInboundVerifyKeys(): Promise<string[]> {
+  const keys = getInboundVerifyEnvKeys();
+  for (const v of await getInboundVerifyCoreKeys()) {
+    if (!keys.includes(v)) keys.push(v);
   }
   return keys;
 }

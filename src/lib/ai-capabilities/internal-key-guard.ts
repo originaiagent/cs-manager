@@ -27,7 +27,7 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { NextResponse, type NextRequest } from 'next/server';
-import { getInboundVerifyKeys } from '@/lib/credentials';
+import { getInboundVerifyEnvKeys, getInboundVerifyCoreKeys } from '@/lib/credentials';
 
 const HEADER_NAME = 'x-internal-api-key';
 
@@ -51,34 +51,55 @@ function digestEquals(provided: string, expected: string): boolean {
   return timingSafeEqual(sha256(provided), sha256(expected));
 }
 
-/**
- * /api/ai/* ルートの先頭で呼ぶ。
- * @returns 認証失敗時は NextResponse (401/500)、成功時は null。
- *
- * Core 集約: 期待値候補に Core service_code='core_internal_shared' 取得値 + 移行期 env を含める。
- * async (Core 取得を含むため)。呼出側は await すること。
- */
-export async function authorizeAiManifestRequest(
-  req: NextRequest,
-): Promise<NextResponse | null> {
-  // [Core 値, env INTERNAL_API_KEY, env INTERNAL_API_KEY_NEW]。trim・空除外・重複除外済み。
-  const candidates = await getInboundVerifyKeys();
-
-  // 期待値が一つも無い = サーバ設定不備 (fail-closed)。Core 未到達 かつ env 両方未設定の場合のみ。
-  if (candidates.length === 0) {
-    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
-  }
-
-  const provided = trimRight(req.headers.get(HEADER_NAME));
-  if (typeof provided !== 'string' || provided.length === 0) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  // 候補キーを短絡せず全件評価し、論理 OR を取る (タイミング差を最小化)。
+/** provided を候補群と短絡せず全件比較し、論理 OR を取る (どの候補一致でもタイミング差を最小化)。 */
+function matchesAny(provided: string, candidates: string[]): boolean {
   let matched = false;
   for (const expected of candidates) {
     if (digestEquals(provided, expected)) matched = true;
   }
+  return matched;
+}
 
-  return matched ? null : NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+/**
+ * /api/ai/* ルートの先頭で呼ぶ。
+ * @returns 認証失敗時は NextResponse (401/500)、成功時は null。
+ *
+ * Core 集約: 期待値候補に移行期 env (INTERNAL_API_KEY/_NEW) + Core service_code=
+ * 'core_internal_shared' 取得値を含める。
+ *
+ * 可用性 (codex P2): env 候補を **先に** 比較し、一致すれば Core 取得をスキップする。
+ * これにより Core 障害/低速時でも env 署名済みリクエストは Core タイムアウトを待たない。
+ * env 不一致 (= Core 鍵 or 不正鍵) の場合のみ Core 取得して再比較する。
+ * async (Core 取得を含み得るため)。呼出側は await すること。
+ */
+export async function authorizeAiManifestRequest(
+  req: NextRequest,
+): Promise<NextResponse | null> {
+  const provided = trimRight(req.headers.get(HEADER_NAME));
+  const hasProvided = typeof provided === 'string' && provided.length > 0;
+
+  // (1) env 候補を先に評価 (Core 非依存・hot path)。
+  const envKeys = getInboundVerifyEnvKeys();
+  if (hasProvided && envKeys.length > 0 && matchesAny(provided, envKeys)) {
+    return null;
+  }
+
+  // (2) env 不一致 → Core 共有鍵を取得して再評価 (Core 未到達は空配列 = fallback はしない)。
+  const coreKeys = await getInboundVerifyCoreKeys();
+
+  // 期待値が一つも無い = サーバ設定不備 (fail-closed)。Core 未到達 かつ env 両方未設定の場合のみ。
+  if (envKeys.length === 0 && coreKeys.length === 0) {
+    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+  }
+
+  // ヘッダ非 string / 空 → 401 (Core misconfig 判定後・ヒント文言なし)。
+  if (!hasProvided) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  if (coreKeys.length > 0 && matchesAny(provided, coreKeys)) {
+    return null;
+  }
+
+  return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 }
