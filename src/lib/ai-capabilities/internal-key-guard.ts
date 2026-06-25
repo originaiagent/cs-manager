@@ -9,20 +9,25 @@
  *   - 同じ `INTERNAL_API_KEY` env を期待値に含む。
  * 差分は additive かつ受理範囲のスーパーセット (旧ガードが通す鍵は必ず通る):
  *   (a) `INTERNAL_API_KEY_NEW` も期待値に含める (鍵ローテーション対応)。
- *   (b) 比較は sha256 固定長 digest 同士の timingSafeEqual (長さ漏洩を避ける)。
+ *   (b) 接続鍵 Core 集約 (origin-core #332): Core service_code='core_internal_shared'
+ *       (field api_key・全ツール共通値) 取得値も期待値候補に含める。getInboundVerifyKeys()
+ *       が [Core 値, env INTERNAL_API_KEY, env INTERNAL_API_KEY_NEW] を返す。Core 未到達時も
+ *       env fallback のみで継続 (fail-open しない: 候補が空なら 401)。
+ *   (c) 比較は sha256 固定長 digest 同士の timingSafeEqual (長さ漏洩を避ける)。
  *       accept/reject の挙動は raw 比較と同一で、固定長化のみ。
  *
- * 設計レビュー: codex APPROVE (2026-06-18, A 解消版)。
+ * 設計レビュー: codex APPROVE (2026-06-18, A 解消版 / 2026-06-25, Core 集約版)。
  * 既存 `authorizeApiRoute` / 既存ルートは一切変更しない (この 2 ルートのみで使用)。
  *
  * fail-closed:
- *   - INTERNAL_API_KEY / INTERNAL_API_KEY_NEW が両方未設定 → 500 (env 変数名は本文に出さない)。
+ *   - 候補キーが一つも無い (Core 未到達 かつ env 両方未設定) → 500 (env 変数名は本文に出さない)。
  *   - ヘッダ非 string / 空 / 不一致 → 401 (ヒント文言なし)。
  *   - 候補キーは短絡せず全件評価する。
  */
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { NextResponse, type NextRequest } from 'next/server';
+import { getInboundVerifyEnvKeys, getInboundVerifyCoreKeys } from '@/lib/credentials';
 
 const HEADER_NAME = 'x-internal-api-key';
 
@@ -46,33 +51,55 @@ function digestEquals(provided: string, expected: string): boolean {
   return timingSafeEqual(sha256(provided), sha256(expected));
 }
 
-/**
- * /api/ai/* ルートの先頭で呼ぶ。
- * @returns 認証失敗時は NextResponse (401/500)、成功時は null。
- */
-export function authorizeAiManifestRequest(req: NextRequest): NextResponse | null {
-  const expectedCurrent = trimRight(process.env.INTERNAL_API_KEY);
-  const expectedNext = trimRight(process.env.INTERNAL_API_KEY_NEW);
-
-  const candidates = [expectedCurrent, expectedNext].filter(
-    (v): v is string => typeof v === 'string' && v.length > 0,
-  );
-
-  // 期待値が一つも無い = サーバ設定不備 (fail-closed)。
-  if (candidates.length === 0) {
-    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
-  }
-
-  const provided = trimRight(req.headers.get(HEADER_NAME));
-  if (typeof provided !== 'string' || provided.length === 0) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  // 候補キーを短絡せず全件評価し、論理 OR を取る (タイミング差を最小化)。
+/** provided を候補群と短絡せず全件比較し、論理 OR を取る (どの候補一致でもタイミング差を最小化)。 */
+function matchesAny(provided: string, candidates: string[]): boolean {
   let matched = false;
   for (const expected of candidates) {
     if (digestEquals(provided, expected)) matched = true;
   }
+  return matched;
+}
 
-  return matched ? null : NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+/**
+ * /api/ai/* ルートの先頭で呼ぶ。
+ * @returns 認証失敗時は NextResponse (401/500)、成功時は null。
+ *
+ * Core 集約: 期待値候補に移行期 env (INTERNAL_API_KEY/_NEW) + Core service_code=
+ * 'core_internal_shared' 取得値を含める。
+ *
+ * 可用性 (codex P2): env 候補を **先に** 比較し、一致すれば Core 取得をスキップする。
+ * これにより Core 障害/低速時でも env 署名済みリクエストは Core タイムアウトを待たない。
+ * env 不一致 (= Core 鍵 or 不正鍵) の場合のみ Core 取得して再比較する。
+ * async (Core 取得を含み得るため)。呼出側は await すること。
+ */
+export async function authorizeAiManifestRequest(
+  req: NextRequest,
+): Promise<NextResponse | null> {
+  const provided = trimRight(req.headers.get(HEADER_NAME));
+
+  // (0) ヘッダ非 string / 空 → Core 呼出前に即 401 (DoS 耐性: 未認証 probe で Core を叩かない。
+  //     どの env/Core 鍵とも一致し得ないため候補取得は不要。codex P2)。
+  if (typeof provided !== 'string' || provided.length === 0) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  // (1) env 候補を先に評価 (Core 非依存・hot path)。一致すれば Core 取得をスキップ。
+  const envKeys = getInboundVerifyEnvKeys();
+  if (envKeys.length > 0 && matchesAny(provided, envKeys)) {
+    return null;
+  }
+
+  // (2) env 不一致 → Core 共有鍵を取得して再評価 (Core 未到達は空配列 = fallback はしない)。
+  const coreKeys = await getInboundVerifyCoreKeys();
+
+  // 期待値が一つも無い = サーバ設定不備 (fail-closed)。Core 未到達 かつ env 両方未設定の場合のみ。
+  if (envKeys.length === 0 && coreKeys.length === 0) {
+    return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
+  }
+
+  if (coreKeys.length > 0 && matchesAny(provided, coreKeys)) {
+    return null;
+  }
+
+  return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 }

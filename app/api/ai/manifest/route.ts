@@ -21,7 +21,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const authError = authorizeAiManifestRequest(req);
+  const authError = await authorizeAiManifestRequest(req);
   if (authError) return authError;
 
   return NextResponse.json(manifest, { status: 200 });

@@ -10,9 +10,9 @@
  * 親階層 product_groups 取得に統一する (PR-EF: Core 親子構造に厳密準拠)。
  */
 import 'server-only';
+import { getEntryKeys, fetchWithEntryKeys } from '@/lib/core-entry-keys';
 
 const CORE_API_URL = process.env.CORE_API_URL?.replace(/\s+$/, '');
-const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
 const CORE_API_TIMEOUT_MS = process.env.CORE_API_TIMEOUT_MS
   ? parseInt(process.env.CORE_API_TIMEOUT_MS, 10)
   : 10_000;
@@ -44,7 +44,8 @@ interface ListOpts {
 export async function listCoreProductGroups(
   opts: ListOpts = {},
 ): Promise<{ ok: boolean; items: CoreProductGroupItem[]; truncated: boolean; error?: string }> {
-  if (!CORE_API_URL || !INTERNAL_API_KEY) {
+  const entryKeys = getEntryKeys();
+  if (!CORE_API_URL || entryKeys.length === 0) {
     return {
       ok: false,
       items: [],
@@ -62,19 +63,24 @@ export async function listCoreProductGroups(
   try {
     const base = CORE_API_URL.replace(/\/$/, '');
     const firstUrl = `${base}/api/v1/master/product-groups?limit=${PAGE_LIMIT}&offset=0&fields=${encodeURIComponent(fields)}`;
-    const first = await fetch(firstUrl, {
-      method: 'GET',
-      headers: { 'X-Internal-API-Key': INTERNAL_API_KEY, Accept: 'application/json' },
-      cache: 'no-store',
-      signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
-    });
+    const first = await fetchWithEntryKeys(
+      firstUrl,
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
+      },
+      { entryKeys },
+    );
     if (!first.ok) {
-      const txt = await first.text();
+      // 非 2xx の body は反射しない (status のみ)。
+      try { await first.arrayBuffer(); } catch { /* ignore */ }
       return {
         ok: false,
         items: [],
         truncated: false,
-        error: `Core ${first.status}: ${txt.slice(0, 200)}`,
+        error: `Core ${first.status}`,
       };
     }
     const firstJson = await first.json();
@@ -91,15 +97,20 @@ export async function listCoreProductGroups(
       const pages = await Promise.all(
         offsets.map(async (off): Promise<{ ok: boolean; rows: any[]; error?: string }> => {
           const url = `${base}/api/v1/master/product-groups?limit=${PAGE_LIMIT}&offset=${off}&fields=${encodeURIComponent(fields)}`;
-          const r = await fetch(url, {
-            method: 'GET',
-            headers: { 'X-Internal-API-Key': INTERNAL_API_KEY, Accept: 'application/json' },
-            cache: 'no-store',
-            signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
-          });
+          const r = await fetchWithEntryKeys(
+            url,
+            {
+              method: 'GET',
+              headers: { Accept: 'application/json' },
+              cache: 'no-store',
+              signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
+            },
+            { entryKeys },
+          );
           if (!r.ok) {
-            const txt = await r.text().catch(() => '');
-            return { ok: false, rows: [], error: `offset=${off} ${r.status}: ${txt.slice(0, 120)}` };
+            // 非 2xx の body は反射しない (status のみ)。
+            try { await r.arrayBuffer(); } catch { /* ignore */ }
+            return { ok: false, rows: [], error: `offset=${off} ${r.status}` };
           }
           const j = await r.json();
           const rows = Array.isArray(j) ? j : (j?.data ?? j?.products ?? []);

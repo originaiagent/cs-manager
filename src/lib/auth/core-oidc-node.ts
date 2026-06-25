@@ -10,6 +10,7 @@
  *   login の authorize / callback の token 交換で同一値を使うこと。
  */
 import { randomBytes, createHash } from 'node:crypto';
+import { getEntryKeys, fetchWithEntryKeys } from '@/lib/core-entry-keys';
 
 // ---------------------------------------------------------------------------
 // redirect_uri (単一固定生成 — request 由来禁止)
@@ -90,10 +91,6 @@ function getCoreApiUrl(): string {
   return (process.env.CORE_API_URL || CORE_API_URL_DEFAULT).trim();
 }
 
-function getInternalApiKey(): string | undefined {
-  return process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
-}
-
 /** CORE_API_URL を https + 既知 host + default port のみに厳格化 (鍵漏洩防止)。 */
 function validateCoreOrigin(rawUrl: string): boolean {
   try {
@@ -132,8 +129,10 @@ async function fetchOriginAIOAuthCredential(): Promise<CredentialResponse> {
   if (_cache && Date.now() - _cache.at < CACHE_TTL_MS) return _cache.value;
 
   const coreUrl = getCoreApiUrl();
-  const apiKey = getInternalApiKey();
-  if (!apiKey) throw new CredentialFetchError('INTERNAL_API_KEY is not set', null, 'originai_oauth');
+  // entry 鍵: scoped (CORE_CREDENTIAL_KEY) 優先・global (INTERNAL_API_KEY) fallback を順試行し
+  // 401/403 で次鍵へ retry する (接続鍵 Core 集約 staged rollout)。
+  const entryKeys = getEntryKeys();
+  if (entryKeys.length === 0) throw new CredentialFetchError('INTERNAL_API_KEY is not set', null, 'originai_oauth');
   if (!validateCoreOrigin(coreUrl)) {
     throw new CredentialFetchError('CORE_API_URL is not an allowed https origin', null, 'originai_oauth');
   }
@@ -143,12 +142,16 @@ async function fetchOriginAIOAuthCredential(): Promise<CredentialResponse> {
 
   let res: Response;
   try {
-    res = await fetch(url.toString(), {
-      method: 'GET',
-      headers: { 'X-Internal-API-Key': apiKey, Accept: 'application/json' },
-      signal: AbortSignal.timeout(10_000),
-      redirect: 'error',
-    });
+    res = await fetchWithEntryKeys(
+      url.toString(),
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(10_000),
+        redirect: 'error',
+      },
+      { entryKeys },
+    );
   } catch (err) {
     throw new CredentialFetchError(`Network error: ${(err as Error)?.message ?? err}`, null, 'originai_oauth');
   }

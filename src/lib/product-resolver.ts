@@ -12,9 +12,9 @@
  */
 
 import { fetchProductById } from './core-client';
+import { getEntryKeys, fetchWithEntryKeys } from '@/lib/core-entry-keys';
 
 const CORE_API_URL = process.env.CORE_API_URL?.replace(/\s+$/, '');
-const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
 const CORE_API_TIMEOUT_MS = process.env.CORE_API_TIMEOUT_MS
   ? parseInt(process.env.CORE_API_TIMEOUT_MS, 10)
   : 10_000;
@@ -126,21 +126,27 @@ export interface ResolvedProductGroup {
 async function fetchProductGroupById(
   id: string,
 ): Promise<{ ok: boolean; group?: { group_name?: string; developer?: string | null; category?: string | null }; error?: string }> {
-  if (!CORE_API_URL || !INTERNAL_API_KEY) {
+  const entryKeys = getEntryKeys();
+  if (!CORE_API_URL || entryKeys.length === 0) {
     return { ok: false, error: 'CORE_API_URL / INTERNAL_API_KEY not configured' };
   }
   const safeId = encodeURIComponent(id);
   const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/product-groups/${safeId}`;
   try {
-    const r = await fetch(url, {
-      method: 'GET',
-      headers: { 'X-Internal-API-Key': INTERNAL_API_KEY, Accept: 'application/json' },
-      cache: 'no-store',
-      signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
-    });
+    const r = await fetchWithEntryKeys(
+      url,
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
+      },
+      { entryKeys },
+    );
     if (!r.ok) {
-      const txt = await r.text().catch(() => '');
-      return { ok: false, error: `Core ${r.status}: ${txt.slice(0, 200)}` };
+      // 非 2xx の body は反射しない (status のみ)。
+      try { await r.arrayBuffer(); } catch { /* ignore */ }
+      return { ok: false, error: `Core ${r.status}` };
     }
     const j = await r.json();
     const group = j?.data ?? j;
@@ -174,7 +180,8 @@ export async function resolveGroupChildIds(parentIds: string[]): Promise<Map<str
     }
   }
   if (toFetch.length === 0) return result;
-  if (!CORE_API_URL || !INTERNAL_API_KEY) {
+  const entryKeys = getEntryKeys();
+  if (!CORE_API_URL || entryKeys.length === 0) {
     for (const id of toFetch) result.set(id, []);
     return result;
   }
@@ -182,13 +189,17 @@ export async function resolveGroupChildIds(parentIds: string[]): Promise<Map<str
     toFetch.map(async (id) => {
       const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/product-groups/${encodeURIComponent(id)}?include=products&productFields=${encodeURIComponent('id')}`;
       try {
-        const r = await fetch(url, {
-          method: 'GET',
-          headers: { 'X-Internal-API-Key': INTERNAL_API_KEY, Accept: 'application/json' },
-          cache: 'no-store',
-          signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
-        });
-        if (!r.ok) return { id, childIds: [] };
+        const r = await fetchWithEntryKeys(
+          url,
+          {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            cache: 'no-store',
+            signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
+          },
+          { entryKeys },
+        );
+        if (!r.ok) { try { await r.arrayBuffer(); } catch { /* ignore */ } return { id, childIds: [] }; }
         const j = await r.json();
         const group = j?.data ?? j;
         const products = Array.isArray(group?.products) ? group.products : [];

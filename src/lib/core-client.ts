@@ -6,8 +6,9 @@
  * - URL/Key は env 必須（Fail Fast、ハードコード fallback なし）
  */
 
+import { getEntryKeys, fetchWithEntryKeys } from '@/lib/core-entry-keys';
+
 const CORE_API_URL = process.env.CORE_API_URL?.replace(/\s+$/, '');
-const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
 const CORE_API_TIMEOUT_MS = process.env.CORE_API_TIMEOUT_MS
   ? parseInt(process.env.CORE_API_TIMEOUT_MS, 10)
   : 10_000;
@@ -38,28 +39,31 @@ export async function fetchProducts(limit: number = 1): Promise<FetchProductsRes
   if (!CORE_API_URL) {
     return { ok: false, count: 0, error: 'CORE_API_URL is not set' };
   }
-  if (!INTERNAL_API_KEY) {
+  const entryKeys = getEntryKeys();
+  if (entryKeys.length === 0) {
     return { ok: false, count: 0, error: 'INTERNAL_API_KEY is not set' };
   }
 
   const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/products?limit=${limit}`;
 
   try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'X-Internal-API-Key': INTERNAL_API_KEY,
-        'Accept': 'application/json',
+    const response = await fetchWithEntryKeys(
+      url,
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
       },
-      signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
-    });
+      { entryKeys },
+    );
 
     if (!response.ok) {
-      const errorText = await response.text();
+      // 非 2xx の body は反射しない (status のみ)。
+      try { await response.arrayBuffer(); } catch { /* ignore */ }
       return {
         ok: false,
         count: 0,
-        error: `Core API error: ${response.status} ${response.statusText} - ${errorText}`,
+        error: `Core API error: ${response.status} ${response.statusText}`,
       };
     }
 
@@ -92,7 +96,8 @@ export async function fetchProductById(productId: string): Promise<FetchProductR
   if (!CORE_API_URL) {
     return { ok: false, error: 'CORE_API_URL is not set' };
   }
-  if (!INTERNAL_API_KEY) {
+  const entryKeys = getEntryKeys();
+  if (entryKeys.length === 0) {
     return { ok: false, error: 'INTERNAL_API_KEY is not set' };
   }
 
@@ -100,20 +105,22 @@ export async function fetchProductById(productId: string): Promise<FetchProductR
   const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/products/${safeId}`;
 
   try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'X-Internal-API-Key': INTERNAL_API_KEY,
-        Accept: 'application/json',
+    const response = await fetchWithEntryKeys(
+      url,
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
       },
-      signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
-    });
+      { entryKeys },
+    );
 
     if (!response.ok) {
-      const errorText = await response.text();
+      // 非 2xx の body は反射しない (status のみ)。
+      try { await response.arrayBuffer(); } catch { /* ignore */ }
       return {
         ok: false,
-        error: `Core API error: ${response.status} ${response.statusText} - ${errorText.slice(0, 300)}`,
+        error: `Core API error: ${response.status} ${response.statusText}`,
       };
     }
 

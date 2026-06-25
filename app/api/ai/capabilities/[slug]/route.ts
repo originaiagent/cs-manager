@@ -70,7 +70,7 @@ export async function GET(
   req: NextRequest,
   { params }: { params: { slug: string } },
 ): Promise<NextResponse> {
-  const authError = authorizeAiManifestRequest(req);
+  const authError = await authorizeAiManifestRequest(req);
   if (authError) return authError;
 
   const slug = params.slug;
