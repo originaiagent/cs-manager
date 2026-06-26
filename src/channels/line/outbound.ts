@@ -108,6 +108,30 @@ export function buildExternalMessageId(result: LinePushResult, draftId: string):
   return result.requestId ? `line-req:${result.requestId}` : `line-sent:${draftId}`;
 }
 
+/**
+ * stale 'sending' 行の扱いを決める (純関数)。
+ *
+ * codex review P2: 24h 終端は **first_send_at (不変)** を基準にする。updated_at は再 claim で
+ * 毎回更新されるため、これを基準にすると再送ループが永久に >24h に到達せず retry-key 失効後に
+ * 二重配信し得る。15分 stuck 検知は updated_at (最終活動) 基準のままでよい。
+ *
+ * - 最初の送信から 24h 超 → 'fail' (retry-key 失効。再送せず手動レビュー)
+ * - それ未満で最終更新から 15分 超 → 'release' (in-flight が停止 → approved に戻し再送可)
+ * - それ以外 → 'keep' (進行中とみなし触らない)
+ */
+export function classifyStaleSending(args: {
+  nowMs: number;
+  updatedAtMs: number;
+  firstSendAtMs: number | null;
+}): 'fail' | 'release' | 'keep' {
+  const { nowMs, updatedAtMs, firstSendAtMs } = args;
+  // first_send_at 未設定の旧行は updated_at で代替 (実運用では claim 時に必ず設定される)。
+  const firstRef = firstSendAtMs ?? updatedAtMs;
+  if (nowMs - firstRef > RETRY_KEY_EXPIRY_MS) return 'fail';
+  if (nowMs - updatedAtMs > STALE_RECLAIM_MS) return 'release';
+  return 'keep';
+}
+
 // ---------------------------------------------------------------------------
 // Repository (DB 入出力を分離し、orchestration を fake repo で unit テスト可能にする)
 // ---------------------------------------------------------------------------
@@ -140,26 +164,36 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
     const supa = await getSupabaseAdmin();
     const { data, error } = await supa
       .from('ticket_drafts')
-      .select('id, updated_at, ticket:tickets!inner(channel_id)')
+      .select('id, updated_at, first_send_at, ticket:tickets!inner(channel_id)')
       .eq('status', 'sending')
       .eq('ticket.channel_id', channelId);
     if (error) throw new Error(`reclaimStaleSending(select) failed: ${error.message}`);
 
     const now = Date.now();
-    const releaseCutoffIso = new Date(now - STALE_RECLAIM_MS).toISOString(); // 15min 前
-    const failCutoffIso = new Date(now - RETRY_KEY_EXPIRY_MS).toISOString(); // 24h 前
+    const releaseCutoffIso = new Date(now - STALE_RECLAIM_MS).toISOString(); // 15min 前 (updated_at 基準)
+    const failCutoffIso = new Date(now - RETRY_KEY_EXPIRY_MS).toISOString(); // 24h 前 (first_send_at 基準)
     const releaseIds: string[] = [];
     const failIds: string[] = [];
-    for (const row of (data ?? []) as Array<{ id: string; updated_at: string }>) {
-      const ageMs = now - new Date(row.updated_at).getTime();
-      if (!Number.isFinite(ageMs)) continue;
-      if (ageMs > RETRY_KEY_EXPIRY_MS) failIds.push(row.id);
-      else if (ageMs > STALE_RECLAIM_MS) releaseIds.push(row.id);
+    for (const row of (data ?? []) as Array<{
+      id: string;
+      updated_at: string;
+      first_send_at: string | null;
+    }>) {
+      const updatedAtMs = new Date(row.updated_at).getTime();
+      if (!Number.isFinite(updatedAtMs)) continue;
+      const firstSendAtMs = row.first_send_at ? new Date(row.first_send_at).getTime() : null;
+      const decision = classifyStaleSending({
+        nowMs: now,
+        updatedAtMs,
+        firstSendAtMs: Number.isFinite(firstSendAtMs as number) ? firstSendAtMs : null,
+      });
+      if (decision === 'fail') failIds.push(row.id);
+      else if (decision === 'release') releaseIds.push(row.id);
     }
 
     // codex review P1: id 限定だけだと、SELECT 後に別 cron が同一行を再 claim/送信した場合に
-    // fresh な 'sending' / 'sent' 行を踏み潰し得る。UPDATE 側にも status='sending' かつ
-    // 「閾値より古い updated_at」を再ガードし、再 claim (updated_at=now) / 送信済 を除外する。
+    // fresh な 'sending' / 'sent' 行を踏み潰し得る。UPDATE 側にも status='sending' を再ガードする。
+    // release は updated_at<15min前、fail は first_send_at<24h前 を併せてガード (再 claim/送信済 を除外)。
     if (releaseIds.length > 0) {
       const { error: relErr } = await supa
         .from('ticket_drafts')
@@ -174,15 +208,16 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
       if (relErr) throw new Error(`reclaimStaleSending(release) failed: ${relErr.message}`);
     }
     if (failIds.length > 0) {
+      // first_send_at 基準で 24h 超 → terminal。updated_at は触らない (再 claim でも first_send_at は不変)。
       const { error: failErr } = await supa
         .from('ticket_drafts')
         .update({
           status: 'failed',
-          last_error: 'line: sending stale >24h (retry-key expired, manual review)',
+          last_error: 'line: sending stale >24h since first_send_at (retry-key expired, manual review)',
         })
         .in('id', failIds)
         .eq('status', 'sending')
-        .lt('updated_at', failCutoffIso);
+        .lt('first_send_at', failCutoffIso);
       if (failErr) throw new Error(`reclaimStaleSending(fail) failed: ${failErr.message}`);
     }
     return { released: releaseIds.length, failed: failIds.length };
@@ -223,7 +258,20 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
       .select('id, body');
     if (claimErr) throw new Error(`claimApprovedDrafts(claim) failed: ${claimErr.message}`);
 
-    return ((claimed ?? []) as Array<{ id: string; body: string }>).map((r) => {
+    const claimedRows = (claimed ?? []) as Array<{ id: string; body: string }>;
+
+    // first_send_at を「初回のみ」設定 (再 claim では更新しない)。retry-key 24h 失効判定の不変基準。
+    // PostgREST では coalesce(col, now()) を直接書けないため、is null の行だけ別 update で 1 度だけ設定する。
+    if (claimedRows.length > 0) {
+      const { error: fsErr } = await supa
+        .from('ticket_drafts')
+        .update({ first_send_at: new Date().toISOString() })
+        .in('id', claimedRows.map((r) => r.id))
+        .is('first_send_at', null);
+      if (fsErr) throw new Error(`claimApprovedDrafts(first_send_at) failed: ${fsErr.message}`);
+    }
+
+    return claimedRows.map((r) => {
       const meta = byId.get(r.id);
       return {
         id: r.id,

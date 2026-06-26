@@ -12,6 +12,7 @@ import {
   extractRawUserId,
   resolvePushUserId,
   buildExternalMessageId,
+  classifyStaleSending,
   type LineDraftRepo,
   type ClaimedLineDraft,
   type LineChannelRow,
@@ -81,6 +82,37 @@ describe('buildExternalMessageId', () => {
   it('2xx で id 無しは request-id、無ければ draftId fallback', () => {
     expect(buildExternalMessageId({ ...base, requestId: 'r9' }, 'd1')).toBe('line-req:r9');
     expect(buildExternalMessageId({ ...base }, 'd1')).toBe('line-sent:d1');
+  });
+});
+
+describe('classifyStaleSending (24h=first_send_at基準 / 15m=updated_at基準)', () => {
+  const NOW = 1_800_000_000_000;
+  const MIN = 60_000;
+  const HOUR = 60 * MIN;
+
+  it('first_send_at から 24h 超 → fail', () => {
+    expect(
+      classifyStaleSending({ nowMs: NOW, updatedAtMs: NOW - 30 * MIN, firstSendAtMs: NOW - 25 * HOUR }),
+    ).toBe('fail');
+  });
+  it('codex P2 の核: first_send_at 25h前だが updated_at が直近(再claim)でも fail (再送ループで失効回避)', () => {
+    expect(
+      classifyStaleSending({ nowMs: NOW, updatedAtMs: NOW - 1_000, firstSendAtMs: NOW - 25 * HOUR }),
+    ).toBe('fail');
+  });
+  it('24h 未満 + updated_at 15分超 → release', () => {
+    expect(
+      classifyStaleSending({ nowMs: NOW, updatedAtMs: NOW - 20 * MIN, firstSendAtMs: NOW - 2 * HOUR }),
+    ).toBe('release');
+  });
+  it('24h 未満 + updated_at 直近 → keep (進行中)', () => {
+    expect(
+      classifyStaleSending({ nowMs: NOW, updatedAtMs: NOW - 1 * MIN, firstSendAtMs: NOW - 2 * HOUR }),
+    ).toBe('keep');
+  });
+  it('first_send_at null は updated_at で代替 (旧行 fallback)', () => {
+    expect(classifyStaleSending({ nowMs: NOW, updatedAtMs: NOW - 25 * HOUR, firstSendAtMs: null })).toBe('fail');
+    expect(classifyStaleSending({ nowMs: NOW, updatedAtMs: NOW - 20 * MIN, firstSendAtMs: null })).toBe('release');
   });
 });
 

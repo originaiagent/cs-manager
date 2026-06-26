@@ -268,3 +268,6 @@ alter table public.ticket_drafts add constraint ticket_drafts_status_check
 - **P2 401 を terminal failed にしない**: channel_access_token 失効/ローテーション (Core 5分キャッシュが旧トークン
   保持を含む) の 401 を permanent 扱いすると、token 修正後も顧客返信が再送されず恒久 drop。
   → `classifyLineSend` で **401=transient** (approved 維持・次 cron 再送)。400/403/404 は per-draft permanent のまま。
+- **P2 24h 終端の基準**: 24h 失効判定を updated_at 基準にすると、再 claim/reclaim で updated_at が毎回更新され
+  再送ループが永久に >24h に到達せず、retry-key 失効後に二重配信し得る。→ 不変の **`first_send_at`** 列を追加
+  (claim 初回のみ設定・再 claim で更新しない)、24h 終端は first_send_at 基準 (`classifyStaleSending`)。15分 stuck 検知は updated_at 基準のまま。
