@@ -57,8 +57,6 @@ export interface ClaimedLineDraft {
   ticketId: string;
   /** ticket.channel_meta.userId の生値 (push 宛先候補。未検証)。 */
   toUserId: string | null;
-  /** 既存の first_send_at (再 claim 時は設定済。null なら初回 push 前に stamp する)。 */
-  firstSendAt: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +151,11 @@ export interface LineDraftRepo {
   reclaimStaleSending(channelId: string): Promise<{ released: number; failed: number }>;
   /** approved を atomic に claim (approved→sending) し、claim できた draft のみ返す。 */
   claimApprovedDrafts(channelId: string, limit: number): Promise<ClaimedLineDraft[]>;
-  /** first_send_at を「初回 push の直前」に 1 度だけ stamp する (claim 時ではない)。既設定なら no-op。 */
+  /**
+   * first_send_at を 1 度だけ stamp する (既設定なら no-op)。
+   * **LINE が受理し得た場合のみ** 呼ぶ = 送信成功(2xx/409) or 配信不明(network/timeout)。
+   * 確定 not-delivered (401/429/5xx 等の HTTP 応答あり) では呼ばない (retry-key 未消費 = 失効時計を始めない)。
+   */
   markFirstSendAt(draftId: string): Promise<void>;
   markSent(draftId: string, externalMessageId: string, sentAtIso: string): Promise<void>;
   markFailed(draftId: string, error: string): Promise<void>;
@@ -308,22 +310,17 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
     if (candidateIds.length === 0) return [];
 
     // 2. atomic claim: status='approved' ガードが排他の本体。
-    // first_send_at は claim 時には設定しない。claim したが (cron 死亡/300s 予算切れで) 実際に push
-    // しなかった draft に retry-key 失効時計を進めてしまい、未送信のまま 24h で failed/除外されるのを防ぐ。
-    // → 実 push の直前に markFirstSendAt() で stamp する (codex review P2)。
+    // first_send_at は claim 時には設定しない。LINE が受理し得た時 (sent/配信不明) のみ markFirstSendAt で
+    // stamp する。claim だけされ未 push の draft や確定 not-delivered に失効時計を進めない (codex review P2)。
     const { data: claimed, error: claimErr } = await supa
       .from('ticket_drafts')
       .update({ status: 'sending', updated_at: new Date().toISOString() })
       .in('id', candidateIds)
       .eq('status', 'approved')
-      .select('id, body, first_send_at');
+      .select('id, body');
     if (claimErr) throw new Error(`claimApprovedDrafts(claim) failed: ${claimErr.message}`);
 
-    const claimedRows = (claimed ?? []) as Array<{
-      id: string;
-      body: string;
-      first_send_at: string | null;
-    }>;
+    const claimedRows = (claimed ?? []) as Array<{ id: string; body: string }>;
 
     return claimedRows.map((r) => {
       const meta = byId.get(r.id);
@@ -333,7 +330,6 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
         ticketId: meta?.ticketId ?? '',
         // source.type='user' の 1:1 のみ push 宛先に解決 (group/room は null → 送信側で failed)。
         toUserId: resolvePushUserId(meta?.channelMeta),
-        firstSendAt: r.first_send_at,
       };
     });
   }
@@ -492,12 +488,8 @@ export async function sendApprovedLineDrafts(
         continue;
       }
 
-      // 3b. 初回 push の直前に first_send_at を stamp (retry-key 使用開始 = この時刻が 24h 失効基準)。
-      //     claim 時ではなくここで stamp することで、claim だけされ未 push の draft に時計を進めない。
-      if (!draft.firstSendAt) {
-        await repo.markFirstSendAt(draft.id);
-      }
-      // push (retryKey=draftId)
+      // 3b. push (retryKey=draftId)。first_send_at は push 前ではなく「受理し得た時」のみ stamp する
+      //     (確定 not-delivered に retry-key 失効時計を始めない。下の sent / ambiguous 分岐で stamp)。
       const result = await pushWithBackoff(client, {
         to: draft.toUserId,
         text: draft.body,
@@ -515,6 +507,9 @@ export async function sendApprovedLineDrafts(
         const sentAt = new Date().toISOString();
         const externalMessageId = buildExternalMessageId(result, draft.id);
         try {
+          // LINE が受理した (2xx/409) → retry-key 消費済。first_send_at を stamp (set-once)。
+          // 後続 DB 失敗で 'sending' に留まっても 24h 失効判定が効くよう、記録より先に行う。
+          await repo.markFirstSendAt(draft.id);
           // codex review P2: 先に outbound message を記録 (onConflict で idempotent) してから
           // draft を 'sent' 確定する。逆順だと markSent 成功・upsert 失敗時に「配信済だが thread に
           // 無い」行が sent のまま残り再送もされない。この順なら upsert 失敗時は 'sending' のままで、
@@ -561,6 +556,15 @@ export async function sendApprovedLineDrafts(
         // codex review P2: network/timeout は配信したか不明。approved に戻すと 'sending' 限定の
         // 24h retry-key ガードを失い、LINE が受理済だった場合に窓超え再送で二重配信し得る。
         // → 'sending' のまま残す。15m–24h は再送→409 で安全収束 / >24h は stale 再回収で failed。
+        // 受理し得たので first_send_at を stamp (失敗は best-effort: null なら reclaim が updated_at 代替)。
+        try {
+          await repo.markFirstSendAt(draft.id);
+        } catch (fsErr) {
+          logger.warn('line.outbound.mark_first_send_at_failed', {
+            draftId: draft.id,
+            error: fsErr instanceof Error ? fsErr.message : String(fsErr),
+          });
+        }
         logger.error('line.outbound.transport_ambiguous_keep_sending', {
           draftId: draft.id,
           error: errMsg,

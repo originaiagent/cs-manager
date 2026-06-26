@@ -292,3 +292,9 @@ alter table public.ticket_drafts add constraint ticket_drafts_status_check
   実際に push しなかった draft にも時計が進み、未送信のまま 24h で failed/除外され取りこぼす。
   → stamp を **claim 時から「実 push の直前 (per-draft)」へ移動** (`markFirstSendAt`、set-once)。claim だけされ未 push の
   draft は first_send_at=null のまま → 15分 reclaim で approved に戻り再送される (取りこぼさない)。
+
+7回目で P2 を 1 件指摘 → 修正:
+- **P2 確定 not-delivered で失効時計を始めない**: push 直前に stamp すると、確定 not-delivered (401/429/5xx の HTTP 応答=
+  LINE 未受理) でも first_send_at が付き、token outage 等が 24h 続くと未送信の reply が「失効」扱いで failed=取りこぼし。
+  → `markFirstSendAt` を **受理し得た時のみ** 呼ぶ: 送信成功 (2xx/409) と配信不明 (network/timeout) のみ。
+  確定 not-delivered (definite HTTP reject) では stamp しない (retry-key 未消費 = 二重配信リスク無し → 失効時計不要)。

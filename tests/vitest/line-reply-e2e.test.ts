@@ -42,13 +42,7 @@ class E2EFakeRepo implements LineDraftRepo {
   async claimApprovedDrafts(_c: string, limit: number): Promise<ClaimedLineDraft[]> {
     const claimed = [...this.state.entries()].filter(([, d]) => d.status === 'approved').slice(0, limit);
     claimed.forEach(([, d]) => (d.status = 'sending'));
-    return claimed.map(([id, d]) => ({
-      id,
-      body: d.body,
-      ticketId: d.ticketId,
-      toUserId: d.toUserId,
-      firstSendAt: null,
-    }));
+    return claimed.map(([id, d]) => ({ id, body: d.body, ticketId: d.ticketId, toUserId: d.toUserId }));
   }
   async markFirstSendAt() {
     /* no-op for E2E */

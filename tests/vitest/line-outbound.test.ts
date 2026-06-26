@@ -162,13 +162,7 @@ class FakeRepo implements LineDraftRepo {
     this.claimCalls += 1;
     const claimed = [...this.drafts.values()].filter((d) => d.status === 'approved').slice(0, limit);
     claimed.forEach((d) => (d.status = 'sending'));
-    return claimed.map((d) => ({
-      id: d.id,
-      body: d.body,
-      ticketId: d.ticketId,
-      toUserId: d.toUserId,
-      firstSendAt: d.firstSendAt ?? null,
-    }));
+    return claimed.map((d) => ({ id: d.id, body: d.body, ticketId: d.ticketId, toUserId: d.toUserId }));
   }
   async markFirstSendAt(draftId: string) {
     const d = this.drafts.get(draftId)!;
@@ -342,15 +336,35 @@ describe('sendApprovedLineDrafts orchestration', () => {
     expect(repo.outbound[0].channelMessageId).toBe('line-reply:d1');
   });
 
-  it('first_send_at は push 直前に stamp する (userId欠落で push しない draft には stamp しない)', async () => {
+  it('送信成功(2xx)時に first_send_at を stamp、未送信(userId欠落→failed)はしない', async () => {
     const repo = new FakeRepo([draft('d1'), draft('d2', { toUserId: null })]);
     const client = clientReturning(() =>
       new Response(JSON.stringify({ sentMessages: [{ id: 'mm1' }] }), { status: 200 }),
     );
     await runSend(repo, client);
-    // push した d1 は stamp 済、push しない d2 (userId欠落→failed) は null のまま。
     expect(repo.drafts.get('d1')!.firstSendAt).toBeTruthy();
     expect(repo.drafts.get('d2')!.firstSendAt).toBeNull();
+  });
+
+  it('確定 not-delivered (401) は first_send_at を stamp しない (失効時計を始めない / codex P2)', async () => {
+    const repo = new FakeRepo([draft('d1')]);
+    const client = clientReturning(() => new Response('{"message":"auth failed"}', { status: 401 }));
+    await runSend(repo, client);
+    expect(repo.drafts.get('d1')!.status).toBe('approved'); // 401=transient
+    expect(repo.drafts.get('d1')!.firstSendAt).toBeNull(); // 受理されていない → 失効時計を始めない
+  });
+
+  it('配信不明 (network) は first_send_at を stamp する (24hガードを効かせる)', async () => {
+    const repo = new FakeRepo([draft('d1')]);
+    const client = new LineMessagingClient({
+      credentials: { channel_access_token: 'tok' },
+      fetchImpl: (async () => {
+        throw Object.assign(new Error('reset'), { name: 'TypeError' });
+      }) as unknown as typeof fetch,
+    });
+    await runSend(repo, client);
+    expect(repo.drafts.get('d1')!.status).toBe('sending');
+    expect(repo.drafts.get('d1')!.firstSendAt).toBeTruthy();
   });
 
   it('二重送信防止: claim で sending 化、再 claim で approved が無く送らない', async () => {
