@@ -13,7 +13,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { generateSubject } from '@/lib/subject/generate-subject';
-import type { EmbedOneshotResult } from '@/lib/embed/run-oneshot';
+import type { EmbedOneshotResult, RunEmbedOneshotArgs } from '@/lib/embed/run-oneshot';
 
 const TICKET_ID = 'ticket-uuid-001';
 const BODY = '返品したい商品があります';
@@ -140,5 +140,53 @@ describe('generateSubject', () => {
     };
     const r = await generateSubject({ body: BODY, ticketId: '', runEmbed: run });
     expect(r).toBeNull();
+  });
+
+  // ── embed input 契約 (origin-ai cs-reply:subject 口に合わせる) ───────────────
+  // 口契約: input.channel_type ('inquiry'|'review') / input.inquiry_text / input.customer_name。
+  // 旧 subject_kind は origin-ai の input_text_keys に無く gemma へ届かないため使わない。
+  describe('embed input 契約 (channel_type / customer_name)', () => {
+    function captureRun() {
+      const calls: RunEmbedOneshotArgs[] = [];
+      const run = async (args: RunEmbedOneshotArgs): Promise<EmbedOneshotResult> => {
+        calls.push(args);
+        return { ok: true, result: { subject: '返品の相談' } };
+      };
+      return { calls, run };
+    }
+
+    it('(契約) channel_type を送る / subject_kind は送らない (既定 inquiry)', async () => {
+      const { calls, run } = captureRun();
+      await generateSubject({ body: BODY, ticketId: TICKET_ID, runEmbed: run });
+      expect(calls).toHaveLength(1);
+      const input = calls[0].input;
+      expect(input.channel_type).toBe('inquiry');
+      expect(input.inquiry_text).toBe(BODY);
+      expect('subject_kind' in input).toBe(false);
+    });
+
+    it('(契約) kind=review → channel_type=review を送る (レビュー返信件名経路の固定)', async () => {
+      const { calls, run } = captureRun();
+      await generateSubject({ body: BODY, ticketId: TICKET_ID, kind: 'review', runEmbed: run });
+      expect(calls[0].input.channel_type).toBe('review');
+    });
+
+    it('(契約) customerName 指定時のみ customer_name を明示キーで送る (PII full-mask 委譲)', async () => {
+      const { calls, run } = captureRun();
+      await generateSubject({
+        body: BODY,
+        ticketId: TICKET_ID,
+        customerName: '  田中太郎  ',
+        runEmbed: run,
+      });
+      // trim して送る
+      expect(calls[0].input.customer_name).toBe('田中太郎');
+    });
+
+    it('(契約) customerName 未指定/空白 → customer_name キーを送らない', async () => {
+      const { calls, run } = captureRun();
+      await generateSubject({ body: BODY, ticketId: TICKET_ID, customerName: '   ', runEmbed: run });
+      expect('customer_name' in calls[0].input).toBe(false);
+    });
   });
 });

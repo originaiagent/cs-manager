@@ -86,7 +86,12 @@ export async function ingestPullItem(
     // pre-SELECT で origin-ai を呼ばず即 return する (冪等 / 無駄回避は resolver に一元化)。
     subjectAttempted = true;
     try {
-      await resolveSubject(sb, args.ticketId, { body: latest.body, kind });
+      await resolveSubject(sb, args.ticketId, {
+        body: latest.body,
+        kind,
+        // 氏名 PII を明示的に origin-ai へ渡し full-mask させる (PII egress 境界 / codex D1)。
+        customerName: args.customerName ?? null,
+      });
     } catch (e) {
       warnings.push(`subject:${e instanceof Error ? e.name : 'unknown'}`);
     }

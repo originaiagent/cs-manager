@@ -31,6 +31,12 @@ export interface GenerateSubjectInput {
   ticketId: string;
   /** 種別ヒント。'review'→「レビュー返信」系の件名。既定 'inquiry'。 */
   kind?: SubjectKind;
+  /**
+   * 顧客名 (任意)。origin-ai 口に customer_name として渡し pii_full_mask_keys で full-mask させる
+   * (氏名が inquiry_text 本文に混入していても外部 gemma へ生で出さない / PII egress 境界)。
+   * 件名自体には氏名を入れない (origin-ai 側 prompt が保証)。
+   */
+  customerName?: string | null;
   /** origin-ai 失敗時のフォールバック。既定 null (= 件名なし、goal 準拠)。 */
   fallback?: string | null;
   /**
@@ -70,7 +76,15 @@ export async function generateSubject(input: GenerateSubjectInput): Promise<stri
       targetId: input.ticketId,
       input: {
         inquiry_text: input.body,
-        subject_kind: input.kind ?? 'inquiry',
+        // origin-ai 口の契約キーは channel_type ('review'→レビュー返信件名 / 'inquiry'→通常用件)。
+        // origin-ai io_metadata.input_text_keys=["inquiry_text","channel_type"] のため、旧 subject_kind
+        // では gemma に届かずレビュー判定が無効化される (契約整合: client を server に合わせる)。
+        channel_type: input.kind ?? 'inquiry',
+        // 氏名 PII は明示キー customer_name で渡し、origin-ai 側 pii_full_mask_keys で full-mask させる。
+        // 空/未指定は載せない (無駄なキーを送らない)。
+        ...(input.customerName && input.customerName.trim()
+          ? { customer_name: input.customerName.trim() }
+          : {}),
       },
     });
 
@@ -112,6 +126,8 @@ export async function resolveAndPersistSubject(
   input: {
     body: string;
     kind?: SubjectKind;
+    /** 顧客名 (任意)。origin-ai に customer_name として渡し full-mask させる (PII egress 境界)。 */
+    customerName?: string | null;
     fallback?: string | null;
     /** テスト注入用。未指定なら runEmbedOneshotAndPoll。 */
     runEmbed?: (args: RunEmbedOneshotArgs) => Promise<EmbedOneshotResult>;
@@ -142,6 +158,7 @@ export async function resolveAndPersistSubject(
       body: input.body,
       ticketId,
       kind: input.kind,
+      customerName: input.customerName,
       fallback: input.fallback,
       runEmbed: input.runEmbed,
     });

@@ -103,6 +103,8 @@ export async function ingestInboundWithDraft(
   await resolveAndPersistSubject(sb, ticketId, {
     body: params.inboundMessage.body,
     kind: params.subjectKind,
+    // 氏名 PII を明示的に origin-ai へ渡し full-mask させる (PII egress 境界 / codex D1)。
+    customerName: params.ragInput.customerName ?? null,
     fallback: params.subjectFallback ?? null,
   });
 

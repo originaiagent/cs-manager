@@ -74,6 +74,7 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     expect(resolveSubject).toHaveBeenCalledWith(expect.anything(), 't-1', {
       body: '最新の返品依頼',
       kind: 'inquiry',
+      customerName: null,
     });
     expect(generateDraft).toHaveBeenCalledTimes(1);
     expect(generateDraft.mock.calls[0][1]).toMatchObject({ inboundBody: '最新の返品依頼', ticketId: 't-1' });
@@ -152,6 +153,7 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     expect(resolveSubject).toHaveBeenCalledWith(expect.anything(), 't-1', {
       body: 'レビューへの返信',
       kind: 'review',
+      customerName: null,
     });
   });
 
@@ -197,6 +199,7 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     expect(resolveSubject).toHaveBeenCalledWith(expect.anything(), 't-1', {
       body: '正常に入る問い合わせ',
       kind: 'inquiry',
+      customerName: null,
     });
     expect(generateDraft).toHaveBeenCalledTimes(1);
   });
