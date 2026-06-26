@@ -128,16 +128,27 @@ export async function upsertMessagesReturningNew(
   sb: SupabaseClient,
   ticketId: string,
   messages: NormalizedMessage[],
-): Promise<{ count: number; newInbound: NormalizedMessage[] }> {
+): Promise<{ count: number; newInbound: NormalizedMessage[]; errorCount: number }> {
   let count = 0;
+  let errorCount = 0;
   const newInbound: NormalizedMessage[] = [];
   for (const m of messages) {
-    const { isNew } = await upsertMessageReturningNew(sb, ticketId, m);
+    // codex PR review P3 (atomicity): 1 メッセージの insert 失敗で batch 全体を中断しない。
+    // 失敗メッセージは insert されず isNew にもならない → 次 sync で再試行される (self-healing)。
+    // これにより、先行して insert 済みの inbound に対する subject / draft 発火が
+    // 後続メッセージの失敗で恒久的にブロックされる事態を防ぐ (fail-closed)。
+    let isNew = false;
+    try {
+      ({ isNew } = await upsertMessageReturningNew(sb, ticketId, m));
+    } catch {
+      errorCount += 1;
+      continue;
+    }
     if (!isNew) continue;
     count += 1;
     if (m.direction === 'inbound') newInbound.push(m);
   }
-  return { count, newInbound };
+  return { count, newInbound, errorCount };
 }
 
 /** newInbound 群から「最新 (sentAt 最大) の inbound」を返す。空なら null。 */

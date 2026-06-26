@@ -96,10 +96,15 @@ export async function generateSubject(input: GenerateSubjectInput): Promise<stri
 /**
  * ticket.subject を generateSubject で解決し DB 更新する (単一の書き込み口)。
  *
- * 冪等 (codex CONCERN#1): UPDATE は subject IS NULL の行のみ実行する。
- * - 既に件名がある行は触らない (再 sync で再要約しない / 人手編集を踏み潰さない)。
- * - 生成が non-null のときだけ UPDATE 実行。null(失敗) 時は何もしない = 件名なし維持。
- * - 例外を投げない (subject 失敗で受信 / ドラフトを壊さない)。
+ * 冪等 + clobber 防止 (codex CONCERN#1 / PR review P1+P2):
+ *  1. 先に現 subject を読み、既に件名がある行 (NULL でも '' でも whitespace でもない) は
+ *     **origin-ai を呼ばずに即 return** (無駄な要約呼出を避ける / 再 sync で再要約しない)。
+ *  2. UPDATE は「読んだ時点の値が変わっていない行のみ」更新する optimistic-lock
+ *     (`subject IS NULL` または `subject = <読んだ空値>`)。これにより
+ *       - 空 (NULL / '' / whitespace) の行は確実に更新され (P1: btrim='' 相当を取りこぼさない)、
+ *       - origin-ai 実行中 (最大 ~150s) に人手で件名が入った行は clobber しない (P2)。
+ *  3. 生成が non-null のときだけ UPDATE。null(失敗) 時は何もしない = 件名なし維持。
+ *  4. 例外を投げない (subject 失敗で受信 / ドラフトを壊さない)。
  */
 export async function resolveAndPersistSubject(
   sb: SupabaseClient,
@@ -113,6 +118,26 @@ export async function resolveAndPersistSubject(
   },
 ): Promise<void> {
   try {
+    // 素材が無ければ何もしない (origin-ai を呼ばない)
+    if (!input.body) return;
+
+    // 1. 現 subject を読む (optimistic-lock 用に「読んだ時点の値」を保持)
+    const { data: cur, error: selErr } = await sb
+      .from('tickets')
+      .select('subject')
+      .eq('id', ticketId)
+      .maybeSingle();
+    if (selErr) {
+      console.warn('[subject] resolveAndPersistSubject select error', {
+        code: (selErr as { code?: string }).code ?? 'unknown',
+      });
+      return;
+    }
+    const oldVal = (cur?.subject as string | null | undefined) ?? null;
+    // 既に件名がある (空白のみでない) → origin-ai を呼ばずに終了 (冪等 / 無駄回避)
+    if (oldVal !== null && oldVal.trim() !== '') return;
+
+    // 2. origin-ai 要約 (空のときだけ実行)
     const subject = await generateSubject({
       body: input.body,
       ticketId,
@@ -120,21 +145,17 @@ export async function resolveAndPersistSubject(
       fallback: input.fallback,
       runEmbed: input.runEmbed,
     });
-
     if (!subject) return;
 
-    // subject IS NULL の行のみ更新 (冪等ロック: 既存 subject は絶対に上書きしない)
+    // 3. optimistic-lock 更新: 読んだ時の空値のままの行のみ更新する
+    //    (NULL は .is(null) / '' や whitespace は .eq(oldVal) で厳密一致)
+    const base = sb.from('tickets').update({ subject }).eq('id', ticketId);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { error } = await (sb
-      .from('tickets')
-      .update({ subject })
-      .eq('id', ticketId)
-      .is('subject', null) as any);
-
-    if (error) {
-      // DB エラーは安定コードのみ記録。subject 失敗は致命でない。
+    const guarded = oldVal === null ? (base as any).is('subject', null) : (base as any).eq('subject', oldVal);
+    const { error: updErr } = await guarded;
+    if (updErr) {
       console.warn('[subject] resolveAndPersistSubject update error', {
-        code: (error as { code?: string }).code ?? 'unknown',
+        code: (updErr as { code?: string }).code ?? 'unknown',
       });
     }
   } catch (e) {

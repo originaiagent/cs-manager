@@ -101,21 +101,20 @@ async function persistSyncState(channelId: string, lastSyncedAt: Date, lastExter
 async function upsertTicket(
   channelId: string,
   payload: NormalizedTicketWithMessages['ticket'],
-): Promise<{ id: string; isNew: boolean; subjectEmpty: boolean }> {
+): Promise<string> {
   const supa = await getSupabaseAdmin();
   // status は cs-manager 内部で書き換わる可能性があるため、新規作成時のみ adapter 値を採用。
   // 既存行に対しては customer / channel_meta / resolved_at だけ更新する方針。
   // subject は **書かない** (codex CONCERN#1: 書込口は resolveAndPersistSubject に収束)。
   const { data: existing, error: selErr } = await supa
     .from('tickets')
-    .select('id, status, subject')
+    .select('id, status')
     .eq('channel_id', channelId)
     .eq('external_id', payload.externalId)
     .maybeSingle();
   if (selErr) throw new Error(`upsertTicket(select) failed: ${selErr.message}`);
 
   if (existing) {
-    const subjectEmpty = !((existing.subject as string | null) ?? '').trim();
     const { error: updErr } = await supa
       .from('tickets')
       .update({
@@ -130,7 +129,7 @@ async function upsertTicket(
       })
       .eq('id', existing.id);
     if (updErr) throw new Error(`upsertTicket(update) failed: ${updErr.message}`);
-    return { id: existing.id as string, isNew: false, subjectEmpty };
+    return existing.id as string;
   }
 
   const { data: ins, error: insErr } = await supa
@@ -148,7 +147,7 @@ async function upsertTicket(
     .select('id')
     .single();
   if (insErr) throw new Error(`upsertTicket(insert) failed: ${insErr.message}`);
-  return { id: ins.id as string, isNew: true, subjectEmpty: true };
+  return ins.id as string;
 }
 
 export type CredentialResolution =
@@ -248,12 +247,11 @@ async function syncOneChannel(
 
   try {
     for await (const item of adapter.fetchInbox(ctx)) {
-      const { id: ticketId, subjectEmpty } = await upsertTicket(channel.id, item.ticket);
-      // 共通後処理: 新規 inbound 識別 → 件名(空時のみ) → auto-draft(Yahoo)。受信を壊さない。
+      const ticketId = await upsertTicket(channel.id, item.ticket);
+      // 共通後処理: 新規 inbound 識別 → 件名(resolver が空時のみ要約) → auto-draft(Yahoo)。受信を壊さない。
       const ingest = await ingestPullItem(supa, {
         channelId: channel.id,
         ticketId,
-        subjectEmpty,
         messages: item.messages,
         channelMeta: item.ticket.channelMeta,
         customerName: item.ticket.customerName ?? null,

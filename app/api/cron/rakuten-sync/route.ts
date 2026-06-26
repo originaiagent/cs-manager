@@ -87,7 +87,7 @@ async function persistSyncState(
 async function upsertTicket(
   channelId: string,
   payload: NormalizedTicketWithMessages['ticket'],
-): Promise<{ id: string; isNew: boolean; subjectEmpty: boolean }> {
+): Promise<{ id: string; isNew: boolean }> {
   // Gemini code review High 指摘: 旧 select→insert パターンは並行 cron 実行時に
   // unique 制約違反を起こすレース条件を含むため、(channel_id, external_id) UNIQUE を
   // 利用した atomic な .upsert() に切替。
@@ -97,7 +97,7 @@ async function upsertTicket(
   const supa = await getSupabaseAdmin();
   const { data: existing, error: selErr } = await supa
     .from('tickets')
-    .select('id, status, subject')
+    .select('id, status')
     .eq('channel_id', channelId)
     .eq('external_id', payload.externalId)
     .maybeSingle();
@@ -112,7 +112,6 @@ async function upsertTicket(
   };
 
   if (existing) {
-    const subjectEmpty = !((existing.subject as string | null) ?? '').trim();
     const update = {
       ...baseUpdate,
       // untouched → done のみ自動遷移を許可。in_progress は人手フローを尊重して踏み潰さない。
@@ -122,7 +121,7 @@ async function upsertTicket(
     };
     const { error: updErr } = await supa.from('tickets').update(update).eq('id', existing.id);
     if (updErr) throw new Error(`upsertTicket(update) failed: ${updErr.message}`);
-    return { id: existing.id as string, isNew: false, subjectEmpty };
+    return { id: existing.id as string, isNew: false };
   }
 
   // 競合した insert で並行 cron が同時に到達した場合のレース対策として
@@ -147,8 +146,7 @@ async function upsertTicket(
   if (postErr) throw new Error(`upsertTicket(post-select) failed: ${postErr.message}`);
   // existing が無く upsert を通った = 新規 (ignoreDuplicates により別 cron が先行した
   // 場合は実質既存だが、後段フローは DB partial UNIQUE + flag gate で冪等なので問題ない)
-  // 新規 insert は subject NULL で作成されるため subjectEmpty=true。
-  return { id: postSel.id as string, isNew: true, subjectEmpty: true };
+  return { id: postSel.id as string, isNew: true };
 }
 
 interface InboundResult {
@@ -186,13 +184,12 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
 
   try {
     for await (const item of rakutenAdapter.fetchInbox(ctx)) {
-      const { id: ticketId, isNew, subjectEmpty } = await upsertTicket(channel.id, item.ticket);
-      // 共通後処理: 新規 inbound 識別 → 件名(空時のみ)。楽天は auto-draft を使わず
+      const { id: ticketId, isNew } = await upsertTicket(channel.id, item.ticket);
+      // 共通後処理: 新規 inbound 識別 → 件名(resolver が空時のみ要約)。楽天は auto-draft を使わず
       // first-response flow 経路を維持するため autoDraft:false (回帰回避)。
       const ingest = await ingestPullItem(supa, {
         channelId: channel.id,
         ticketId,
-        subjectEmpty,
         messages: item.messages,
         channelMeta: item.ticket.channelMeta,
         customerName: item.ticket.customerName ?? null,

@@ -104,6 +104,15 @@ export async function resolveAndPersistSubject(
 ): Promise<void>;
 ```
 
+> **codex PR review 反映 (P1+P2)**: `resolveAndPersistSubject` は **pre-SELECT optimistic-lock** で実装。
+> ① 先に現 subject を読み、既に件名があれば origin-ai を呼ばず return (P2: 既存件名の再要約/無駄回避)。
+> ② UPDATE は「読んだ時点の空値 (NULL は `.is(null)` / `''`・whitespace は `.eq(oldVal)`)」に厳密一致する
+> 行のみ更新 = `subject IS NULL OR btrim=''` 相当を取りこぼさず (P1)、かつ要約実行中 (~150s) の人手編集を
+> clobber しない。③ pull/push とも新規 inbound では常に本関数を呼び、抑止判定は本関数に一元化。
+> **codex PR review 反映 (P3)**: `upsertMessagesReturningNew` は per-message insert の失敗で batch を
+> 中断せず continue (失敗分は次 sync で再試行)。先行 insert 済 inbound の subject/draft 発火が後続失敗で
+> 恒久ブロックされない (fail-closed)。
+
 > **codex CONCERN#1 反映 (subject clobber 防止 / 最重要)**: subject を「ingest 層のみが書く」と
 > するには、adapter から subject を消すだけでは不十分。現行 upsertTicket の **既存行 update が
 > `subject: payload.subject ?? null` を常に書く**ため、生成済み件名が毎 sync で null に戻る。

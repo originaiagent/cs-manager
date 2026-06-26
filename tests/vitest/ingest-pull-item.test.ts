@@ -4,18 +4,20 @@
  * 検証する不変条件:
  *  - 新規 inbound があるときだけ subject / draft を発火する。
  *  - outbound-only / 再送 (isNew=false) では一切発火しない。
- *  - subject は subjectEmpty=true のときだけ呼ぶ (無駄な origin-ai 呼出回避)。
+ *  - subject 抑止 (既存件名の再要約回避) は resolver 内で判定するため、ここでは
+ *    新規 inbound があれば常に resolveSubject を呼ぶ (gate の一元化)。
  *  - autoDraft=false (楽天) では draft を発火しない。
  *  - 複数新規 inbound では「最新 (sentAt 最大)」を素材にする。
  *  - channelMeta.subjectKind='review' は kind='review' で渡る。
- *  - subject / draft の例外は握って warnings に積む (受信を壊さない)。
+ *  - subject / draft の例外、および一部メッセージの insert 失敗は握って warnings に積む
+ *    (受信を壊さない / 残りメッセージは処理を継続)。
  */
 import { describe, it, expect, vi } from 'vitest';
 import { ingestPullItem } from '@/lib/sync/ingest-pull-item';
 import type { NormalizedMessage } from '@/channels/_lib/types';
 
-/** messages.insert を seen セットで擬似冪等化する fake Supabase。 */
-function makeFakeSb(seen = new Set<string>()) {
+/** messages.insert を seen セットで擬似冪等化する fake Supabase。failKeys は非23505エラーを返す。 */
+function makeFakeSb(seen = new Set<string>(), failKeys = new Set<string>()) {
   return {
     from(table: string) {
       if (table !== 'messages') {
@@ -24,6 +26,7 @@ function makeFakeSb(seen = new Set<string>()) {
       return {
         insert(row: { channel_message_id: string }) {
           const key = row.channel_message_id;
+          if (failKeys.has(key)) return Promise.resolve({ error: { code: '500', message: 'boom' } });
           if (seen.has(key)) return Promise.resolve({ error: { code: '23505' } });
           seen.add(key);
           return Promise.resolve({ error: null });
@@ -40,14 +43,10 @@ function outbound(id: string, body: string, sentAt: string): NormalizedMessage {
   return { channelMessageId: id, direction: 'outbound', body, senderType: 'staff', sentAt };
 }
 
-const base = {
-  channelId: 'ch-1',
-  ticketId: 't-1',
-  customerName: null,
-};
+const base = { channelId: 'ch-1', ticketId: 't-1', customerName: null };
 
 describe('ingestPullItem — pull 後処理の結線', () => {
-  it('新規 inbound + subjectEmpty + autoDraft → subject と draft を最新 inbound で発火', async () => {
+  it('新規 inbound + autoDraft → subject と draft を最新 inbound で発火', async () => {
     const resolveSubject = vi.fn(async () => {});
     const generateDraft = vi.fn(async (_sb: unknown, _args: unknown) => ({
       status: 'ingested_with_draft' as const,
@@ -55,7 +54,6 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     }));
     const r = await ingestPullItem(makeFakeSb(), {
       ...base,
-      subjectEmpty: true,
       autoDraft: true,
       messages: [
         inbound('talk:1', '古い問い合わせ', '2026-06-26T01:00:00Z'),
@@ -70,6 +68,7 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     expect(r.newInboundCount).toBe(2);
     expect(r.subjectAttempted).toBe(true);
     expect(r.draftStatus).toBe('ingested_with_draft');
+    expect(r.warnings).toHaveLength(0);
     // 最新 inbound (03:00 の talk:2) を素材にする
     expect(resolveSubject).toHaveBeenCalledTimes(1);
     expect(resolveSubject).toHaveBeenCalledWith(expect.anything(), 't-1', {
@@ -85,7 +84,6 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     const generateDraft = vi.fn(async () => ({ status: 'ingested_with_draft' as const }));
     const r = await ingestPullItem(makeFakeSb(), {
       ...base,
-      subjectEmpty: true,
       autoDraft: true,
       messages: [outbound('talk:reply', '店舗回答', '2026-06-26T02:00:00Z')],
       resolveSubject,
@@ -96,19 +94,18 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     expect(generateDraft).not.toHaveBeenCalled();
   });
 
-  it('subjectEmpty=false → subject を呼ばない (draft は autoDraft に従う)', async () => {
+  it('新規 inbound があれば常に resolveSubject を呼ぶ (既存件名の抑止は resolver 内で判定)', async () => {
     const resolveSubject = vi.fn(async () => {});
     const generateDraft = vi.fn(async () => ({ status: 'ingested_with_draft' as const }));
     const r = await ingestPullItem(makeFakeSb(), {
       ...base,
-      subjectEmpty: false,
       autoDraft: true,
       messages: [inbound('talk:1', '問い合わせ', '2026-06-26T01:00:00Z')],
       resolveSubject,
       generateDraft,
     });
-    expect(r.subjectAttempted).toBe(false);
-    expect(resolveSubject).not.toHaveBeenCalled();
+    expect(r.subjectAttempted).toBe(true);
+    expect(resolveSubject).toHaveBeenCalledTimes(1);
     expect(generateDraft).toHaveBeenCalledTimes(1);
   });
 
@@ -117,7 +114,6 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     const generateDraft = vi.fn(async () => ({ status: 'ingested_with_draft' as const }));
     await ingestPullItem(makeFakeSb(), {
       ...base,
-      subjectEmpty: true,
       autoDraft: false,
       messages: [inbound('inquiry:1', '楽天問い合わせ', '2026-06-26T01:00:00Z')],
       resolveSubject,
@@ -133,7 +129,6 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     const generateDraft = vi.fn(async () => ({ status: 'ingested_with_draft' as const }));
     const r = await ingestPullItem(makeFakeSb(seen), {
       ...base,
-      subjectEmpty: true,
       autoDraft: true,
       messages: [inbound('inquiry:1', '同じ問い合わせ', '2026-06-26T01:00:00Z')],
       resolveSubject,
@@ -149,7 +144,6 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     const resolveSubject = vi.fn(async () => {});
     await ingestPullItem(makeFakeSb(), {
       ...base,
-      subjectEmpty: true,
       autoDraft: false,
       channelMeta: { subjectKind: 'review' },
       messages: [inbound('talk:1', 'レビューへの返信', '2026-06-26T01:00:00Z')],
@@ -170,7 +164,6 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     });
     const r = await ingestPullItem(makeFakeSb(), {
       ...base,
-      subjectEmpty: true,
       autoDraft: true,
       messages: [inbound('talk:1', '問い合わせ', '2026-06-26T01:00:00Z')],
       resolveSubject,
@@ -179,5 +172,30 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     expect(r.inserted).toBe(1);
     expect(r.warnings.some((w) => w.startsWith('subject:'))).toBe(true);
     expect(r.warnings.some((w) => w.startsWith('draft:'))).toBe(true);
+  });
+
+  it('一部メッセージの insert 失敗 (非23505) でも batch を中断せず、成功分で発火 (P3)', async () => {
+    const failKeys = new Set<string>(['talk:bad']);
+    const resolveSubject = vi.fn(async () => {});
+    const generateDraft = vi.fn(async () => ({ status: 'ingested_with_draft' as const }));
+    const r = await ingestPullItem(makeFakeSb(new Set(), failKeys), {
+      ...base,
+      autoDraft: true,
+      messages: [
+        inbound('talk:ok', '正常に入る問い合わせ', '2026-06-26T01:00:00Z'),
+        inbound('talk:bad', 'insert 失敗するメッセージ', '2026-06-26T02:00:00Z'),
+      ],
+      resolveSubject,
+      generateDraft,
+    });
+    // 失敗メッセージは新規扱いされず、成功した talk:ok で subject/draft が発火する
+    expect(r.inserted).toBe(1);
+    expect(r.newInboundCount).toBe(1);
+    expect(r.warnings.some((w) => w.startsWith('message_insert_errors:'))).toBe(true);
+    expect(resolveSubject).toHaveBeenCalledWith(expect.anything(), 't-1', {
+      body: '正常に入る問い合わせ',
+      kind: 'inquiry',
+    });
+    expect(generateDraft).toHaveBeenCalledTimes(1);
   });
 });

@@ -28,8 +28,6 @@ import type { IngestInboundStatus } from '@/lib/sync/ingest-inbound';
 export interface IngestPullItemArgs {
   channelId: string;
   ticketId: string;
-  /** upsertTicket が報告した「現在 subject が空か」。false なら origin-ai を呼ばない (無駄回避)。 */
-  subjectEmpty: boolean;
   messages: NormalizedMessage[];
   /** ticket.channelMeta。subjectKind='review' のときレビュー返信件名にする。 */
   channelMeta?: Record<string, unknown> | null;
@@ -63,11 +61,12 @@ export async function ingestPullItem(
   const generateDraft = args.generateDraft ?? defaultGenerateDraft;
   const warnings: string[] = [];
 
-  const { count: inserted, newInbound } = await upsertMessagesReturningNew(
+  const { count: inserted, newInbound, errorCount } = await upsertMessagesReturningNew(
     sb,
     args.ticketId,
     args.messages,
   );
+  if (errorCount > 0) warnings.push(`message_insert_errors:${errorCount}`);
 
   const latest = latestInbound(newInbound);
   let subjectAttempted = false;
@@ -78,14 +77,13 @@ export async function ingestPullItem(
     const meta = (args.channelMeta ?? {}) as Record<string, unknown>;
     const kind: SubjectKind = meta.subjectKind === 'review' ? 'review' : 'inquiry';
 
-    // 件名: 現 subject が空のときだけ origin-ai を呼ぶ (書込は subject IS NULL ガードで冪等)。
-    if (args.subjectEmpty) {
-      subjectAttempted = true;
-      try {
-        await resolveSubject(sb, args.ticketId, { body: latest.body, kind });
-      } catch (e) {
-        warnings.push(`subject:${e instanceof Error ? e.name : 'unknown'}`);
-      }
+    // 件名: 新規 inbound に対し常に resolveSubject を呼ぶ。既に件名がある行は resolver 内の
+    // pre-SELECT で origin-ai を呼ばず即 return する (冪等 / 無駄回避は resolver に一元化)。
+    subjectAttempted = true;
+    try {
+      await resolveSubject(sb, args.ticketId, { body: latest.body, kind });
+    } catch (e) {
+      warnings.push(`subject:${e instanceof Error ? e.name : 'unknown'}`);
     }
 
     // auto-draft: 最新の新規 inbound に対し RAG ドラフト生成 (fail-closed)。Yahoo のみ。
