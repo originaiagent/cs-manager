@@ -57,6 +57,8 @@ export interface ClaimedLineDraft {
   ticketId: string;
   /** ticket.channel_meta.userId の生値 (push 宛先候補。未検証)。 */
   toUserId: string | null;
+  /** 既存の first_send_at (再 claim 時は設定済。null なら初回 push 前に stamp する)。 */
+  firstSendAt: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +153,8 @@ export interface LineDraftRepo {
   reclaimStaleSending(channelId: string): Promise<{ released: number; failed: number }>;
   /** approved を atomic に claim (approved→sending) し、claim できた draft のみ返す。 */
   claimApprovedDrafts(channelId: string, limit: number): Promise<ClaimedLineDraft[]>;
+  /** first_send_at を「初回 push の直前」に 1 度だけ stamp する (claim 時ではない)。既設定なら no-op。 */
+  markFirstSendAt(draftId: string): Promise<void>;
   markSent(draftId: string, externalMessageId: string, sentAtIso: string): Promise<void>;
   markFailed(draftId: string, error: string): Promise<void>;
   /** transient 失敗。再送可能に approved へ戻す。 */
@@ -304,26 +308,22 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
     if (candidateIds.length === 0) return [];
 
     // 2. atomic claim: status='approved' ガードが排他の本体。
+    // first_send_at は claim 時には設定しない。claim したが (cron 死亡/300s 予算切れで) 実際に push
+    // しなかった draft に retry-key 失効時計を進めてしまい、未送信のまま 24h で failed/除外されるのを防ぐ。
+    // → 実 push の直前に markFirstSendAt() で stamp する (codex review P2)。
     const { data: claimed, error: claimErr } = await supa
       .from('ticket_drafts')
       .update({ status: 'sending', updated_at: new Date().toISOString() })
       .in('id', candidateIds)
       .eq('status', 'approved')
-      .select('id, body');
+      .select('id, body, first_send_at');
     if (claimErr) throw new Error(`claimApprovedDrafts(claim) failed: ${claimErr.message}`);
 
-    const claimedRows = (claimed ?? []) as Array<{ id: string; body: string }>;
-
-    // first_send_at を「初回のみ」設定 (再 claim では更新しない)。retry-key 24h 失効判定の不変基準。
-    // PostgREST では coalesce(col, now()) を直接書けないため、is null の行だけ別 update で 1 度だけ設定する。
-    if (claimedRows.length > 0) {
-      const { error: fsErr } = await supa
-        .from('ticket_drafts')
-        .update({ first_send_at: new Date().toISOString() })
-        .in('id', claimedRows.map((r) => r.id))
-        .is('first_send_at', null);
-      if (fsErr) throw new Error(`claimApprovedDrafts(first_send_at) failed: ${fsErr.message}`);
-    }
+    const claimedRows = (claimed ?? []) as Array<{
+      id: string;
+      body: string;
+      first_send_at: string | null;
+    }>;
 
     return claimedRows.map((r) => {
       const meta = byId.get(r.id);
@@ -333,8 +333,20 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
         ticketId: meta?.ticketId ?? '',
         // source.type='user' の 1:1 のみ push 宛先に解決 (group/room は null → 送信側で failed)。
         toUserId: resolvePushUserId(meta?.channelMeta),
+        firstSendAt: r.first_send_at,
       };
     });
+  }
+
+  async markFirstSendAt(draftId: string): Promise<void> {
+    const supa = await getSupabaseAdmin();
+    // set-once: 既に設定済 (再 claim) なら touch しない (retry-key 時計を進めない)。
+    const { error } = await supa
+      .from('ticket_drafts')
+      .update({ first_send_at: new Date().toISOString() })
+      .eq('id', draftId)
+      .is('first_send_at', null);
+    if (error) throw new Error(`markFirstSendAt failed: ${error.message}`);
   }
 
   async markSent(draftId: string, externalMessageId: string, sentAtIso: string): Promise<void> {
@@ -480,7 +492,12 @@ export async function sendApprovedLineDrafts(
         continue;
       }
 
-      // 3b. push (retryKey=draftId)
+      // 3b. 初回 push の直前に first_send_at を stamp (retry-key 使用開始 = この時刻が 24h 失効基準)。
+      //     claim 時ではなくここで stamp することで、claim だけされ未 push の draft に時計を進めない。
+      if (!draft.firstSendAt) {
+        await repo.markFirstSendAt(draft.id);
+      }
+      // push (retryKey=draftId)
       const result = await pushWithBackoff(client, {
         to: draft.toUserId,
         text: draft.body,

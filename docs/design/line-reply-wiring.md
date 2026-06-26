@@ -286,3 +286,9 @@ alter table public.ticket_drafts add constraint ticket_drafts_status_check
   sourceType='user' を必ず付与するため取りこぼさない。
 - **P2 approved 滞留の retry-key 失効**: transient 失敗を繰り返し approved に留まった draft は first_send_at>24h で
   retry-key 失効済。claim 候補クエリで `first_send_at>24h` を除外 (`isRetryKeyExpired`) + reclaim で terminal 化。
+
+6回目で P2 を 1 件指摘 → 修正:
+- **P2 first_send_at の stamp 時点**: claim 時 (バッチ一括) に stamp すると、claim したが cron 死亡/300s 予算切れで
+  実際に push しなかった draft にも時計が進み、未送信のまま 24h で failed/除外され取りこぼす。
+  → stamp を **claim 時から「実 push の直前 (per-draft)」へ移動** (`markFirstSendAt`、set-once)。claim だけされ未 push の
+  draft は first_send_at=null のまま → 15分 reclaim で approved に戻り再送される (取りこぼさない)。

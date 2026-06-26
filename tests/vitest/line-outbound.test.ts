@@ -140,6 +140,7 @@ interface DraftState {
   body: string;
   ticketId: string;
   toUserId: string | null;
+  firstSendAt?: string | null;
   externalMessageId?: string | null;
   sentAt?: string | null;
   lastError?: string | null;
@@ -161,7 +162,17 @@ class FakeRepo implements LineDraftRepo {
     this.claimCalls += 1;
     const claimed = [...this.drafts.values()].filter((d) => d.status === 'approved').slice(0, limit);
     claimed.forEach((d) => (d.status = 'sending'));
-    return claimed.map((d) => ({ id: d.id, body: d.body, ticketId: d.ticketId, toUserId: d.toUserId }));
+    return claimed.map((d) => ({
+      id: d.id,
+      body: d.body,
+      ticketId: d.ticketId,
+      toUserId: d.toUserId,
+      firstSendAt: d.firstSendAt ?? null,
+    }));
+  }
+  async markFirstSendAt(draftId: string) {
+    const d = this.drafts.get(draftId)!;
+    if (!d.firstSendAt) d.firstSendAt = '2026-06-26T00:00:00.000Z';
   }
   async markSent(draftId: string, externalMessageId: string, sentAtIso: string) {
     if (this.throwOnMarkSent) throw new Error('db down');
@@ -197,7 +208,15 @@ function clientReturning(responder: () => Response): LineMessagingClient {
 }
 
 function draft(id: string, over: Partial<DraftState> = {}): DraftState {
-  return { id, status: 'approved', body: 'reply body', ticketId: `t-${id}`, toUserId: 'U_user_1', ...over };
+  return {
+    id,
+    status: 'approved',
+    body: 'reply body',
+    ticketId: `t-${id}`,
+    toUserId: 'U_user_1',
+    firstSendAt: null,
+    ...over,
+  };
 }
 
 /** fake timers 下で sendApprovedLineDrafts を完走させる。 */
@@ -321,6 +340,17 @@ describe('sendApprovedLineDrafts orchestration', () => {
     // outbound message は markSent 前に記録済 (audit 欠落しない / codex P2)。
     expect(repo.outbound).toHaveLength(1);
     expect(repo.outbound[0].channelMessageId).toBe('line-reply:d1');
+  });
+
+  it('first_send_at は push 直前に stamp する (userId欠落で push しない draft には stamp しない)', async () => {
+    const repo = new FakeRepo([draft('d1'), draft('d2', { toUserId: null })]);
+    const client = clientReturning(() =>
+      new Response(JSON.stringify({ sentMessages: [{ id: 'mm1' }] }), { status: 200 }),
+    );
+    await runSend(repo, client);
+    // push した d1 は stamp 済、push しない d2 (userId欠落→failed) は null のまま。
+    expect(repo.drafts.get('d1')!.firstSendAt).toBeTruthy();
+    expect(repo.drafts.get('d2')!.firstSendAt).toBeNull();
   });
 
   it('二重送信防止: claim で sending 化、再 claim で approved が無く送らない', async () => {
