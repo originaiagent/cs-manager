@@ -12,9 +12,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// 認可は常に通す (ゲートロジックそのものを検証するため)
+// 認可は常に通す (ゲートロジックそのものを検証するため)。
+// 接続鍵 Core 集約 Done-1: 内部 tier は authorizeInternalApiRoute (async) に分離。
 vi.mock('@/lib/auth/api-auth', () => ({
-  authorizeApiRoute: () => null,
+  authorizeInternalApiRoute: async () => null,
 }));
 
 // supabase-admin フェイク: insert は受領 row をそのまま返す。GET は注入した latestDraft を返す。

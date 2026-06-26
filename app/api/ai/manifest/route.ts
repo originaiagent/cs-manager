@@ -5,7 +5,7 @@
  * origin-core が内部鍵で集約し、メタエージェントがユーザー語→ツール概念を意味照合する。
  *
  * 認証: X-Internal-API-Key (全ツール共有の内部鍵)。authorizeAiManifestRequest が
- *       timing-safe に検証する (INTERNAL_API_KEY + INTERNAL_API_KEY_NEW)。
+ *       timing-safe に検証する (Core core_internal_shared 取得値)。
  * 性質: read 専用・副作用なし・純メタデータのみ (additive / dark)。
  *
  * middleware (OIDC user-auth) は /api/* を全除外 (PUBLIC_PATHS=['/login','/api']) し、

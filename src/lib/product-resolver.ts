@@ -128,7 +128,7 @@ async function fetchProductGroupById(
 ): Promise<{ ok: boolean; group?: { group_name?: string; developer?: string | null; category?: string | null }; error?: string }> {
   const entryKeys = getEntryKeys();
   if (!CORE_API_URL || entryKeys.length === 0) {
-    return { ok: false, error: 'CORE_API_URL / INTERNAL_API_KEY not configured' };
+    return { ok: false, error: 'CORE_API_URL / CORE_CREDENTIAL_KEY not configured' };
   }
   const safeId = encodeURIComponent(id);
   const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/product-groups/${safeId}`;

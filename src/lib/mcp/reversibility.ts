@@ -68,9 +68,11 @@ function originBaseUrl(): string | null {
   return process.env.ORIGIN_AI_BASE_URL ?? null;
 }
 
-function validateKey(): string | undefined {
-  // auth.ts と同一: embed 専用検証鍵を優先、INTERNAL_API_KEY を後方互換フォールバック
-  return process.env.EMBED_MCP_VALIDATE_KEY || process.env.INTERNAL_API_KEY;
+async function validateKey(): Promise<string | null> {
+  // auth.ts と同一: embed 専用検証鍵 EMBED_MCP_VALIDATE_KEY 優先、無ければ Core
+  // core_internal_shared (接続鍵 Core 集約 Done-1 で global INTERNAL_API_KEY 直読みは廃止)。
+  const { getSharedInternalApiKey } = await import('@/lib/credentials');
+  return getSharedInternalApiKey();
 }
 
 async function postOrigin(
@@ -80,7 +82,9 @@ async function postOrigin(
 ): Promise<{ ok: true; json: Record<string, unknown> } | { ok: false; reason: string }> {
   const base = originBaseUrl();
   if (!base) return { ok: false, reason: 'ORIGIN_AI_BASE_URL 未設定' };
-  const key = validateKey();
+  const key = await validateKey();
+  // 鍵未解決は無認証で origin-ai を叩かず fail-closed (codex 必須#5)。
+  if (!key) return { ok: false, reason: `${path} 検証鍵 未解決 (fail-closed)` };
 
   let resp: Response;
   try {
@@ -90,7 +94,7 @@ async function postOrigin(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(key ? { 'X-Internal-API-Key': key } : {}),
+        'X-Internal-API-Key': key,
       },
       body: JSON.stringify(body),
       signal: ac.signal,

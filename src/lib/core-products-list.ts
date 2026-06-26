@@ -50,7 +50,7 @@ export async function listCoreProductGroups(
       ok: false,
       items: [],
       truncated: false,
-      error: 'CORE_API_URL / INTERNAL_API_KEY not configured',
+      error: 'CORE_API_URL / CORE_CREDENTIAL_KEY not configured',
     };
   }
   const fields = (opts.fields ?? ['id', 'group_name', 'developer', 'category']).join(',');

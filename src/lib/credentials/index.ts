@@ -1,11 +1,11 @@
 /**
  * Core 経由の外部サービス credential 取得ラッパー
  *
- * 設計レビュー: Gemini APPROVE (2026-05-07)
+ * 設計レビュー: Gemini APPROVE (2026-05-07) / 接続鍵 Core 集約 Done-1 codex APPROVE (2026-06-26)
  *
  * - エンドポイント: GET ${CORE_API_URL}/api/credentials/:service_code?scope_key=...&as_of=...
- * - 認証: X-Internal-API-Key。entry 鍵は CORE_CREDENTIAL_KEY(scoped, 優先) → INTERNAL_API_KEY(global)
- *   を順試行し、401/403 で次鍵へ retry する (接続鍵 Core 集約 staged rollout)。詳細は core-entry-keys.ts。
+ * - 認証: X-Internal-API-Key。entry 鍵は per-tool scoped 入口鍵 CORE_CREDENTIAL_KEY のみ
+ *   (Done-1 最終化: 旧 global INTERNAL_API_KEY fallback は除去)。詳細は core-entry-keys.ts。
  * - キャッシュ: プロセス内 Map (TTL 5 分)。Vercel Functions のコールドスタートで失効する想定で OK
  * - cs-manager 内に楽天等の鍵類は持たない (env も含めて)
  */
@@ -53,7 +53,7 @@ export interface GetCredentialOptions {
   fetchImpl?: typeof fetch;
   /** テスト時に CORE_API_URL を上書き (空文字で「未設定」状態を再現可) */
   coreApiUrl?: string;
-  /** テスト時に INTERNAL_API_KEY を上書き (空文字で「未設定」状態を再現可) */
+  /** テスト時に scoped 入口鍵 (CORE_CREDENTIAL_KEY) を上書き (空文字で「未設定」状態を再現可) */
   internalApiKey?: string;
   /** キャッシュをバイパスして再取得 */
   forceRefresh?: boolean;
@@ -76,7 +76,7 @@ export class CredentialFetchError extends Error {
  * 5 分以内の前回取得結果がキャッシュされていればそれを返す。
  *
  * - 401/404/500 は CredentialFetchError として throw する。caller (cron 等) で捕捉して再試行に回す。
- * - 環境変数 (CORE_API_URL / INTERNAL_API_KEY) 未設定時も throw。
+ * - 環境変数 (CORE_API_URL / CORE_CREDENTIAL_KEY) 未設定時も throw。
  */
 export async function getCredential<T = Record<string, unknown>>(
   serviceCode: string,
@@ -84,8 +84,8 @@ export async function getCredential<T = Record<string, unknown>>(
   opts: GetCredentialOptions = {},
 ): Promise<CredentialResponse<T>> {
   const coreUrl = opts.coreApiUrl ?? envCoreApiUrl();
-  // entry 鍵: scoped (CORE_CREDENTIAL_KEY) 優先・global (INTERNAL_API_KEY) fallback を順試行し
-  // 401/403 で次鍵へ retry する (staged rollout 安全)。テストは opts.internalApiKey で単一鍵注入可。
+  // entry 鍵: per-tool scoped 入口鍵 CORE_CREDENTIAL_KEY のみ (Done-1 最終化: global fallback 除去)。
+  // テストは opts.internalApiKey で単一鍵注入可。
   const entryKeys =
     opts.internalApiKey !== undefined
       ? opts.internalApiKey
@@ -97,7 +97,7 @@ export async function getCredential<T = Record<string, unknown>>(
   }
   if (entryKeys.length === 0) {
     throw new CredentialFetchError(
-      'INTERNAL_API_KEY is not set',
+      'CORE_CREDENTIAL_KEY is not set',
       null,
       serviceCode,
       scopeKey,
@@ -181,60 +181,97 @@ export async function getCredentialsParallel<T = Record<string, unknown>>(
 }
 
 /**
- * inbound 検証用の移行期 env 鍵候補 (同期・Core 非依存)。
+ * inbound / self-loop 検証用の共有内部鍵 (core_internal_shared) を Core から取得する。
  *
- * env INTERNAL_API_KEY / INTERNAL_API_KEY_NEW を trim・空除外・重複除外して返す。
- * 呼出側はこれを **先に** 定数時間比較し、一致すれば Core 取得をスキップする
- * (Core 障害時に env 署名済みリクエストが Core タイムアウトを待たない: 可用性回帰の回避。codex P2)。
- */
-export function getInboundVerifyEnvKeys(): string[] {
-  const keys: string[] = [];
-  const envOld = process.env.INTERNAL_API_KEY?.replace(/\s+$/, '');
-  const envNew = process.env.INTERNAL_API_KEY_NEW?.replace(/\s+$/, '');
-  for (const v of [envOld, envNew]) {
-    if (v && !keys.includes(v)) keys.push(v);
-  }
-  return keys;
-}
-
-/**
- * inbound 検証用の Core 共有内部鍵 (1 件 or 0 件) を取得する。
- *
- * origin-core が本ツールの /api/ai/manifest・/api/ai/capabilities/* 等を叩く際に送る
+ * origin-core が本ツールの /api/ai/manifest・/api/ai/capabilities/* を叩く際、および
+ * 本ツール自身の Server Action が internalFetch で自分の /api/* を叩く際に送る
  * X-Internal-API-Key の正本値を Core から取得する。
- * service_code='core_internal_shared'(全ツール共通値・scoped 入口鍵とは別物)。
- * Core 未登録/未到達時は空配列を返す (fail-open しない: 呼出側で env 不一致なら 401)。
- * 値・取得失敗理由はログに出さない。呼出側は定数時間比較すること。
+ * service_code='core_internal_shared'(field api_key・全ツール共通値・scoped 入口鍵とは別物)。
  *
- * 接続鍵 Core 集約 (origin-core #332)。
+ * Done-1 最終化済: env INTERNAL_API_KEY / INTERNAL_API_KEY_NEW 候補は除去した。
+ * 共有鍵は Core (scoped 入口鍵 CORE_CREDENTIAL_KEY の core_internal_shared grant 経由) のみから取得する。
+ * 耐障害性: getCredential は 5 分 positive TTL。さらに直近成功値を STALE_MAX(60分)まで保持し、
+ * Core の **一時障害(network/timeout/5xx)時のみ** stale 値で inbound を継続する(stale-while-error)。
+ * 認証/grant失効/credential削除(4xx)や api_key 不在は stale を使わず即 fail-closed(失効鍵を受理し続けない)。
+ * 候補空なら呼出側で fail-closed(401)。値・失敗理由は出さない。呼出側は全候補を定数時間比較すること。
+ *
+ * 接続鍵 Core 集約 (origin-core #332) / Done-1。
  */
-export async function getInboundVerifyCoreKeys(): Promise<string[]> {
+const INBOUND_STALE_MAX_MS = 60 * 60 * 1000;
+let inboundLastGood: { value: string; at: number } | null = null;
+
+/**
+ * core_internal_shared(全ツール共通の正本内部鍵)を Core から取得する共通内部関数。
+ * stale-while-error は **transient 障害のみ** に限定する:
+ *   transient = network/timeout(status=null) または Core 5xx → 直近成功値(STALE_MAX=60分以内)で継続。
+ *   非 transient = 401/403/404 等 4xx(認証/grant 失効/credential 削除) や api_key 不在 → null
+ *     (失効/revoked 鍵を最大60分受理し続ける security regression を防ぐ)。値・理由はログに出さない。
+ */
+async function fetchSharedInternalKey(): Promise<string | null> {
   try {
-    const cred = await getCredential<{ api_key?: string }>('core_internal_shared');
-    const v = cred.credentials?.api_key?.replace(/\s+$/, '');
-    if (v) return [v];
-  } catch {
-    // Core 未登録/未到達は env fallback のみで継続。値・理由は出さない。
+    const cred = await getCredential<{ api_key?: unknown }>('core_internal_shared');
+    const v = cred.credentials?.api_key;
+    if (typeof v === 'string') {
+      const trimmed = v.replace(/\s+$/, '');
+      if (trimmed.length > 0) {
+        inboundLastGood = { value: trimmed, at: Date.now() };
+        return trimmed;
+      }
+    }
+    // 200 だが api_key 不在/空 = 意図的削除/設定不備。last-good を破棄し fail-closed
+    // (後続の transient 障害で失効値が stale 復活しないようにする)。
+    inboundLastGood = null;
+    return null;
+  } catch (err) {
+    const status = err instanceof CredentialFetchError ? err.status : null;
+    const isTransient = status === null || status >= 500;
+    if (!isTransient) {
+      // 非 transient(401/403/404 等 4xx=認証/grant 失効/credential 削除=revocation)。
+      // last-good を破棄し即 fail-closed。以降の transient 障害でも失効鍵を復活させない。
+      inboundLastGood = null;
+      return null;
+    }
+    // transient(network/timeout=status null, または 5xx)のみ stale-while-error。
+    if (inboundLastGood && Date.now() - inboundLastGood.at < INBOUND_STALE_MAX_MS) {
+      return inboundLastGood.value;
+    }
+    return null;
   }
-  return [];
 }
 
 /**
- * inbound 検証の全候補 (env + Core)。env を先頭に、Core 値を末尾に重複除外で連結する。
- *
- * 注意: Core 取得を含むため Core 障害時はレイテンシが増える。可用性が重要な hot path では
- * getInboundVerifyEnvKeys() で先に env を比較し、不一致時のみ getInboundVerifyCoreKeys() を
- * 呼ぶこと (代表ツール ys-staff-tool の getInboundVerifyKeys 同型だが本ツールは env-first 最適化済)。
+ * inbound / self-loop 検証用の照合候補 (Core core_internal_shared 1 件 or 0 件) を返す。
+ * 呼出側は候補を短絡なしで定数時間比較し、候補空なら fail-closed すること。
  */
 export async function getInboundVerifyKeys(): Promise<string[]> {
-  const keys = getInboundVerifyEnvKeys();
-  for (const v of await getInboundVerifyCoreKeys()) {
-    if (!keys.includes(v)) keys.push(v);
-  }
-  return keys;
+  const v = await fetchSharedInternalKey();
+  return v ? [v] : [];
 }
 
-/** テスト用: キャッシュ全クリア */
+/**
+ * outbound: origin-ai の embed MCP validate コールバック等で送出する共有内部鍵を返す。
+ *
+ * EMBED_MCP_VALIDATE_KEY が設定済なら専用 embed 検証鍵を優先する(carve-out)。
+ * 無ければ Core core_internal_shared(全ツール共通の正本・origin-ai validate が受理する値)を返す。
+ * いずれも無ければ null(呼出側は鍵なしで送出せず fail-closed すること)。値はログに出さない。
+ * Done-1: 旧 global env INTERNAL_API_KEY 直読みは廃止し、共有鍵は Core 経由で解決する。
+ */
+export async function getSharedInternalApiKey(): Promise<string | null> {
+  const embed = process.env.EMBED_MCP_VALIDATE_KEY?.trim();
+  if (embed) return embed;
+  return fetchSharedInternalKey();
+}
+
+/** テスト用: キャッシュ全クリア (positive cache + inbound stale-while-error の last-good) */
 export function _clearCredentialCacheForTest(): void {
+  cache.clear();
+  inboundLastGood = null;
+}
+
+/**
+ * テスト用: getCredential の positive cache のみクリア (inbound の last-good は保持)。
+ * 本番で 5 分 TTL が失効した状況 (= stale-while-error が効く状況) を再現するために使う。
+ */
+export function _clearPositiveCacheForTest(): void {
   cache.clear();
 }

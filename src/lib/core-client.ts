@@ -41,7 +41,7 @@ export async function fetchProducts(limit: number = 1): Promise<FetchProductsRes
   }
   const entryKeys = getEntryKeys();
   if (entryKeys.length === 0) {
-    return { ok: false, count: 0, error: 'INTERNAL_API_KEY is not set' };
+    return { ok: false, count: 0, error: 'CORE_CREDENTIAL_KEY is not set' };
   }
 
   const url = `${CORE_API_URL.replace(/\/$/, '')}/api/v1/master/products?limit=${limit}`;
@@ -98,7 +98,7 @@ export async function fetchProductById(productId: string): Promise<FetchProductR
   }
   const entryKeys = getEntryKeys();
   if (entryKeys.length === 0) {
-    return { ok: false, error: 'INTERNAL_API_KEY is not set' };
+    return { ok: false, error: 'CORE_CREDENTIAL_KEY is not set' };
   }
 
   const safeId = encodeURIComponent(productId);
