@@ -146,7 +146,8 @@ describe('yahooAdapter.fetchInbox', () => {
 
     expect(first.ticket.externalId).toBe('T1');
     expect(first.ticket.customerName).toBeUndefined(); // 氏名は API 非返却
-    expect(first.ticket.subject).toBe('詳細件名 T1');
+    // subject は adapter では設定しない (design §2: ingest 層の generateSubject() が唯一の書き込み口)
+    expect(first.ticket.subject).toBeUndefined();
     expect(first.ticket.status).toBe('untouched'); // isComplete=false
     expect(first.ticket.channelMeta).toMatchObject({ itemCode: 'item-1', orderId: 'order-1', categoryName: '配送' });
 

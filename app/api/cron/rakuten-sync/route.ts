@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { rakutenAdapter } from '@/channels/rakuten/adapter';
 import { sendApprovedDrafts } from '@/channels/rakuten/outbound';
 import type { AdapterLogger, ChannelAdapterContext } from '@/channels/_lib/adapter';
-import type { NormalizedMessage, NormalizedTicketWithMessages } from '@/channels/_lib/types';
+import type { NormalizedTicketWithMessages } from '@/channels/_lib/types';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { authorizeApiRoute } from '@/lib/auth/api-auth';
 import { runFirstResponseFlow } from '@/lib/first-response/orchestrator';
+import { ingestPullItem } from '@/lib/sync/ingest-pull-item';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -102,10 +103,10 @@ async function upsertTicket(
     .maybeSingle();
   if (selErr) throw new Error(`upsertTicket(select) failed: ${selErr.message}`);
 
+  // subject は **書かない** (codex CONCERN#1: 書込口は resolveAndPersistSubject に収束)。
   const baseUpdate = {
     customer_name: payload.customerName ?? null,
     customer_email: payload.customerEmail ?? null,
-    subject: payload.subject ?? null,
     channel_meta: payload.channelMeta ?? {},
     resolved_at: payload.resolvedAt ?? null,
   };
@@ -148,28 +149,6 @@ async function upsertTicket(
   return { id: postSel.id as string, isNew: true };
 }
 
-async function upsertMessages(
-  ticketId: string,
-  messages: NormalizedMessage[],
-): Promise<number> {
-  if (messages.length === 0) return 0;
-  const supa = await getSupabaseAdmin();
-  const rows = messages.map((m) => ({
-    ticket_id: ticketId,
-    channel_message_id: m.channelMessageId,
-    direction: m.direction,
-    body: m.body,
-    sender_name: m.senderName ?? null,
-    sent_at: m.sentAt,
-    attachments: m.attachments ?? [],
-  }));
-  const { error, count } = await supa
-    .from('messages')
-    .upsert(rows, { onConflict: 'ticket_id,channel_message_id', count: 'exact' });
-  if (error) throw new Error(`upsertMessages failed: ${error.message}`);
-  return count ?? rows.length;
-}
-
 interface InboundResult {
   channelId: string;
   ticketsProcessed: number;
@@ -201,20 +180,47 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
   let lastExternalId: string | undefined;
   let errorMessage: string | undefined;
 
+  const supa = await getSupabaseAdmin();
+  // message insert 失敗 (非23505) を観測したら cursor を進めない (codex PR review P3-redux):
+  // 時刻ベース cursor を進めると失敗 message が次 sync の fromDate 窓から外れてロストするため。
+  let holdCursor = false;
+
   try {
     for await (const item of rakutenAdapter.fetchInbox(ctx)) {
       const { id: ticketId, isNew } = await upsertTicket(channel.id, item.ticket);
-      const inserted = await upsertMessages(ticketId, item.messages);
+      // 共通後処理: 新規 inbound 識別 → 件名(resolver が空時のみ要約)。楽天は auto-draft を使わず
+      // first-response flow 経路を維持するため autoDraft:false (回帰回避)。
+      const ingest = await ingestPullItem(supa, {
+        channelId: channel.id,
+        ticketId,
+        messages: item.messages,
+        channelMeta: item.ticket.channelMeta,
+        customerName: item.ticket.customerName ?? null,
+        autoDraft: false,
+      });
       ticketsProcessed += 1;
-      messagesUpserted += inserted;
+      messagesUpserted += ingest.inserted;
       lastExternalId = item.ticket.externalId;
+      if (ingest.warnings.length > 0) {
+        logger.warn('pull_item_warnings', { ticketId, warnings: ingest.warnings });
+      }
+      if (ingest.messageErrorCount > 0) {
+        holdCursor = true;
+        logger.error('message_insert_error_holding_cursor', {
+          ticketId,
+          messageErrorCount: ingest.messageErrorCount,
+        });
+      }
 
       // 新規 ticket → 営業時間外一次返信フロー (flag-off 時は disabled で即 return)。
+      // gate (codex PR review): 新規 ticket かつ **inbound message が実際に insert され
+      // (newInboundCount>0)、かつ当該 ticket に message insert 失敗が無い (messageErrorCount===0)**
+      // ときのみ発火する。空/部分 thread で first-response が走り、partial-unique により後で
+      // 正しい本文で再生成されない事態 (空 thread 発火) を防ぐ。
       // sync 本体を絶対に壊さないため try/catch で隔離。送信可否は orchestrator 内の
       // flag/営業時間/source ガードに委譲 (flag-off で送信されない)。
-      if (isNew) {
+      if (isNew && ingest.newInboundCount > 0 && ingest.messageErrorCount === 0) {
         try {
-          const supa = await getSupabaseAdmin();
           const outcome = await runFirstResponseFlow(supa, ticketId);
           if (outcome.status !== 'disabled' && outcome.status !== 'within_hours') {
             logger.info('first_response.outcome', {
@@ -231,24 +237,27 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
           });
         }
       }
-      try {
-        await persistSyncState(channel.id, new Date(), lastExternalId);
-      } catch (err) {
-        logger.warn('persistSyncState_failed_continuing', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+      // per-ticket の wall-clock cursor persist は廃止 (codex PR review: 途中 persist が後続
+      // 失敗で巻き戻せず取りこぼす)。cursor は run 完全成功時に finalize で 1 回だけ進める。
     }
   } catch (err) {
     errorMessage = err instanceof Error ? err.message : String(err);
     logger.error('fetchInbox_failed', { error: errorMessage });
   }
 
+  // message insert 失敗があれば error として可視化し finalize しない = cursor 保持。
+  if (holdCursor && !errorMessage) {
+    errorMessage = 'message_insert_error: cursor held for retry next sync';
+  }
+
   if (!errorMessage) {
     try {
       await persistSyncState(channel.id, startedAt, lastExternalId);
     } catch (err) {
-      logger.warn('persistSyncState_finalize_failed', {
+      // per-ticket persist 廃止後はこれが唯一の cursor 前進。失敗を握ると cursor が進まないまま
+      // success 応答になり cursor stuck を黙殺する (codex PR review)。channel error として可視化。
+      errorMessage = `persistSyncState_finalize_failed: ${err instanceof Error ? err.message : String(err)}`;
+      logger.error('persistSyncState_finalize_failed', {
         error: err instanceof Error ? err.message : String(err),
       });
     }

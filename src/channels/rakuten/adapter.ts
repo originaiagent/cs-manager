@@ -58,7 +58,7 @@ function toNormalizedTicket(inq: RakutenInquiry): NormalizedTicket {
     externalId: inq.inquiryNumber,
     customerName: inq.userName,
     customerEmail: inq.userMaskEmail,
-    subject: inq.itemName ? `[${inq.itemName}] ${inq.message?.slice(0, 60) ?? ''}` : undefined,
+    subject: undefined, // §2 subject-unification: subject は ingest 層 resolveAndPersistSubject のみが書く
     status,
     rawStatus: inq.isCompleted ? 'completed' : 'open',
     resolvedAt: inq.completedDate ? toIsoString(inq.completedDate) : undefined,

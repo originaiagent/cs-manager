@@ -23,6 +23,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { NormalizedTicket, NormalizedMessage } from '@/channels/_lib/types';
 import { upsertTicket, upsertMessageReturningNew } from '@/lib/sync/ingest';
 import { generateRagReply, type RagReplyInput, type RagReplyResult } from '@/lib/rag/reply-adapter';
+import { resolveAndPersistSubject, type SubjectKind } from '@/lib/subject/generate-subject';
+
+export type { SubjectKind };
 
 /**
  * ドラフト生成失敗の安定コード (PII を含まない)。
@@ -63,6 +66,17 @@ export interface IngestInboundParams {
   draftSource?: 'rag' | 'ai_draft';
   /** テスト注入用。未指定なら origin-ai 経由の generateRagReply。 */
   generateReply?: (sb: SupabaseClient, input: RagReplyInput) => Promise<RagReplyResult>;
+  /**
+   * 件名種別ヒント (§2 subject-unification)。
+   * 既定 'inquiry'。review スレッドなら 'review' を渡す。
+   */
+  subjectKind?: SubjectKind;
+  /**
+   * origin-ai 失敗時の件名フォールバック (§2 subject-unification)。
+   * 既定 null (= 件名なし、goal 準拠)。
+   * email は native 件名を呼出側が渡せる口を残す (policy は caller 制御)。
+   */
+  subjectFallback?: string | null;
 }
 
 /**
@@ -82,6 +96,17 @@ export async function ingestInboundWithDraft(
   if (!isNew) {
     return { status: 'duplicate', ticketId };
   }
+
+  // 件名生成 (§2 subject-unification / codex CONCERN#1 準拠)。
+  // 発火 gate = 新規 inbound message insert (isNew)。outbound / 再送では発火しない。
+  // resolveAndPersistSubject は内部で例外をすべて握る → ここでは await のみ。
+  await resolveAndPersistSubject(sb, ticketId, {
+    body: params.inboundMessage.body,
+    kind: params.subjectKind,
+    // 氏名 PII を明示的に origin-ai へ渡し full-mask させる (PII egress 境界 / codex D1)。
+    customerName: params.ragInput.customerName ?? null,
+    fallback: params.subjectFallback ?? null,
+  });
 
   // origin-ai embed (cs-reply:draft) でドラフト生成。embed target_id には upsert 済 ticketId を渡す
   // (ragInput は ticket 作成前に組まれるため ticketId を持たない。ここで注入する)。
