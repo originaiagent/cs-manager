@@ -4,7 +4,7 @@ import { getCredential, CredentialFetchError } from '@/lib/credentials';
 import { ingestInboundWithDraft } from '@/lib/sync/ingest-inbound';
 import { verifyLineSignature } from '@/channels/line/verify';
 import {
-  isTextMessageEvent,
+  isReplyableUserTextEvent,
   normalizeLineTextEvent,
   type LineWebhookBody,
   type LineWebhookEvent,
@@ -140,7 +140,9 @@ export async function POST(req: NextRequest) {
   let failed = 0;
 
   for (const ev of events) {
-    if (!isTextMessageEvent(ev)) {
+    // 取り込みは 1:1 (source.type='user') の text のみ。group/room や非 text は skip。
+    // (返信 MVP は 1:1 push のみ対応。userId-keying による ticket 衝突=誤送を断つ。codex review P1)
+    if (!isReplyableUserTextEvent(ev)) {
       skipped += 1;
       continue;
     }

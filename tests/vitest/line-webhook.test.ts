@@ -11,6 +11,7 @@ import { createHmac } from 'node:crypto';
 import { verifyLineSignature } from '@/channels/line/verify';
 import {
   isTextMessageEvent,
+  isReplyableUserTextEvent,
   normalizeLineTextEvent,
   type LineWebhookEvent,
 } from '@/channels/line/normalize';
@@ -55,6 +56,27 @@ describe('verifyLineSignature', () => {
   it('長さ不正 / base64 不正の署名でも throw せず false', () => {
     expect(verifyLineSignature(rawBody, 'short', CHANNEL_SECRET)).toBe(false);
     expect(verifyLineSignature(rawBody, '!!!not-base64!!!', CHANNEL_SECRET)).toBe(false);
+  });
+});
+
+describe('isReplyableUserTextEvent (1:1 のみ ingest)', () => {
+  const userText: LineWebhookEvent = {
+    type: 'message',
+    message: { id: 'm1', type: 'text', text: 'hello' },
+    source: { type: 'user', userId: 'U1' },
+    timestamp: 0,
+  };
+  it('source.type=user の text は true', () => {
+    expect(isReplyableUserTextEvent(userText)).toBe(true);
+  });
+  it('group/room の text は false (1:1 push できない=誤送防止)', () => {
+    expect(isReplyableUserTextEvent({ ...userText, source: { type: 'group', userId: 'U1' } })).toBe(false);
+    expect(isReplyableUserTextEvent({ ...userText, source: { type: 'room', userId: 'U1' } })).toBe(false);
+  });
+  it('非 text は false', () => {
+    expect(
+      isReplyableUserTextEvent({ ...userText, message: { id: 'm1', type: 'sticker' } }),
+    ).toBe(false);
   });
 });
 
