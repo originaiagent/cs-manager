@@ -13,6 +13,7 @@ import {
   resolvePushUserId,
   buildExternalMessageId,
   classifyStaleSending,
+  isRetryKeyExpired,
   type LineDraftRepo,
   type ClaimedLineDraft,
   type LineChannelRow,
@@ -54,14 +55,25 @@ describe('resolvePushUserId (source.type=user の 1:1 のみ)', () => {
     expect(resolvePushUserId({ sourceType: 'group', userId: 'U_sender' })).toBeNull();
     expect(resolvePushUserId({ sourceType: 'room', userId: 'U_sender' })).toBeNull();
   });
-  it('sourceType 欠落 + 有効 userId → userId (legacy 1:1 compat / codex P2)', () => {
-    expect(resolvePushUserId({ userId: 'U_abc' })).toBe('U_abc');
+  it('sourceType 欠落 (provenance不明) は userId があっても null (隔離・誤送回避 / codex P1)', () => {
+    expect(resolvePushUserId({ userId: 'U_abc' })).toBeNull();
   });
   it('userId 欠落 / 非 U / null は null', () => {
     expect(resolvePushUserId({ sourceType: 'user' })).toBeNull();
     expect(resolvePushUserId({ sourceType: 'user', userId: 'C_grp' })).toBeNull();
-    expect(resolvePushUserId({ userId: 'C_grp' })).toBeNull();
     expect(resolvePushUserId(null)).toBeNull();
+  });
+});
+
+describe('isRetryKeyExpired (24h窓)', () => {
+  const NOW = 1_800_000_000_000;
+  const HOUR = 3_600_000;
+  it('first_send_at から 24h 超で true', () => {
+    expect(isRetryKeyExpired(NOW, NOW - 25 * HOUR)).toBe(true);
+    expect(isRetryKeyExpired(NOW, NOW - 23 * HOUR)).toBe(false);
+  });
+  it('first_send_at null (未送信) は false (claim 可)', () => {
+    expect(isRetryKeyExpired(NOW, null)).toBe(false);
   });
 });
 

@@ -88,14 +88,19 @@ export function extractRawUserId(channelMeta: unknown): string | null {
 export function resolvePushUserId(channelMeta: unknown): string | null {
   if (!channelMeta || typeof channelMeta !== 'object') return null;
   const meta = channelMeta as Record<string, unknown>;
-  const st = meta.sourceType;
-  // 明示的に user 以外 (group/room) は 1:1 でないので拒否。
-  // sourceType 未設定は legacy (sourceType 列導入前の旧 webhook 由来)。forward の inbound は
-  // 1:1 限定 ingest (isReplyableUserTextEvent) のため「userId を持つ legacy 行 = 1:1」とみなし許容する。
-  // codex review P2: 厳格に null 返すと既存 1:1 draft が unsendable になるため compat path を残す。
-  if (st !== undefined && st !== null && st !== 'user') return null;
+  // **明示的に 1:1 provenance (sourceType='user') がある行のみ** push 宛先を解決する。
+  // codex review P1: 旧 webhook は group/room も sender userId を channel_meta.userId に保存した。
+  // sourceType 未設定 (legacy) を許容すると group 由来 draft を送信者個人へ private 誤送し得るため、
+  // provenance 不明な行は許容せず null を返す (送信側で failed=隔離。誤送 > 取りこぼし回避)。
+  // forward は inbound が 1:1 限定 ingest かつ sourceType='user' を必ず付与するので取りこぼさない。
+  if (meta.sourceType !== 'user') return null;
   const userId = extractRawUserId(channelMeta);
   return isValidPushUserId(userId) ? userId : null;
+}
+
+/** retry-key (=draftId) の LINE 24h 重複防止窓が失効しているか (純関数)。失効後の再 push は二重配信になる。 */
+export function isRetryKeyExpired(nowMs: number, firstSendAtMs: number | null): boolean {
+  return firstSendAtMs != null && nowMs - firstSendAtMs > RETRY_KEY_EXPIRY_MS;
 }
 
 /**
@@ -238,18 +243,49 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
         .lt('updated_at', failCutoffIso);
       if (failNullErr) throw new Error(`reclaimStaleSending(fail-null) failed: ${failNullErr.message}`);
     }
-    return { released: releaseIds.length, failed: failIds.length };
+
+    // codex review P2: 'approved' だが first_send_at>24h の行 (transient 失敗を繰り返し approved に
+    // 滞留したもの) も retry-key 失効済。再 claim/再 push すると LINE が重複排除できず二重配信になる。
+    // claim 前に terminal 化する (claimApprovedDrafts の候補クエリでも除外するが二重防御)。
+    const { data: expApproved, error: expSelErr } = await supa
+      .from('ticket_drafts')
+      .select('id, ticket:tickets!inner(channel_id)')
+      .eq('status', 'approved')
+      .eq('ticket.channel_id', channelId)
+      .not('first_send_at', 'is', null)
+      .lt('first_send_at', failCutoffIso);
+    if (expSelErr) throw new Error(`reclaimStaleSending(expired-approved select) failed: ${expSelErr.message}`);
+    const expiredApprovedIds = ((expApproved ?? []) as Array<{ id: string }>).map((r) => r.id);
+    if (expiredApprovedIds.length > 0) {
+      const { error: expErr } = await supa
+        .from('ticket_drafts')
+        .update({
+          status: 'failed',
+          last_error: 'line: approved but retry-key expired (first_send_at >24h, manual review)',
+        })
+        .in('id', expiredApprovedIds)
+        .eq('status', 'approved')
+        .lt('first_send_at', failCutoffIso);
+      if (expErr) throw new Error(`reclaimStaleSending(expired-approved fail) failed: ${expErr.message}`);
+    }
+
+    return { released: releaseIds.length, failed: failIds.length + expiredApprovedIds.length };
   }
 
   async claimApprovedDrafts(channelId: string, limit: number): Promise<ClaimedLineDraft[]> {
     const supa = await getSupabaseAdmin();
-    // 1. 候補抽出 (channel + 送信安全フィルタ)
+    // 1. 候補抽出 (channel + 送信安全フィルタ + retry-key 未失効)
+    // codex review P2: first_send_at>24h の approved は retry-key 失効済 → 再 push で二重配信。候補から除外
+    // (reclaim が terminal 化するが、sweep 前 race の二重防御として claim 側でも弾く)。
+    // 未送信 (first_send_at is null) は当然 claim 可。
+    const retryKeyCutoffIso = new Date(Date.now() - RETRY_KEY_EXPIRY_MS).toISOString();
     const { data, error } = await supa
       .from('ticket_drafts')
       .select('id, body, ticket_id, ticket:tickets!inner(id, channel_id, channel_meta)')
       .eq('status', 'approved')
       .eq('ticket.channel_id', channelId)
       .or(SEND_SAFE_OR_FILTER)
+      .or(`first_send_at.is.null,first_send_at.gte.${retryKeyCutoffIso}`)
       .order('created_at', { ascending: true })
       .limit(limit);
     if (error) throw new Error(`claimApprovedDrafts(select) failed: ${error.message}`);

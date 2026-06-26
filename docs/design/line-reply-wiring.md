@@ -278,3 +278,11 @@ alter table public.ticket_drafts add constraint ticket_drafts_status_check
   (forward は 1:1 限定 ingest なので「userId あり legacy = 1:1」とみなす)。明示的 group/room は従来どおり拒否。
 - **P2 NULL first_send_at 滞留**: fail 用 SQL `.lt('first_send_at')` は NULL に match せず、first_send_at 未設定
   (claim の設定失敗等) の sending 行が永久滞留し得る。→ NULL 用の fail update (`.is('first_send_at', null).lt('updated_at', cutoff)`) を追加し terminal 化。
+
+5回目で 2 件指摘 (前回修正の副作用) → 修正:
+- **P1 legacy 隔離 (compat path 撤回)**: sourceType 未設定を許容すると旧 webhook 由来 group/room draft
+  (sender userId のみ保持) を個人へ private 誤送し得る。→ `resolvePushUserId` を **厳格化** (sourceType='user'
+  の明示 provenance のみ許容)。provenance 不明は failed=隔離 (誤送 > 取りこぼし)。forward は 1:1 限定 ingest で
+  sourceType='user' を必ず付与するため取りこぼさない。
+- **P2 approved 滞留の retry-key 失効**: transient 失敗を繰り返し approved に留まった draft は first_send_at>24h で
+  retry-key 失効済。claim 候補クエリで `first_send_at>24h` を除外 (`isRetryKeyExpired`) + reclaim で terminal 化。
