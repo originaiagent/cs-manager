@@ -153,7 +153,9 @@ function buildTicket(
   return {
     externalId: topicId,
     customerName: undefined,
-    subject: asStr(topic.title, asStr(headline.title, '')) || undefined,
+    // subject は adapter では設定しない (design §2: ingest 層の generateSubject() が唯一の書き込み口)。
+    // topic.title / headline.title は channelMeta.topicTitle へ渡し、件名生成の材料として利用可。
+    subject: undefined,
     status: completed ? 'done' : 'untouched',
     rawStatus: completed ? 'completed' : 'open',
     channelMeta: Object.keys(channelMeta).length > 0 ? channelMeta : undefined,

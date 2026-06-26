@@ -110,7 +110,9 @@ export async function ingestEmailInbound(
     externalId: email.messageId,
     customerName: email.fromName ?? email.from ?? undefined,
     customerEmail: email.from ?? undefined,
-    subject: email.subject ?? undefined,
+    // subject は設定しない (§2 subject-unification / codex CONCERN#1)。
+    // ticket は subject=NULL で作成し、resolveAndPersistSubject が後追いで生成する。
+    // ragInput.subject (draft 生成用の文脈) は email.subject のまま維持する。
     status: 'untouched',
     channelMeta: {
       source: 'email',
@@ -136,12 +138,16 @@ export async function ingestEmailInbound(
     ticket: ticketPayload,
     inboundMessage: inboundMsg,
     ragInput: {
+      // ragInput.subject は draft 生成の文脈用 (§2: 変更しない)。
       subject: email.subject,
       inquiryBody: email.text,
       customerName: email.fromName ?? email.from ?? null,
       channelId: inbox.channelId,
       tenantId: null,
     },
+    // 件名生成種別 (§2 subject-unification)
+    subjectKind: 'inquiry',
+    // subjectFallback: 未設定 = null (goal 準拠: origin-ai 失敗時は件名なし)
   });
 
   // 失敗系は安定コードを channel_meta.email_ingest に記録 (現行契約を維持)。

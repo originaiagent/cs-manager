@@ -35,10 +35,12 @@ export async function upsertTicket(
     .maybeSingle();
   if (selErr) throw new Error(`ingest.upsertTicket(select) failed: ${selErr.message}`);
 
+  // subject は baseUpdate から意図的に除外する (codex CONCERN#1: subject clobber 防止)。
+  // ticket の subject 書き込み口は resolveAndPersistSubject 1 箇所に収束する。
+  // 既存行 update / 新規 insert のいずれも subject を設定せず、NULL のまま作成する。
   const baseUpdate = {
     customer_name: payload.customerName ?? null,
     customer_email: payload.customerEmail ?? null,
-    subject: payload.subject ?? null,
     channel_meta: payload.channelMeta ?? {},
     resolved_at: payload.resolvedAt ?? null,
   };
@@ -110,4 +112,40 @@ export async function upsertMessageReturningNew(
     return { isNew: false };
   }
   throw new Error(`ingest.upsertMessage(insert) failed: ${insErr.message}`);
+}
+
+/**
+ * 複数メッセージを冪等 insert し、「新規挿入された inbound メッセージ」を返す (pull 経路共通)。
+ *
+ * codex CONCERN#2 反映: pull 経路 (orchestrator / rakuten-sync) は従来 bulk upsert の件数しか
+ * 返さず「新規 inbound か否か」を識別できなかった。本ヘルパは各メッセージを atomic insert し、
+ * 新規挿入された inbound のみ収集して返す。これにより
+ *  - 新規 inbound (=顧客の新着) のみ subject / draft を発火できる、
+ *  - outbound-only 更新・再送 (isNew=false) では発火しない、
+ * を共通契約として保証する。各メッセージは immutable 前提のため insert-only (既存行は更新しない)。
+ */
+export async function upsertMessagesReturningNew(
+  sb: SupabaseClient,
+  ticketId: string,
+  messages: NormalizedMessage[],
+): Promise<{ count: number; newInbound: NormalizedMessage[] }> {
+  let count = 0;
+  const newInbound: NormalizedMessage[] = [];
+  for (const m of messages) {
+    const { isNew } = await upsertMessageReturningNew(sb, ticketId, m);
+    if (!isNew) continue;
+    count += 1;
+    if (m.direction === 'inbound') newInbound.push(m);
+  }
+  return { count, newInbound };
+}
+
+/** newInbound 群から「最新 (sentAt 最大) の inbound」を返す。空なら null。 */
+export function latestInbound(
+  newInbound: NormalizedMessage[],
+): NormalizedMessage | null {
+  if (newInbound.length === 0) return null;
+  return newInbound.reduce((a, b) =>
+    Date.parse(b.sentAt) > Date.parse(a.sentAt) ? b : a,
+  );
 }

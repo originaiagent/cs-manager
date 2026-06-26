@@ -3,12 +3,10 @@ import type {
   AdapterLogger,
   ChannelAdapterContext,
 } from '@/channels/_lib/adapter';
-import type {
-  NormalizedMessage,
-  NormalizedTicketWithMessages,
-} from '@/channels/_lib/types';
+import type { NormalizedTicketWithMessages } from '@/channels/_lib/types';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { getCredential, CredentialFetchError } from '@/lib/credentials';
+import { ingestPullItem } from '@/lib/sync/ingest-pull-item';
 
 /**
  * pull チャネルが Core から解決してよい service_code の allowlist (codex 設計レビュー guard)。
@@ -103,26 +101,26 @@ async function persistSyncState(channelId: string, lastSyncedAt: Date, lastExter
 async function upsertTicket(
   channelId: string,
   payload: NormalizedTicketWithMessages['ticket'],
-): Promise<string> {
+): Promise<{ id: string; isNew: boolean; subjectEmpty: boolean }> {
   const supa = await getSupabaseAdmin();
   // status は cs-manager 内部で書き換わる可能性があるため、新規作成時のみ adapter 値を採用。
-  // 既存行に対しては customer / subject / channel_meta / resolved_at だけ更新する方針。
-  // ここでは select → insert/update を分岐して安全に扱う。
+  // 既存行に対しては customer / channel_meta / resolved_at だけ更新する方針。
+  // subject は **書かない** (codex CONCERN#1: 書込口は resolveAndPersistSubject に収束)。
   const { data: existing, error: selErr } = await supa
     .from('tickets')
-    .select('id, status')
+    .select('id, status, subject')
     .eq('channel_id', channelId)
     .eq('external_id', payload.externalId)
     .maybeSingle();
   if (selErr) throw new Error(`upsertTicket(select) failed: ${selErr.message}`);
 
   if (existing) {
+    const subjectEmpty = !((existing.subject as string | null) ?? '').trim();
     const { error: updErr } = await supa
       .from('tickets')
       .update({
         customer_name: payload.customerName ?? null,
         customer_email: payload.customerEmail ?? null,
-        subject: payload.subject ?? null,
         channel_meta: payload.channelMeta ?? {},
         resolved_at: payload.resolvedAt ?? null,
         // status: untouched から done への遷移のみ自動適用（in_progress を踏み潰さない）
@@ -132,7 +130,7 @@ async function upsertTicket(
       })
       .eq('id', existing.id);
     if (updErr) throw new Error(`upsertTicket(update) failed: ${updErr.message}`);
-    return existing.id as string;
+    return { id: existing.id as string, isNew: false, subjectEmpty };
   }
 
   const { data: ins, error: insErr } = await supa
@@ -142,7 +140,7 @@ async function upsertTicket(
       external_id: payload.externalId,
       customer_name: payload.customerName ?? null,
       customer_email: payload.customerEmail ?? null,
-      subject: payload.subject ?? null,
+      // subject は insert 時も設定しない (NULL のまま作成 → resolveAndPersistSubject が後追い設定)
       status: payload.status,
       resolved_at: payload.resolvedAt ?? null,
       channel_meta: payload.channelMeta ?? {},
@@ -150,29 +148,7 @@ async function upsertTicket(
     .select('id')
     .single();
   if (insErr) throw new Error(`upsertTicket(insert) failed: ${insErr.message}`);
-  return ins.id as string;
-}
-
-async function upsertMessages(
-  ticketId: string,
-  messages: NormalizedMessage[],
-): Promise<number> {
-  if (messages.length === 0) return 0;
-  const supa = await getSupabaseAdmin();
-  const rows = messages.map((m) => ({
-    ticket_id: ticketId,
-    channel_message_id: m.channelMessageId,
-    direction: m.direction,
-    body: m.body,
-    sender_name: m.senderName ?? null,
-    sent_at: m.sentAt,
-    attachments: m.attachments ?? [],
-  }));
-  const { error, count } = await supa
-    .from('messages')
-    .upsert(rows, { onConflict: 'ticket_id,channel_message_id', count: 'exact' });
-  if (error) throw new Error(`upsertMessages failed: ${error.message}`);
-  return count ?? rows.length;
+  return { id: ins.id as string, isNew: true, subjectEmpty: true };
 }
 
 export type CredentialResolution =
@@ -265,13 +241,34 @@ async function syncOneChannel(
   let lastExternalId: string | undefined;
   let errorMessage: string | undefined;
 
+  // pull チャネルの auto-draft 既定 ON。config.auto_draft===false で明示無効化 (データ駆動)。
+  const cfg = (channel.config ?? {}) as Record<string, unknown>;
+  const autoDraftEnabled = cfg.auto_draft !== false;
+  const supa = await getSupabaseAdmin();
+
   try {
     for await (const item of adapter.fetchInbox(ctx)) {
-      const ticketId = await upsertTicket(channel.id, item.ticket);
-      const inserted = await upsertMessages(ticketId, item.messages);
+      const { id: ticketId, subjectEmpty } = await upsertTicket(channel.id, item.ticket);
+      // 共通後処理: 新規 inbound 識別 → 件名(空時のみ) → auto-draft(Yahoo)。受信を壊さない。
+      const ingest = await ingestPullItem(supa, {
+        channelId: channel.id,
+        ticketId,
+        subjectEmpty,
+        messages: item.messages,
+        channelMeta: item.ticket.channelMeta,
+        customerName: item.ticket.customerName ?? null,
+        autoDraft: autoDraftEnabled,
+      });
       ticketsProcessed += 1;
-      messagesUpserted += inserted;
+      messagesUpserted += ingest.inserted;
       lastExternalId = item.ticket.externalId;
+      if (ingest.warnings.length > 0) {
+        logger.warn('pull_item_warnings', { ticketId, warnings: ingest.warnings });
+      }
+      if (ingest.draftStatus && ingest.draftStatus !== 'ingested_with_draft') {
+        logger.info('auto_draft.outcome', { ticketId, status: ingest.draftStatus });
+      }
+
       // 1 件ごとに sync_state を進める（部分失敗時の再スキャン幅を最小化）
       const observedAt = new Date();
       lastSyncedAt = observedAt;

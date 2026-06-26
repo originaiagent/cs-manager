@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { rakutenAdapter } from '@/channels/rakuten/adapter';
 import { sendApprovedDrafts } from '@/channels/rakuten/outbound';
 import type { AdapterLogger, ChannelAdapterContext } from '@/channels/_lib/adapter';
-import type { NormalizedMessage, NormalizedTicketWithMessages } from '@/channels/_lib/types';
+import type { NormalizedTicketWithMessages } from '@/channels/_lib/types';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { authorizeApiRoute } from '@/lib/auth/api-auth';
 import { runFirstResponseFlow } from '@/lib/first-response/orchestrator';
+import { ingestPullItem } from '@/lib/sync/ingest-pull-item';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -86,7 +87,7 @@ async function persistSyncState(
 async function upsertTicket(
   channelId: string,
   payload: NormalizedTicketWithMessages['ticket'],
-): Promise<{ id: string; isNew: boolean }> {
+): Promise<{ id: string; isNew: boolean; subjectEmpty: boolean }> {
   // Gemini code review High 指摘: 旧 select→insert パターンは並行 cron 実行時に
   // unique 制約違反を起こすレース条件を含むため、(channel_id, external_id) UNIQUE を
   // 利用した atomic な .upsert() に切替。
@@ -96,21 +97,22 @@ async function upsertTicket(
   const supa = await getSupabaseAdmin();
   const { data: existing, error: selErr } = await supa
     .from('tickets')
-    .select('id, status')
+    .select('id, status, subject')
     .eq('channel_id', channelId)
     .eq('external_id', payload.externalId)
     .maybeSingle();
   if (selErr) throw new Error(`upsertTicket(select) failed: ${selErr.message}`);
 
+  // subject は **書かない** (codex CONCERN#1: 書込口は resolveAndPersistSubject に収束)。
   const baseUpdate = {
     customer_name: payload.customerName ?? null,
     customer_email: payload.customerEmail ?? null,
-    subject: payload.subject ?? null,
     channel_meta: payload.channelMeta ?? {},
     resolved_at: payload.resolvedAt ?? null,
   };
 
   if (existing) {
+    const subjectEmpty = !((existing.subject as string | null) ?? '').trim();
     const update = {
       ...baseUpdate,
       // untouched → done のみ自動遷移を許可。in_progress は人手フローを尊重して踏み潰さない。
@@ -120,7 +122,7 @@ async function upsertTicket(
     };
     const { error: updErr } = await supa.from('tickets').update(update).eq('id', existing.id);
     if (updErr) throw new Error(`upsertTicket(update) failed: ${updErr.message}`);
-    return { id: existing.id as string, isNew: false };
+    return { id: existing.id as string, isNew: false, subjectEmpty };
   }
 
   // 競合した insert で並行 cron が同時に到達した場合のレース対策として
@@ -145,29 +147,8 @@ async function upsertTicket(
   if (postErr) throw new Error(`upsertTicket(post-select) failed: ${postErr.message}`);
   // existing が無く upsert を通った = 新規 (ignoreDuplicates により別 cron が先行した
   // 場合は実質既存だが、後段フローは DB partial UNIQUE + flag gate で冪等なので問題ない)
-  return { id: postSel.id as string, isNew: true };
-}
-
-async function upsertMessages(
-  ticketId: string,
-  messages: NormalizedMessage[],
-): Promise<number> {
-  if (messages.length === 0) return 0;
-  const supa = await getSupabaseAdmin();
-  const rows = messages.map((m) => ({
-    ticket_id: ticketId,
-    channel_message_id: m.channelMessageId,
-    direction: m.direction,
-    body: m.body,
-    sender_name: m.senderName ?? null,
-    sent_at: m.sentAt,
-    attachments: m.attachments ?? [],
-  }));
-  const { error, count } = await supa
-    .from('messages')
-    .upsert(rows, { onConflict: 'ticket_id,channel_message_id', count: 'exact' });
-  if (error) throw new Error(`upsertMessages failed: ${error.message}`);
-  return count ?? rows.length;
+  // 新規 insert は subject NULL で作成されるため subjectEmpty=true。
+  return { id: postSel.id as string, isNew: true, subjectEmpty: true };
 }
 
 interface InboundResult {
@@ -201,20 +182,34 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
   let lastExternalId: string | undefined;
   let errorMessage: string | undefined;
 
+  const supa = await getSupabaseAdmin();
+
   try {
     for await (const item of rakutenAdapter.fetchInbox(ctx)) {
-      const { id: ticketId, isNew } = await upsertTicket(channel.id, item.ticket);
-      const inserted = await upsertMessages(ticketId, item.messages);
+      const { id: ticketId, isNew, subjectEmpty } = await upsertTicket(channel.id, item.ticket);
+      // 共通後処理: 新規 inbound 識別 → 件名(空時のみ)。楽天は auto-draft を使わず
+      // first-response flow 経路を維持するため autoDraft:false (回帰回避)。
+      const ingest = await ingestPullItem(supa, {
+        channelId: channel.id,
+        ticketId,
+        subjectEmpty,
+        messages: item.messages,
+        channelMeta: item.ticket.channelMeta,
+        customerName: item.ticket.customerName ?? null,
+        autoDraft: false,
+      });
       ticketsProcessed += 1;
-      messagesUpserted += inserted;
+      messagesUpserted += ingest.inserted;
       lastExternalId = item.ticket.externalId;
+      if (ingest.warnings.length > 0) {
+        logger.warn('pull_item_warnings', { ticketId, warnings: ingest.warnings });
+      }
 
       // 新規 ticket → 営業時間外一次返信フロー (flag-off 時は disabled で即 return)。
       // sync 本体を絶対に壊さないため try/catch で隔離。送信可否は orchestrator 内の
       // flag/営業時間/source ガードに委譲 (flag-off で送信されない)。
       if (isNew) {
         try {
-          const supa = await getSupabaseAdmin();
           const outcome = await runFirstResponseFlow(supa, ticketId);
           if (outcome.status !== 'disabled' && outcome.status !== 'within_hours') {
             logger.info('first_response.outcome', {
