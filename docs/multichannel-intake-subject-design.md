@@ -115,6 +115,11 @@ export async function resolveAndPersistSubject(
 > **cursor を進めない (holdCursor)**: 時刻ベース cursor を進めると失敗 message が次 sync の since/fromDate
 > 窓から外れてロストするため、この run では cursor を保持し次 sync で同一 window を再取得・再試行させる
 > (既挿入は (ticket_id, channel_message_id) UNIQUE で冪等 dedup)。error として可視化 (207)。
+> 追加修正: ① **per-ticket の wall-clock cursor persist を廃止** (途中まで進めた cursor が後続 ticket の
+> 失敗で巻き戻せず取りこぼすため)。cursor は run 完全成功時の finalize で startedAt を 1 回だけ進める。
+> ② 楽天 first-response の発火 gate に `newInboundCount>0 && messageErrorCount===0` を追加
+> (初回 inbound の insert 失敗時に空/部分 thread で first-response が走り partial-unique で再生成されない
+> 事態を防ぐ)。
 
 > **codex CONCERN#1 反映 (subject clobber 防止 / 最重要)**: subject を「ingest 層のみが書く」と
 > するには、adapter から subject を消すだけでは不十分。現行 upsertTicket の **既存行 update が

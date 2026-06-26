@@ -236,7 +236,6 @@ async function syncOneChannel(
 
   let ticketsProcessed = 0;
   let messagesUpserted = 0;
-  let lastSyncedAt = startedAt;
   let lastExternalId: string | undefined;
   let errorMessage: string | undefined;
 
@@ -245,11 +244,13 @@ async function syncOneChannel(
   const autoDraftEnabled = cfg.auto_draft !== false;
   const supa = await getSupabaseAdmin();
   // message insert 失敗 (非23505) を観測したら cursor を進めない (codex PR review P3-redux):
-  // 時刻ベース cursor を進めると失敗 message が次 sync の since 窓から外れてロストするため、
-  // 1 件でも失敗したらこの run では cursor を保持し、次 sync で同じ window を再取得・再試行させる
-  // (既挿入は (ticket_id, channel_message_id) UNIQUE で冪等 dedup される)。
+  // 時刻ベース cursor を進めると失敗 message が次 sync の since 窓から外れてロストするため。
   let holdCursor = false;
 
+  // codex PR review (per-ticket cursor lossiness): per-ticket の wall-clock persist は
+  // 廃止する。途中まで進めた cursor が後続 ticket の失敗で巻き戻せず、失敗 message を
+  // 取りこぼすため。cursor は run 完全成功時に finalize で startedAt を 1 回だけ進める
+  // (失敗時は据え置き → 次 sync が前回 since から window 全体を再取得・冪等 dedup)。
   try {
     for await (const item of adapter.fetchInbox(ctx)) {
       const ticketId = await upsertTicket(channel.id, item.ticket);
@@ -277,20 +278,6 @@ async function syncOneChannel(
           ticketId,
           messageErrorCount: ingest.messageErrorCount,
         });
-      }
-
-      // cursor を 1 件ごとに進める（再スキャン幅を最小化）。ただし message insert 失敗を
-      // 観測したら以降は進めない (失敗 window を次 sync で必ず再取得させる)。
-      if (!holdCursor) {
-        const observedAt = new Date();
-        lastSyncedAt = observedAt;
-        try {
-          await persistSyncState(channel.id, observedAt, lastExternalId);
-        } catch (err) {
-          logger.warn('persistSyncState_failed_continuing', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
       }
     }
   } catch (err) {

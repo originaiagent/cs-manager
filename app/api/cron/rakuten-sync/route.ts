@@ -213,9 +213,13 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
       }
 
       // 新規 ticket → 営業時間外一次返信フロー (flag-off 時は disabled で即 return)。
+      // gate (codex PR review): 新規 ticket かつ **inbound message が実際に insert され
+      // (newInboundCount>0)、かつ当該 ticket に message insert 失敗が無い (messageErrorCount===0)**
+      // ときのみ発火する。空/部分 thread で first-response が走り、partial-unique により後で
+      // 正しい本文で再生成されない事態 (空 thread 発火) を防ぐ。
       // sync 本体を絶対に壊さないため try/catch で隔離。送信可否は orchestrator 内の
       // flag/営業時間/source ガードに委譲 (flag-off で送信されない)。
-      if (isNew) {
+      if (isNew && ingest.newInboundCount > 0 && ingest.messageErrorCount === 0) {
         try {
           const outcome = await runFirstResponseFlow(supa, ticketId);
           if (outcome.status !== 'disabled' && outcome.status !== 'within_hours') {
@@ -233,16 +237,8 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
           });
         }
       }
-      // message insert 失敗を観測したら以降 cursor を進めない (失敗 window を次 sync で再取得)。
-      if (!holdCursor) {
-        try {
-          await persistSyncState(channel.id, new Date(), lastExternalId);
-        } catch (err) {
-          logger.warn('persistSyncState_failed_continuing', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
+      // per-ticket の wall-clock cursor persist は廃止 (codex PR review: 途中 persist が後続
+      // 失敗で巻き戻せず取りこぼす)。cursor は run 完全成功時に finalize で 1 回だけ進める。
     }
   } catch (err) {
     errorMessage = err instanceof Error ? err.message : String(err);
