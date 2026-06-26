@@ -109,9 +109,12 @@ export async function resolveAndPersistSubject(
 > ② UPDATE は「読んだ時点の空値 (NULL は `.is(null)` / `''`・whitespace は `.eq(oldVal)`)」に厳密一致する
 > 行のみ更新 = `subject IS NULL OR btrim=''` 相当を取りこぼさず (P1)、かつ要約実行中 (~150s) の人手編集を
 > clobber しない。③ pull/push とも新規 inbound では常に本関数を呼び、抑止判定は本関数に一元化。
-> **codex PR review 反映 (P3)**: `upsertMessagesReturningNew` は per-message insert の失敗で batch を
-> 中断せず continue (失敗分は次 sync で再試行)。先行 insert 済 inbound の subject/draft 発火が後続失敗で
-> 恒久ブロックされない (fail-closed)。
+> **codex PR review 反映 (P3 + redux)**: `upsertMessagesReturningNew` は per-message insert の失敗で
+> batch を中断せず continue し errorCount を返す (先行 insert 済 inbound の subject/draft 発火が後続失敗で
+> ブロックされない)。さらに `ingestPullItem.messageErrorCount > 0` のとき orchestrator/rakuten-sync は
+> **cursor を進めない (holdCursor)**: 時刻ベース cursor を進めると失敗 message が次 sync の since/fromDate
+> 窓から外れてロストするため、この run では cursor を保持し次 sync で同一 window を再取得・再試行させる
+> (既挿入は (ticket_id, channel_message_id) UNIQUE で冪等 dedup)。error として可視化 (207)。
 
 > **codex CONCERN#1 反映 (subject clobber 防止 / 最重要)**: subject を「ingest 層のみが書く」と
 > するには、adapter から subject を消すだけでは不十分。現行 upsertTicket の **既存行 update が

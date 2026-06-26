@@ -244,6 +244,11 @@ async function syncOneChannel(
   const cfg = (channel.config ?? {}) as Record<string, unknown>;
   const autoDraftEnabled = cfg.auto_draft !== false;
   const supa = await getSupabaseAdmin();
+  // message insert 失敗 (非23505) を観測したら cursor を進めない (codex PR review P3-redux):
+  // 時刻ベース cursor を進めると失敗 message が次 sync の since 窓から外れてロストするため、
+  // 1 件でも失敗したらこの run では cursor を保持し、次 sync で同じ window を再取得・再試行させる
+  // (既挿入は (ticket_id, channel_message_id) UNIQUE で冪等 dedup される)。
+  let holdCursor = false;
 
   try {
     for await (const item of adapter.fetchInbox(ctx)) {
@@ -266,16 +271,26 @@ async function syncOneChannel(
       if (ingest.draftStatus && ingest.draftStatus !== 'ingested_with_draft') {
         logger.info('auto_draft.outcome', { ticketId, status: ingest.draftStatus });
       }
-
-      // 1 件ごとに sync_state を進める（部分失敗時の再スキャン幅を最小化）
-      const observedAt = new Date();
-      lastSyncedAt = observedAt;
-      try {
-        await persistSyncState(channel.id, observedAt, lastExternalId);
-      } catch (err) {
-        logger.warn('persistSyncState_failed_continuing', {
-          error: err instanceof Error ? err.message : String(err),
+      if (ingest.messageErrorCount > 0) {
+        holdCursor = true;
+        logger.error('message_insert_error_holding_cursor', {
+          ticketId,
+          messageErrorCount: ingest.messageErrorCount,
         });
+      }
+
+      // cursor を 1 件ごとに進める（再スキャン幅を最小化）。ただし message insert 失敗を
+      // 観測したら以降は進めない (失敗 window を次 sync で必ず再取得させる)。
+      if (!holdCursor) {
+        const observedAt = new Date();
+        lastSyncedAt = observedAt;
+        try {
+          await persistSyncState(channel.id, observedAt, lastExternalId);
+        } catch (err) {
+          logger.warn('persistSyncState_failed_continuing', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
   } catch (err) {
@@ -283,7 +298,13 @@ async function syncOneChannel(
     logger.error('fetchInbox_failed', { error: errorMessage });
   }
 
-  // 正常完了時は startedAt を sync 起点として記録（次回はそこから引く）
+  // message insert 失敗があれば error として可視化 (cursor も finalize しない)。
+  if (holdCursor && !errorMessage) {
+    errorMessage = 'message_insert_error: cursor held for retry next sync';
+  }
+
+  // 正常完了時は startedAt を sync 起点として記録（次回はそこから引く）。
+  // errorMessage (fetchInbox 失敗 / message insert 失敗) 時は finalize しない = cursor 保持。
   if (!errorMessage) {
     try {
       await persistSyncState(channel.id, startedAt, lastExternalId);

@@ -191,6 +191,8 @@ describe('ingestPullItem — pull 後処理の結線', () => {
     // 失敗メッセージは新規扱いされず、成功した talk:ok で subject/draft が発火する
     expect(r.inserted).toBe(1);
     expect(r.newInboundCount).toBe(1);
+    // 呼出側 (orchestrator/rakuten-sync) が cursor を保持するための signal
+    expect(r.messageErrorCount).toBe(1);
     expect(r.warnings.some((w) => w.startsWith('message_insert_errors:'))).toBe(true);
     expect(resolveSubject).toHaveBeenCalledWith(expect.anything(), 't-1', {
       body: '正常に入る問い合わせ',

@@ -181,6 +181,9 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
   let errorMessage: string | undefined;
 
   const supa = await getSupabaseAdmin();
+  // message insert 失敗 (非23505) を観測したら cursor を進めない (codex PR review P3-redux):
+  // 時刻ベース cursor を進めると失敗 message が次 sync の fromDate 窓から外れてロストするため。
+  let holdCursor = false;
 
   try {
     for await (const item of rakutenAdapter.fetchInbox(ctx)) {
@@ -200,6 +203,13 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
       lastExternalId = item.ticket.externalId;
       if (ingest.warnings.length > 0) {
         logger.warn('pull_item_warnings', { ticketId, warnings: ingest.warnings });
+      }
+      if (ingest.messageErrorCount > 0) {
+        holdCursor = true;
+        logger.error('message_insert_error_holding_cursor', {
+          ticketId,
+          messageErrorCount: ingest.messageErrorCount,
+        });
       }
 
       // 新規 ticket → 営業時間外一次返信フロー (flag-off 時は disabled で即 return)。
@@ -223,17 +233,25 @@ async function runRakutenInbound(channel: RakutenChannelRow): Promise<InboundRes
           });
         }
       }
-      try {
-        await persistSyncState(channel.id, new Date(), lastExternalId);
-      } catch (err) {
-        logger.warn('persistSyncState_failed_continuing', {
-          error: err instanceof Error ? err.message : String(err),
-        });
+      // message insert 失敗を観測したら以降 cursor を進めない (失敗 window を次 sync で再取得)。
+      if (!holdCursor) {
+        try {
+          await persistSyncState(channel.id, new Date(), lastExternalId);
+        } catch (err) {
+          logger.warn('persistSyncState_failed_continuing', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
   } catch (err) {
     errorMessage = err instanceof Error ? err.message : String(err);
     logger.error('fetchInbox_failed', { error: errorMessage });
+  }
+
+  // message insert 失敗があれば error として可視化し finalize しない = cursor 保持。
+  if (holdCursor && !errorMessage) {
+    errorMessage = 'message_insert_error: cursor held for retry next sync';
   }
 
   if (!errorMessage) {

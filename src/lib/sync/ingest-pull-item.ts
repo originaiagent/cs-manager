@@ -45,6 +45,11 @@ export interface IngestPullItemResult {
   inserted: number;
   /** 新規 insert された inbound の件数。 */
   newInboundCount: number;
+  /**
+   * insert に失敗 (非23505) したメッセージ件数。>0 のとき呼出側は **cursor を進めず**、
+   * 次 sync でこの window を再取得・再試行させること (失敗メッセージのロスト防止)。
+   */
+  messageErrorCount: number;
   /** origin-ai 件名要約を試みたか。 */
   subjectAttempted: boolean;
   /** auto-draft の結果 (発火したときのみ)。 */
@@ -103,5 +108,12 @@ export async function ingestPullItem(
     }
   }
 
-  return { inserted, newInboundCount: newInbound.length, subjectAttempted, draftStatus, warnings };
+  return {
+    inserted,
+    newInboundCount: newInbound.length,
+    messageErrorCount: errorCount,
+    subjectAttempted,
+    draftStatus,
+    warnings,
+  };
 }
