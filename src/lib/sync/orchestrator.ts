@@ -296,7 +296,11 @@ async function syncOneChannel(
     try {
       await persistSyncState(channel.id, startedAt, lastExternalId);
     } catch (err) {
-      logger.warn('persistSyncState_finalize_failed', {
+      // per-ticket persist 廃止後はこれが唯一の cursor 前進。失敗を warn で握ると
+      // cursor が進まないまま success 応答になり「cursor stuck」を黙殺する (codex PR review)。
+      // channel error として可視化し、cron 応答を degraded(207) にする。
+      errorMessage = `persistSyncState_finalize_failed: ${err instanceof Error ? err.message : String(err)}`;
+      logger.error('persistSyncState_finalize_failed', {
         error: err instanceof Error ? err.message : String(err),
       });
     }
