@@ -88,7 +88,12 @@ export function extractRawUserId(channelMeta: unknown): string | null {
 export function resolvePushUserId(channelMeta: unknown): string | null {
   if (!channelMeta || typeof channelMeta !== 'object') return null;
   const meta = channelMeta as Record<string, unknown>;
-  if (meta.sourceType !== 'user') return null;
+  const st = meta.sourceType;
+  // 明示的に user 以外 (group/room) は 1:1 でないので拒否。
+  // sourceType 未設定は legacy (sourceType 列導入前の旧 webhook 由来)。forward の inbound は
+  // 1:1 限定 ingest (isReplyableUserTextEvent) のため「userId を持つ legacy 行 = 1:1」とみなし許容する。
+  // codex review P2: 厳格に null 返すと既存 1:1 draft が unsendable になるため compat path を残す。
+  if (st !== undefined && st !== null && st !== 'user') return null;
   const userId = extractRawUserId(channelMeta);
   return isValidPushUserId(userId) ? userId : null;
 }
@@ -208,17 +213,30 @@ class SupabaseLineDraftRepo implements LineDraftRepo {
       if (relErr) throw new Error(`reclaimStaleSending(release) failed: ${relErr.message}`);
     }
     if (failIds.length > 0) {
-      // first_send_at 基準で 24h 超 → terminal。updated_at は触らない (再 claim でも first_send_at は不変)。
+      // first_send_at 基準で 24h 超 → terminal。first_send_at は不変なので再 claim されても誤らない。
+      const failPayload = {
+        status: 'failed',
+        last_error: 'line: sending stale >24h since first_send_at (retry-key expired, manual review)',
+      };
+      // (a) first_send_at が設定済の行: first_send_at<24h前 をガード。
       const { error: failErr } = await supa
         .from('ticket_drafts')
-        .update({
-          status: 'failed',
-          last_error: 'line: sending stale >24h since first_send_at (retry-key expired, manual review)',
-        })
+        .update(failPayload)
         .in('id', failIds)
         .eq('status', 'sending')
         .lt('first_send_at', failCutoffIso);
       if (failErr) throw new Error(`reclaimStaleSending(fail) failed: ${failErr.message}`);
+      // (b) first_send_at が NULL の行 (claim の first_send_at 設定が失敗した等の不整合): updated_at で
+      //     代替判定。`.lt('first_send_at')` は NULL に match しないため別 update で救済し、sending に
+      //     永久滞留させない。再 claim で first_send_at が付くと .is(null) から外れるので二重失敗しない。
+      const { error: failNullErr } = await supa
+        .from('ticket_drafts')
+        .update(failPayload)
+        .in('id', failIds)
+        .eq('status', 'sending')
+        .is('first_send_at', null)
+        .lt('updated_at', failCutoffIso);
+      if (failNullErr) throw new Error(`reclaimStaleSending(fail-null) failed: ${failNullErr.message}`);
     }
     return { released: releaseIds.length, failed: failIds.length };
   }

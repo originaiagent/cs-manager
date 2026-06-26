@@ -271,3 +271,10 @@ alter table public.ticket_drafts add constraint ticket_drafts_status_check
 - **P2 24h 終端の基準**: 24h 失効判定を updated_at 基準にすると、再 claim/reclaim で updated_at が毎回更新され
   再送ループが永久に >24h に到達せず、retry-key 失効後に二重配信し得る。→ 不変の **`first_send_at`** 列を追加
   (claim 初回のみ設定・再 claim で更新しない)、24h 終端は first_send_at 基準 (`classifyStaleSending`)。15分 stuck 検知は updated_at 基準のまま。
+
+4回目 (最終 re-review) で upgrade/recovery の P2 を 2 件指摘 → 修正:
+- **P2 legacy sourceType 互換**: sourceType 列導入前の旧 webhook 由来 1:1 ticket は sourceType 未設定。
+  厳格に null 返すと既存 1:1 draft が unsendable になる。→ `resolvePushUserId` で **sourceType 未設定 + 有効 userId は許容**
+  (forward は 1:1 限定 ingest なので「userId あり legacy = 1:1」とみなす)。明示的 group/room は従来どおり拒否。
+- **P2 NULL first_send_at 滞留**: fail 用 SQL `.lt('first_send_at')` は NULL に match せず、first_send_at 未設定
+  (claim の設定失敗等) の sending 行が永久滞留し得る。→ NULL 用の fail update (`.is('first_send_at', null).lt('updated_at', cutoff)`) を追加し terminal 化。
