@@ -203,12 +203,12 @@ export const yahooAdapter: ChannelAdapter = {
     // fetchImpl 優先順位:
     //   1. cfg.__fetchImpl (テスト注入。関数なので DB JSON config には載らない=本番混入不可)
     //   2. Yahoo egress 固定IPプロキシ経由 fetch (本番既定)。
-    // Yahoo は **必ず** プロキシ経由 (固定IP要件)。直 fetch へ落とす escape hatch は持たない
-    //   (proxy 取得不能時は fetch が fail-closed で throw → 当該 sync はエラー化、IP 漏れなし)。
-    // proxy の Core service_code は config.egress_proxy_service_code で上書き可 (既定 yahoo_egress_proxy)。
+    // Yahoo は **必ず** Core 'yahoo_egress_proxy' 固定経路で proxy 経由 (固定IP要件)。直 fetch へ
+    //   落とす escape hatch も、DB config で proxy service_code を差し替える余地も持たない
+    //   (codex 実装レビュー P1: 固定経路の不変条件)。proxy 取得不能時は fetch が fail-closed で
+    //   throw → 当該 sync はエラー化、IP 漏れなし。
     const testFetch = cfg.__fetchImpl as FetchLike | undefined;
-    const proxyServiceCode = asStr(cfg.egress_proxy_service_code, '') || undefined;
-    const fetchImpl = testFetch ?? createYahooProxiedFetch(proxyServiceCode);
+    const fetchImpl = testFetch ?? createYahooProxiedFetch();
 
     const client = new YahooTalkClient({ apiBase, accessToken, fetchImpl });
     const since = ctx.since ?? null;
