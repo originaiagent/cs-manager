@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
-import { authorizeApiRoute } from '@/lib/auth/api-auth';
+import { authorizeInternalApiRoute } from '@/lib/auth/api-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 const ALLOWED_STATUSES = ['draft', 'in_review', 'accepted', 'rejected', 'escalated'] as const;
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
-  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  const authError = await authorizeInternalApiRoute(req);
   if (authError) return authError;
   let payload: any;
   try {

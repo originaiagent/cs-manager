@@ -179,12 +179,19 @@ async function validateWithOriginAi(
   opReq: McpOpRequest,
 ): Promise<{ ok: true } | { ok: false; err: McpAuthError }> {
   const originAiBaseUrl = process.env.ORIGIN_AI_BASE_URL;
-  // embed専用の共有検証鍵を優先 (origin-ai validate と同値)。各ツール固有の Core 鍵
-  // (INTERNAL_API_KEY) は別物のため後方互換のフォールバックに留める。
-  const internalApiKey = process.env.EMBED_MCP_VALIDATE_KEY || process.env.INTERNAL_API_KEY;
+  // embed validate コールバックの共有検証鍵: EMBED_MCP_VALIDATE_KEY(専用)優先、無ければ
+  // Core core_internal_shared(origin-ai validate が受理する全ツール共通値)。接続鍵 Core 集約
+  // Done-1 で global env INTERNAL_API_KEY 直読みは廃止。
+  const { getSharedInternalApiKey } = await import('@/lib/credentials');
+  const internalApiKey = await getSharedInternalApiKey();
 
   if (!originAiBaseUrl) {
     return { ok: false, err: { status: 403, message: 'ORIGIN_AI_BASE_URL 未設定' } };
+  }
+  // 鍵未解決 (EMBED_MCP_VALIDATE_KEY 無し かつ Core 解決不可) は無認証で origin-ai を叩かず
+  // ローカルで fail-closed (codex 必須#5)。下流 validate が鍵なしを 401 にする前に止める。
+  if (!internalApiKey) {
+    return { ok: false, err: { status: 403, message: 'embed validate 検証鍵 未解決 (fail-closed)' } };
   }
 
   const body = {
@@ -209,7 +216,7 @@ async function validateWithOriginAi(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(internalApiKey ? { 'X-Internal-API-Key': internalApiKey } : {}),
+        'X-Internal-API-Key': internalApiKey,
       },
       body: JSON.stringify(body),
       signal: ac.signal,

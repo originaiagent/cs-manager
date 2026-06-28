@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
-import { authorizeApiRoute } from '@/lib/auth/api-auth';
+import { authorizeInternalApiRoute } from '@/lib/auth/api-auth';
 
 /**
  * embed 入口 (契約 §3): origin-ai /api/embed/run を起動し runs をポーリングする。
@@ -41,7 +41,7 @@ function pollIntervalMs(): number {
 
 export async function POST(req: NextRequest) {
   // --- 認証ゲート (内部化: Server Action / internalFetch 経由のみ) ---
-  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  const authError = await authorizeInternalApiRoute(req);
   if (authError) return authError;
 
   const key = process.env.EMBED_CLIENT_KEY?.replace(/\s+$/, '');

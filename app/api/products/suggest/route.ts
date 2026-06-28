@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authorizeApiRoute } from '@/lib/auth/api-auth';
+import { authorizeInternalApiRoute } from '@/lib/auth/api-auth';
 import { getEntryKeys, fetchWithEntryKeys } from '@/lib/core-entry-keys';
 
 /**
@@ -27,7 +27,7 @@ const FETCH_LIMIT = 500;     // Core が q を honor しない環境への防御
 const FIELDS = 'id,group_name,developer';
 
 export async function GET(req: NextRequest) {
-  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  const authError = await authorizeInternalApiRoute(req);
   if (authError) return authError;
 
   const q = req.nextUrl.searchParams.get('q')?.trim() ?? '';
@@ -44,7 +44,7 @@ export async function GET(req: NextRequest) {
   const entryKeys = getEntryKeys();
   if (!CORE_API_URL || entryKeys.length === 0) {
     return NextResponse.json(
-      { ok: false, items: [], error: 'CORE_API_URL / INTERNAL_API_KEY not configured' },
+      { ok: false, items: [], error: 'CORE_API_URL / CORE_CREDENTIAL_KEY not configured' },
       { status: 503 },
     );
   }

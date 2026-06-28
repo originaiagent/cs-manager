@@ -9,7 +9,8 @@ OriginAI マルチチャネル統合カスタマーサポート + AI改善サイ
 
 ## Environment Variables
 - `CORE_API_URL`: Core API endpoint
-- `INTERNAL_API_KEY`: Shared secret for Core API (X-Internal-API-Key) — credential / master 取得共通
+- `CORE_CREDENTIAL_KEY`: per-tool scoped 入口鍵 (X-Internal-API-Key)。Core への outbound (credential / master 取得) の唯一の entry 鍵。接続鍵 Core 集約 Done-1 で旧 global `INTERNAL_API_KEY` を置換。inbound 検証 (origin-core→/api/ai/*) と self-loop (Server Action→internalFetch→/api/*) の共有内部鍵は Core `core_internal_shared` から実行時取得する (env 直読みなし)。log 禁止。
+  - 旧 `INTERNAL_API_KEY` は runtime app code から完全除去済 (env からも除去)。CI/運用 scripts (`scripts/*`) と vendored `templates/*` のみ carve-out として残置。
 - `ORIGIN_AI_URL`: AI API endpoint
 - `ORIGIN_AI_API_KEY`: AI API key
 - `ORIGIN_AI_TOOL_NAME`: cs-manager

@@ -54,7 +54,7 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } },
 ) {
-  const authError = authorizeInternalApiKey(req);
+  const authError = await authorizeInternalApiKey(req);
   if (authError) return authError;
 
   const startedAt = Date.now();

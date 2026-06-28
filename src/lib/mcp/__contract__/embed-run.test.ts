@@ -18,10 +18,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // --- env (route が参照) ------------------------------------------------------
 const INTERNAL_KEY = 'test-internal-key';
-process.env.INTERNAL_API_KEY = INTERNAL_KEY;
 process.env.EMBED_CLIENT_KEY = 'test-embed-key';
 process.env.ORIGIN_AI_BASE_URL = 'https://origin-ai.example.com';
 process.env.EMBED_RUN_POLL_INTERVAL_MS = '5';
+
+// 接続鍵 Core 集約 Done-1: 内部認証 (authorizeInternalApiRoute) は Core core_internal_shared
+// 取得値で照合する。Core 解決を mock し、期待鍵を INTERNAL_KEY に固定する。
+vi.mock('@/lib/credentials', () => ({
+  getInboundVerifyKeys: async () => [INTERNAL_KEY],
+}));
 
 // --- supabase-admin モック ---------------------------------------------------
 // ticketStore に id があれば存在扱い。

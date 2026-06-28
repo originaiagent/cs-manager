@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
-import { authorizeApiRoute } from '@/lib/auth/api-auth';
+import { authorizeInternalApiRoute } from '@/lib/auth/api-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -10,7 +10,7 @@ export const dynamic = 'force-dynamic';
  * 空文字は SQL/挿入時に NULL 化済みのため、where defect_type is not null で十分。
  */
 export async function GET(req: NextRequest) {
-  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  const authError = await authorizeInternalApiRoute(req);
   if (authError) return authError;
 
   const sb = await getSupabaseAdmin();

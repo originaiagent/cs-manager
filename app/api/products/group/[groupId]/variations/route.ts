@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { authorizeApiRoute } from '@/lib/auth/api-auth';
+import { authorizeInternalApiRoute } from '@/lib/auth/api-auth';
 import { getEntryKeys, fetchWithEntryKeys } from '@/lib/core-entry-keys';
 
 /**
@@ -20,7 +20,7 @@ const cache = new Map<string, CacheEntry>();
 const TTL_MS = 60_000;
 
 export async function GET(req: NextRequest, { params }: { params: { groupId: string } }) {
-  const authError = authorizeApiRoute(req, { tier: 'internal' });
+  const authError = await authorizeInternalApiRoute(req);
   if (authError) return authError;
   const groupId = params.groupId;
   if (!groupId || !/^\d+$/.test(groupId)) {
@@ -34,7 +34,7 @@ export async function GET(req: NextRequest, { params }: { params: { groupId: str
   const entryKeys = getEntryKeys();
   if (!CORE_API_URL || entryKeys.length === 0) {
     return NextResponse.json(
-      { ok: false, variations: [], error: 'CORE_API_URL / INTERNAL_API_KEY not configured' },
+      { ok: false, variations: [], error: 'CORE_API_URL / CORE_CREDENTIAL_KEY not configured' },
       { status: 503 },
     );
   }

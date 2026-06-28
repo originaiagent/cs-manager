@@ -129,10 +129,9 @@ async function fetchOriginAIOAuthCredential(): Promise<CredentialResponse> {
   if (_cache && Date.now() - _cache.at < CACHE_TTL_MS) return _cache.value;
 
   const coreUrl = getCoreApiUrl();
-  // entry 鍵: scoped (CORE_CREDENTIAL_KEY) 優先・global (INTERNAL_API_KEY) fallback を順試行し
-  // 401/403 で次鍵へ retry する (接続鍵 Core 集約 staged rollout)。
+  // entry 鍵: per-tool scoped 入口鍵 CORE_CREDENTIAL_KEY のみ (接続鍵 Core 集約 Done-1)。
   const entryKeys = getEntryKeys();
-  if (entryKeys.length === 0) throw new CredentialFetchError('INTERNAL_API_KEY is not set', null, 'originai_oauth');
+  if (entryKeys.length === 0) throw new CredentialFetchError('CORE_CREDENTIAL_KEY is not set', null, 'originai_oauth');
   if (!validateCoreOrigin(coreUrl)) {
     throw new CredentialFetchError('CORE_API_URL is not an allowed https origin', null, 'originai_oauth');
   }
