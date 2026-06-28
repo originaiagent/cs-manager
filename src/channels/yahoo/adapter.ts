@@ -24,6 +24,7 @@ import type {
   NormalizedTicketWithMessages,
 } from '../_lib/types';
 import { YahooTalkClient, YahooApiError, type FetchLike } from './client';
+import { createYahooProxiedFetch } from './egress';
 import type {
   YahooTalkDetailResponse,
   YahooTalkListHeadline,
@@ -199,7 +200,15 @@ export const yahooAdapter: ChannelAdapter = {
     // sellerId は Core credential 優先 (キー投入だけで稼働)、config はフォールバック。
     const sellerId = resolveSellerId(ctx, cfg);
     const dateType = asStr(cfg.date_type, '') || undefined;
-    const fetchImpl = (cfg.__fetchImpl as FetchLike | undefined) ?? undefined;
+    // fetchImpl 優先順位:
+    //   1. cfg.__fetchImpl (テスト注入。関数なので DB JSON config には載らない=本番混入不可)
+    //   2. Yahoo egress 固定IPプロキシ経由 fetch (本番既定)。
+    // Yahoo は **必ず** Core 'yahoo_egress_proxy' 固定経路で proxy 経由 (固定IP要件)。直 fetch へ
+    //   落とす escape hatch も、DB config で proxy service_code を差し替える余地も持たない
+    //   (codex 実装レビュー P1: 固定経路の不変条件)。proxy 取得不能時は fetch が fail-closed で
+    //   throw → 当該 sync はエラー化、IP 漏れなし。
+    const testFetch = cfg.__fetchImpl as FetchLike | undefined;
+    const fetchImpl = testFetch ?? createYahooProxiedFetch();
 
     const client = new YahooTalkClient({ apiBase, accessToken, fetchImpl });
     const since = ctx.since ?? null;

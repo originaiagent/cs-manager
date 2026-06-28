@@ -38,6 +38,13 @@ npm run dev
 ## Diagnostics
 - `/api/diag/core`: Check Core API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 - `/api/diag/ai`: Check AI API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
+- `/api/diag/yahoo-egress`: Yahoo 固定IPプロキシ経路の疎通確認 (requires `X-Diag-Token`)。proxy 経由で Yahoo 公開ホストへ実リクエストし `{ok, viaProxy, yahooStatus}` を返す。fail-closed で 502。
+
+## Yahoo egress 固定IPプロキシ (送信元IP固定)
+- cs-manager → Yahoo API の通信だけを **固定グローバルIP `104.198.123.146`** (GCP asia-northeast1, 東京) 経由で出す。Vercel egress は毎回変わるが Yahoo 利用申請は固定IP登録を要求するため。
+- 配線: `src/channels/yahoo/egress.ts` が Core `yahoo_egress_proxy` (host/port/username/password) を `CORE_CREDENTIAL_KEY` 経由で取得し undici `ProxyAgent` を構築 → `YahooTalkClient.fetchImpl` にだけ注入。Next 組込 fetch は HTTPS_PROXY を無視するため dispatcher 明示注入が必須。
+- **Yahoo は必ず proxy 経由**。proxy 取得不能時は fail-closed (直 fetch に落とさない=IP漏れ防止、当該 sync はエラー化)。他チャネル (楽天/メール/LINE) は非経由。
+- proxy 接続情報のハードコード禁止 (Core が唯一の入手元)。proxy の BasicAuth 値は Core Vault と GCP Secret Manager に同値保持。IaC/運用手順は `infra/yahoo-egress-proxy/`。
 
 ## Cron Jobs (Vercel)
 - `/api/cron/sync-channels`: 10分間隔（`*/10 * * * *`）。code='rakuten' を**除く** active channels を順に adapter 実行 → tickets/messages を upsert。
