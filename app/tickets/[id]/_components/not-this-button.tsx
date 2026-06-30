@@ -7,6 +7,11 @@
 import { useState } from 'react';
 import { ThumbsDown, Loader2, Check } from 'lucide-react';
 import { submitNotThisFeedbackAction } from '../_actions/submit-not-this-feedback';
+import {
+  AUTH_EXPIRED_MESSAGE,
+  loginHrefForHere,
+  runAction,
+} from '@/lib/client/auth-recovery';
 
 type Phase = 'idle' | 'open' | 'sending' | 'done' | 'error';
 
@@ -21,6 +26,7 @@ export default function NotThisButton({
   const [phase, setPhase] = useState<Phase>('idle');
   const [reason, setReason] = useState('');
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const [authExpired, setAuthExpired] = useState(false);
 
   if (!runId) return null;
 
@@ -38,17 +44,21 @@ export default function NotThisButton({
   async function send() {
     setPhase('sending');
     setErrMsg(null);
-    try {
-      const res = await submitNotThisFeedbackAction(runId as string, reason.trim() || null);
-      if (res.ok) {
-        setPhase('done');
-      } else {
-        setPhase('error');
-        setErrMsg(res.error ?? '送信に失敗しました');
-      }
-    } catch {
+    setAuthExpired(false);
+    // 既存規約: client から Server Action は runAction() で包み、認証切れ(throw/戻り値なし)を
+    // 再ログイン導線へ復帰させる(無限ローディング/汎用エラー固着の防止)。
+    const r = await runAction(() => submitNotThisFeedbackAction(runId as string, reason.trim() || null));
+    if (r.authExpired) {
       setPhase('error');
-      setErrMsg('送信に失敗しました');
+      setAuthExpired(true);
+      setErrMsg(AUTH_EXPIRED_MESSAGE);
+      return;
+    }
+    if (r.result.ok) {
+      setPhase('done');
+    } else {
+      setPhase('error');
+      setErrMsg(r.result.error ?? '送信に失敗しました');
     }
   }
 
@@ -106,6 +116,14 @@ export default function NotThisButton({
       {phase === 'error' && errMsg ? (
         <span className="text-xs text-red-600" data-testid="not-this-error">
           {errMsg}
+          {authExpired ? (
+            <>
+              {' '}
+              <a href={loginHrefForHere()} className="underline">
+                再ログイン
+              </a>
+            </>
+          ) : null}
         </span>
       ) : null}
     </span>

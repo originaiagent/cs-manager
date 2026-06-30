@@ -20,6 +20,8 @@ if (typeof window !== 'undefined') {
 /** origin-ai feedback endpoint (SoT 契約と一致)。 */
 const EMBED_FEEDBACK_PATH = '/api/embed/feedback';
 const REQUEST_TIMEOUT_MS = 10_000;
+/** reason 最大長 (origin-ai contract MAX_REASON_LEN と一致。送信側でも防御的に cap)。 */
+const MAX_REASON_LEN = 2000;
 
 export interface SubmitFeedbackResult {
   ok: boolean;
@@ -44,6 +46,9 @@ export async function submitNotThisFeedback(args: {
     return { ok: false, reason: 'missing_run_id' };
   }
 
+  const trimmed = args.reason && args.reason.trim() ? args.reason.trim() : null;
+  const reason = trimmed && trimmed.length > MAX_REASON_LEN ? trimmed.slice(0, MAX_REASON_LEN) : trimmed;
+
   try {
     const res = await fetch(`${baseUrl}${EMBED_FEEDBACK_PATH}`, {
       method: 'POST',
@@ -51,7 +56,7 @@ export async function submitNotThisFeedback(args: {
       body: JSON.stringify({
         run_id: args.runId,
         verdict: 'not_this',
-        reason: args.reason && args.reason.trim() ? args.reason.trim() : null,
+        reason,
       }),
       cache: 'no-store',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),

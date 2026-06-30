@@ -62,8 +62,15 @@ channels / tickets / messages / channel_sync_state / ticket_drafts.
   顧客向け本文のみ」なら true。送信安全境界の唯一の正は `src/lib/rag/split-reply.ts`
   (純関数パーサ)。origin-ai `customer-reply-writer` のセンチネル封筒出力を **サーバ側**で
   パースし、顧客向け本文のみを抽出する。fail-closed (parse 失敗 → 送信欄空)。
-- `POST /api/tickets/[id]/draft-rag`: `{ draft(顧客向け本文のみ), internalPreview(社内用,
-  読取専用表示), parseOk }` を返す。`parseOk=false` 時 `draft=''`。
+- `POST /api/tickets/[id]/draft-rag`: `{ run_id(=ai_embed_runs.id, null可), draft(顧客向け本文
+  のみ), internalPreview(社内用, 読取専用表示), parseOk }` を返す。`parseOk=false` 時 `draft=''`。
+  `run_id` は origin-ai embed run 識別子で、〔これじゃない〕フィードバックの紐付けに UI まで透過する。
+- 〔これじゃない〕フィードバック: 返信下書きの横の `<NotThisButton runId>` (押下→任意理由欄)。
+  送信は Server Action `submitNotThisFeedbackAction` → `src/lib/embed/submit-feedback.ts`(server-only)
+  が origin-ai `POST /api/embed/feedback` へ `{run_id, verdict:'not_this', reason?}` を転送。
+  契約(SoT)は origin-ai `dashboard/lib/feedback/contract.ts`、改善キュー表示/承認は origin-ai 側。
+  依存 env(server-only): `EMBED_CLIENT_KEY` / `ORIGIN_AI_BASE_URL`(鍵はブラウザ非露出)。reason は
+  ログ非出力・最大2000字 cap。送信は `runAction()` 包みで認証切れ復帰。
 - `POST /api/tickets/[id]/drafts`: `source IN ('ai_draft','rag')` は `is_separated=true` 必須、
   かつ `body` が `isCustomerSafeBody` (内部マーカー/センチネル不在のサーバ側検証) を通過
   しない限り 400。`first_response` は許可せず orchestrator 専用 (parser 迂回防止)。
