@@ -148,6 +148,8 @@ export async function POST(
 
   return NextResponse.json({
     ok: true,
+    // origin-ai run識別子 (= ai_embed_runs.id)。〔これじゃない〕フィードバック紐付け用 (additive)。
+    run_id: result.runId ?? null,
     // draft = 顧客向け本文のみ (split-reply 分離後)。parseOk=false なら ''。
     draft: result.draft ?? '',
     // 社内用プレビュー (読み取り専用表示用)。送信欄には入れない。

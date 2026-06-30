@@ -24,6 +24,11 @@ export interface EmbedOneshotResult {
   ok: boolean;
   /** completed 時の run result (origin-ai oneshot の公開契約出力)。 */
   result?: Record<string, unknown>;
+  /**
+   * origin-ai が払い出した run識別子 (= ai_embed_runs.id)。〔これじゃない〕フィードバックを
+   * この run に紐づけるために UI まで透過する。成功時のみ非空。
+   */
+  runId?: string;
   /** 失敗時の PII-safe 安定ラベル (run_id/status 種別のみ。raw を含めない)。 */
   reason?: string;
 }
@@ -140,7 +145,8 @@ export async function runEmbedOneshotAndPoll(
           ? (json.result as Record<string, unknown>)
           : null;
       if (!result) return { ok: false, reason: 'embed_run_empty_result' };
-      return { ok: true, result };
+      // runId を透過(〔これじゃない〕フィードバック紐付け用)。result の正当性は呼出側検証。
+      return { ok: true, result, runId };
     }
     if (json.status === 'failed' || json.status === 'cancelled') {
       return { ok: false, reason: `embed_run_${json.status}` };

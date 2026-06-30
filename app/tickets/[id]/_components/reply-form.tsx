@@ -27,6 +27,7 @@ import {
   runAction,
 } from '@/lib/client/auth-recovery';
 import KnowledgeMetaPopover from './knowledge-meta-popover';
+import NotThisButton from './not-this-button';
 
 interface Props {
   ticketId: string;
@@ -46,6 +47,8 @@ type RagState =
   | { kind: 'loading' }
   | {
       kind: 'preview';
+      /** origin-ai run識別子 (= ai_embed_runs.id)。〔これじゃない〕紐付け用 (無い場合 null)。 */
+      runId: string | null;
       /** 顧客向け本文のみ (split-reply 分離後)。parseOk=false 時は ''。 */
       draft: string;
       /** 社内用プレビュー (読み取り専用)。送信欄には入れない。 */
@@ -143,6 +146,7 @@ export default function ReplyForm({
     }
     setRag({
       kind: 'preview',
+      runId: result.runId ?? null,
       draft: result.draft,
       internalPreview: result.internalPreview ?? '',
       parseOk: result.parseOk === true,
@@ -276,6 +280,20 @@ export default function ReplyForm({
                 {rag.draft}
               </pre>
             </>
+          )}
+
+          {/* 〔これじゃない〕: この下書きを生成した origin-ai run に紐づけてフィードバック送信。
+              parseOk に関わらず run は実行されているので表示する (run識別子がある時のみ)。 */}
+          {rag.runId && (
+            <div
+              className="mt-2 flex items-center gap-2"
+              data-testid="reply-not-this"
+            >
+              <span className="text-[11px] text-gray-400">
+                この返信案はどうですか？
+              </span>
+              <NotThisButton runId={rag.runId} />
+            </div>
           )}
 
           {/* 社内用パネル (読み取り専用、絶対に送信されない)。
