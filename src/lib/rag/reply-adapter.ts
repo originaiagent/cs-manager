@@ -82,6 +82,11 @@ export interface RagReplyInput {
 export interface RagReplyResult {
   ok: boolean;
   /**
+   * origin-ai run識別子 (= ai_embed_runs.id)。〔これじゃない〕フィードバックの紐付け用に
+   * UI まで透過する (生成成功時のみ非空)。
+   */
+  runId?: string;
+  /**
    * 顧客向け返信本文 (UI 送信欄 / 保存用)。送信安全ゲート通過時のみ非空。
    * unsafe (内部マーカー混入/空) 時は '' (fail-closed)。
    */
@@ -210,6 +215,8 @@ export async function generateRagReply(
 
     return {
       ok: true,
+      // run識別子を透過(〔これじゃない〕紐付け用)。
+      runId: run.runId,
       // 顧客向け本文のみ (parseOk=false なら '')。raw 全文/社内テキストは draft に入らない。
       draft: safe ? replyDraft : '',
       parseOk: safe,

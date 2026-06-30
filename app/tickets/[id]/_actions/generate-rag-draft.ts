@@ -43,6 +43,8 @@ function normalizeGroundingArticles(v: unknown): GroundingArticle[] {
 
 export interface GenerateRagDraftResult {
   ok: boolean;
+  /** origin-ai run識別子 (= ai_embed_runs.id)。〔これじゃない〕フィードバック紐付け用。 */
+  runId?: string | null;
   /** 顧客向け本文のみ (split-reply 分離後)。parseOk=false 時は ''。 */
   draft?: string;
   /** 社内用プレビュー (読み取り専用)。送信欄には入れない。 */
@@ -98,6 +100,7 @@ export async function generateRagDraft(
     }
     return {
       ok: true,
+      runId: typeof j.run_id === 'string' ? j.run_id : null,
       draft: typeof j.draft === 'string' ? j.draft : '',
       internalPreview:
         typeof j.internalPreview === 'string' ? j.internalPreview : '',
