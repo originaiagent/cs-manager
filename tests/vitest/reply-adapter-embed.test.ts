@@ -155,9 +155,10 @@ describe('reply-adapter (embed 一本化)', () => {
     expect(result.internalPreview).toContain('INTERNAL_NOTE');
   });
 
-  it('Bug1 根治: 汎用語 (根拠/担当者メモ/📋 等) を含む正当な顧客返信は parseOk=true (false-positive 解消)', async () => {
-    // fabef855 等で送信欄が無効化された false-positive クラス。汎用日本語語では弾かない。
-    const OK_DRAFT = `${SAFE_DRAFT}\nご請求の根拠となる明細を担当者メモとあわせてお送りします。📋`;
+  it('Bug1 根治: 内容記述語 (根拠/検索結果) を含む正当な顧客返信は parseOk=true (false-positive 解消)', async () => {
+    // 支払い問い合わせ等で「ご請求の根拠」を含む正当な顧客返信が空化されていた false-positive クラス。
+    // 内容記述語では弾かない (社内向けラベルは引き続き遮断)。
+    const OK_DRAFT = `${SAFE_DRAFT}\nご請求の根拠となる明細と検索結果をあわせてご案内いたします。`;
     mockRun.mockResolvedValue({
       ok: true,
       result: { reply_draft: OK_DRAFT, needs_escalation: false, sources: [] },
@@ -200,7 +201,9 @@ describe('reply-adapter (embed 一本化)', () => {
     const result = await generateRagReply(fakeSb, baseInput);
 
     expect(result.ok).toBe(true);
-    expect(result.parseOk).toBe(true);
+    // P1-a (codex code review): エスカレーションは自動採用不可 → reply_draft が安全でも parseOk=false / draft空。
+    expect(result.parseOk).toBe(false);
+    expect(result.draft).toBe('');
     expect(result.needsHuman).toBe(true);
     // Bug1 根治: エスカレーションは第一級フラグとして UI へ渡る。
     expect(result.escalated).toBe(true);

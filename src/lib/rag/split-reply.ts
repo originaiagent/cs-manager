@@ -70,34 +70,42 @@ export const FORBIDDEN_IN_CUSTOMER_BODY = [
 ] as const;
 
 /**
+ * isCustomerSafeBody 専用の「本物のリーク信号」リスト。
+ *
+ * Bug1 根治 (2026-07-01 / codex 設計 APPROVE + code review 反映):
+ *   現 gemma 経路 (origin-ai embed `cs-reply:draft`) では reply_draft が
+ *   「顧客向け専用フィールド」で、社内内容は sources / escalation_reason の別フィールドに
+ *   構造分離済み。旧 FORBIDDEN_IN_CUSTOMER_BODY はこの分離が無い旧センチネル方式向けで、
+ *   「根拠」「ナレッジ」「検索結果」といった **内容記述語** まで弾くため、正当な顧客返信
+ *   (例:「ご請求の根拠となる明細…」) を false-positive で空化していた。
+ *   そこで本ゲート用には内容記述語 (根拠 / ナレッジ / 検索結果) **のみ**を除外し、
+ *   顧客返信には現れない **明示的な社内向けラベル / 構造マーカー** は残す
+ *   (社内用 / 社内向け / 内部メモ / 担当者メモ / 担当者向け / オペレーター向け /
+ *    ⚠️ / 📋 / INTERNAL_ / ORIGIN_CS センチネル)。これにより false-positive を解消しつつ、
+ *   高シグナルな社内ラベルの漏洩は引き続き遮断する (codex code review P1-b)。
+ *   汎用語込みの FORBIDDEN_IN_CUSTOMER_BODY は顧客/社内混在の旧 splitReply 専用に温存。
+ */
+const CUSTOMER_BODY_LEAK_MARKERS = FORBIDDEN_IN_CUSTOMER_BODY.filter(
+  (m) => m !== '根拠' && m !== 'ナレッジ' && m !== '検索結果',
+);
+
+/**
  * 「この本文は顧客向けとして安全か」をサーバ側で独立検証する (parser 迂回防止)。
  *
  * 用途: 汎用 /drafts POST 等、splitReply を通さない経路で is_separated=true を
  *   受け付ける前のサーバ側ゲート。クライアントの is_separated 主張を鵜呑みにせず、
  *   body 自体に **本物の内部リーク信号** が無いことを証明する。
  *
- * 安全境界の設計 (Bug1 根治 / codex APPROVE 2026-07-01):
- *   現 gemma 経路 (origin-ai embed `cs-reply:draft`) では reply_draft が
- *   「顧客向け専用フィールド」であり、社内内容 (根拠ナレッジ / エスカレーション理由 /
- *   参照メモ) は sources / escalation_reason の **別フィールドに構造分離**されている。
- *   よって「根拠」「ナレッジ」「検索結果」「担当者メモ」等の **汎用日本語語** で顧客本文を
- *   弾くのは過剰で、正当な顧客返信 (例:「ご請求の根拠となる…」) を false-positive で
- *   空化してしまう (= Bug1 の "問い合わせ内容によって送信欄が無効化される" クラス)。
- *   したがって本ゲートは **本物のリーク信号のみ** を遮断する:
- *     (a) ORIGIN_CS センチネル系 (<<<ORIGIN_CS_...>>> / <<<END_ORIGIN_CS_...>>>)
- *     (b) 素の内部マーカー `INTERNAL_`
- *   汎用語リスト (FORBIDDEN_IN_CUSTOMER_BODY) は、顧客/社内が 1 テキストに混在する
- *   旧センチネル方式 splitReply でのみ意味を持つため **そちら専用に温存**し、本関数からは
- *   切り離す (混在しない現契約では汎用語は正当な顧客語)。
- *
- * 安全条件 (全充足): trim 後非空 / ORIGIN_CS センチネル系を含まない /
- *   `INTERNAL_` を含まない。1 つでも違反 → false (fail-closed)。
+ * 安全条件 (全充足): trim 後非空 / 社内向けラベル・構造マーカー (CUSTOMER_BODY_LEAK_MARKERS)
+ *   を含まない / ORIGIN_CS センチネル系を含まない。1 つでも違反 → false (fail-closed)。
  */
 export function isCustomerSafeBody(body: string | null | undefined): boolean {
   const text = typeof body === 'string' ? body : '';
   if (!text.trim()) return false;
-  if (/<<<\s*(END_)?ORIGIN_CS_/i.test(text)) return false; // センチネル漏れ
-  if (text.includes('INTERNAL_')) return false; // 素の内部マーカー
+  for (const marker of CUSTOMER_BODY_LEAK_MARKERS) {
+    if (text.includes(marker)) return false;
+  }
+  if (/<<<\s*(END_)?ORIGIN_CS_/i.test(text)) return false; // センチネル漏れ (END_ 系含む)
   return true;
 }
 

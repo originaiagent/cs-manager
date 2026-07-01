@@ -308,30 +308,35 @@ describe('isCustomerSafeBody (サーバ側 /drafts POST 用ゲート, parser 迂
     expect(isCustomerSafeBody(undefined)).toBe(false);
   });
 
-  it('本物のリーク信号 (INTERNAL_ / ORIGIN_CS センチネル) を含む → false', () => {
+  it('本物のリーク信号 (INTERNAL_/センチネル/社内向けラベル/📋/⚠️) を含む → false', () => {
     for (const bad of [
       '回答。INTERNAL_NOTE',
       '回答 <<<ORIGIN_CS_CUSTOMER_REPLY_V1>>>',
       '回答 <<<END_ORIGIN_CS_INTERNAL_GROUNDING_V1>>>',
+      '顧客向け本文\n\n社内用: 管理画面で確認',
+      '回答。社内向け補足あり',
+      '回答。内部メモ: 在庫薄',
+      '回答。担当者メモ: 在庫確認',
+      '回答。担当者向け補足',
+      '回答。オペレーター向け注記',
+      '回答。オペレータ向け注記',
+      '回答。📋 チェック',
+      '回答。⚠️ 注意',
     ]) {
       expect(isCustomerSafeBody(bad), bad).toBe(false);
     }
   });
 
-  // Bug1 根治 (2026-07-01 / codex APPROVE): 現 gemma 経路 (embed cs-reply:draft) では
-  //   reply_draft が顧客向け専用フィールドで、社内内容は sources/escalation_reason の別フィールド。
-  //   よって「根拠」「ナレッジ」「検索結果」「担当者メモ」等の汎用語や 📋/⚠️/社内ラベルは
-  //   正当な顧客返信に現れ得るため、isCustomerSafeBody はもう false-positive で弾かない。
-  //   (これら汎用語チェックは旧センチネル方式 splitReply 専用に温存され、splitReply のテストで担保)
-  it('汎用語 (根拠/ナレッジ/検索結果/担当者メモ/📋/⚠️/社内ラベル) のみでは弾かない → true', () => {
+  // Bug1 根治 (2026-07-01 / codex APPROVE + code review 反映): 現 gemma 経路 (embed cs-reply:draft)
+  //   では reply_draft が顧客向け専用フィールドで、社内内容は sources/escalation_reason の別フィールド。
+  //   内容記述語 (根拠/ナレッジ/検索結果) は正当な顧客返信に現れ得る (例:「ご請求の根拠となる…」) ため
+  //   もう false-positive で弾かない。明示的な社内向けラベル/構造マーカーは引き続き遮断する (上のテスト)。
+  //   汎用語込みリスト (FORBIDDEN_IN_CUSTOMER_BODY) は旧センチネル方式 splitReply 専用に温存。
+  it('内容記述語 (根拠/ナレッジ/検索結果) のみでは弾かない → true', () => {
     for (const ok of [
       'ご請求の根拠となる明細をお送りいたします。',
       'ナレッジベースの情報をご案内します。',
       '検索結果は以下のとおりです。',
-      '担当者メモをお渡しします。',
-      '回答します。📋 チェックリストをご確認ください。',
-      '回答します。⚠️ ご注意ください。',
-      '顧客向け本文です。社内用の在庫状況もあわせてご案内します。',
     ]) {
       expect(isCustomerSafeBody(ok), ok).toBe(true);
     }

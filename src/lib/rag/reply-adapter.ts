@@ -193,6 +193,11 @@ export async function generateRagReply(
     // 送信安全ゲート (codex CONCERN): 構造化 reply_draft の最終バリデーション。
     // fail-closed: unsafe → draft='' / parseOk=false / internalPreview=reply_draft (手動切出用)。
     const safe = replyDraft.trim().length > 0 && isCustomerSafeBody(replyDraft);
+    // P1-a (codex code review): エスカレーション(回答不能)は「自動採用/自動保存」の対象にしない。
+    //   parseOk は「自動採用可能=安全な顧客本文」の意味に限定し、escalated 時は false に倒す。これにより
+    //   UI だけでなく非UI保存経路 (ingest-inbound / pull-auto-draft, parseOk!==true で弾く) でも自動保存
+    //   されない。reply_draft 全文は internalPreview に残り、理由は escalated/internalNotesText で伝える。
+    const usable = safe && !needsEscalation;
 
     // sources → 表示用 citations (knowledge source = article_id を持つもののみ。lookup source は除外)。
     // title は下で cs DB 実メタから解決する (Bug2a 根治: 従来 title:null ハードコードのため
@@ -244,11 +249,12 @@ export async function generateRagReply(
       ok: true,
       // run識別子を透過(〔これじゃない〕紐付け用)。
       runId: run.runId,
-      // 顧客向け本文のみ (parseOk=false なら '')。raw 全文/社内テキストは draft に入らない。
-      draft: safe ? replyDraft : '',
-      parseOk: safe,
+      // 顧客向け本文のみ (自動採用可能な時のみ非空)。escalated 時は draft を持たせない。
+      draft: usable ? replyDraft : '',
+      parseOk: usable,
       // Bug1 根治: エスカレーション(回答不能)を第一級状態として UI へ渡す。
-      //   parseOk=false でも「分離失敗エラー」ではなく人間対応案内+理由を出させる。
+      //   escalated=true のとき parseOk=false(自動採用/自動保存不可)。UI は分離失敗エラーではなく
+      //   人間対応案内+理由(internalNotesText)を表示する。
       escalated: needsEscalation,
       // 内枠参照表示用 (送信 path 非流入)。unsafe 時もオペレータが手動切り出しできるよう全文。
       internalPreview: replyDraft,

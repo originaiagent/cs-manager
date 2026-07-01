@@ -314,19 +314,6 @@ export default function ReplyForm({
             </>
           )}
 
-          {/* エスカレーションだが下書き本文も返ってきた異常/混合ケース: 参考として read-only 表示。
-              自動採用はさせない (人間確認前提)。 */}
-          {rag.escalated && rag.draft.trim() && (
-            <>
-              <div className="text-[10px] font-semibold text-amber-700 tracking-wider mb-1">
-                参考: AI下書き（自動採用不可・要人間確認）
-              </div>
-              <pre className="whitespace-pre-wrap text-sm text-gray-700 font-sans bg-white rounded-md border border-amber-100 p-3 max-h-64 overflow-auto select-text">
-                {rag.draft}
-              </pre>
-            </>
-          )}
-
           {/* 〔これじゃない〕: この下書きを生成した origin-ai run に紐づけてフィードバック送信。
               parseOk に関わらず run は実行されているので表示する (run識別子がある時のみ)。 */}
           {rag.runId && (
