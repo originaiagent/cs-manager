@@ -95,6 +95,13 @@ export interface RagReplyResult {
   internalPreview?: string;
   /** 送信安全ゲート通過 (顧客向け本文として安全) か。false = fail-closed (送信欄空)。 */
   parseOk?: boolean;
+  /**
+   * AI が「回答不能」と判断しエスカレーション (人間対応) を要求したか (= needs_escalation)。
+   * Bug1 根治: これは「分離/パース失敗」とは別の第一級状態。escalated=true のとき UI は
+   * エラーではなく「AIは回答できませんでした。人間対応してください」+ escalationReason を表示し、
+   * 採用は無効化する (draft が空/非空いずれでも自動採用しない)。escalationReason は internalNotesText。
+   */
+  escalated?: boolean;
   /** 社内枠 (読み取り専用)「関連ナレッジ候補」(origin-ai sources の article_id → cs DB 実メタ)。表示専用。 */
   groundingArticles?: GroundingArticle[];
   /** 社内枠「AI の参照メモ」。embed 一本化では未提供 (常に '')。 */
@@ -188,15 +195,35 @@ export async function generateRagReply(
     const safe = replyDraft.trim().length > 0 && isCustomerSafeBody(replyDraft);
 
     // sources → 表示用 citations (knowledge source = article_id を持つもののみ。lookup source は除外)。
-    const citations: RagCitation[] = sources
+    // title は下で cs DB 実メタから解決する (Bug2a 根治: 従来 title:null ハードコードのため
+    //   参照ナレッジが常に「(タイトルなし)」表示だった。実タイトルは knowledge_articles に存在)。
+    const citationsBase: RagCitation[] = sources
       .filter((s) => typeof s.article_id === 'string' && s.article_id)
       .map((s) => ({
         chunk_id: typeof s.chunk_id === 'string' ? s.chunk_id : '',
         article_id: String(s.article_id),
         article_version: typeof s.article_version === 'number' ? s.article_version : 0,
-        title: null,
+        title: null as string | null,
         rrf_score: typeof s.score === 'number' ? s.score : null,
       }));
+
+    // citations の title を cs DB knowledge_articles の実タイトル (published/未削除) へ解決。
+    //   失敗は非致命 (title 無しで継続)。表示専用・送信 path 非流入。
+    let citationTitleMap = new Map<string, string | null>();
+    try {
+      citationTitleMap = await fetchArticleTitleMap(
+        sb,
+        citationsBase.map((c) => c.article_id),
+      );
+    } catch (e) {
+      console.warn('[rag/reply-adapter] citation title 取得失敗 (title 無しで継続):', {
+        name: e instanceof Error ? e.name : 'unknown',
+      });
+    }
+    const citations: RagCitation[] = citationsBase.map((c) => ({
+      ...c,
+      title: citationTitleMap.get(c.article_id) ?? null,
+    }));
 
     // 社内枠「関連ナレッジ候補」: knowledge source の article_id を cs DB 実メタへ解決 (表示専用・非AI)。
     //   失敗は致命でない (候補表示の失敗で返信案を捨てない)。raw/PII は出さず種別のみ記録。
@@ -220,6 +247,9 @@ export async function generateRagReply(
       // 顧客向け本文のみ (parseOk=false なら '')。raw 全文/社内テキストは draft に入らない。
       draft: safe ? replyDraft : '',
       parseOk: safe,
+      // Bug1 根治: エスカレーション(回答不能)を第一級状態として UI へ渡す。
+      //   parseOk=false でも「分離失敗エラー」ではなく人間対応案内+理由を出させる。
+      escalated: needsEscalation,
       // 内枠参照表示用 (送信 path 非流入)。unsafe 時もオペレータが手動切り出しできるよう全文。
       internalPreview: replyDraft,
       // ↓ 全て社内 read-only 表示専用。draft/保存/送信には絶対に入れない。
@@ -292,4 +322,42 @@ async function fetchGroundingMeta(
     if (out.length >= MAX_GROUNDING_ARTICLES) break;
   }
   return out;
+}
+
+/**
+ * citation の article_id → cs DB `knowledge_articles` の実タイトル (published/未削除) を
+ * 引く軽量ヘルパ (Bug2a: 参照ナレッジのタイトル解決)。
+ * - published かつ deleted_at IS NULL のみ (壊れた/非公開リンクは title=解決なし→null)。
+ * - id 重複除去。件数上限なし (citations 全件のタイトルを解決する)。
+ * - **表示専用 (非AI・送信 path 非流入)**。title 以外は取得しない。
+ */
+async function fetchArticleTitleMap(
+  sb: SupabaseClient,
+  articleIds: string[],
+): Promise<Map<string, string | null>> {
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const id of articleIds) {
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  const map = new Map<string, string | null>();
+  if (ids.length === 0) return map;
+
+  const { data, error } = await sb
+    .from('knowledge_articles')
+    .select('id, title')
+    .in('id', ids)
+    .eq('status', 'published')
+    .is('deleted_at', null);
+  if (error) {
+    throw new Error(`knowledge_articles title 取得失敗: ${error.message}`);
+  }
+  for (const row of data ?? []) {
+    const r = row as { id: string; title: string | null };
+    map.set(r.id, r.title ?? null);
+  }
+  return map;
 }

@@ -122,6 +122,10 @@ describe('reply-adapter (embed 一本化)', () => {
     expect(result.citations).toHaveLength(1);
     expect(result.citations?.[0].article_id).toBe(ARTICLE_UUID);
     expect(result.citations?.[0].rrf_score).toBe(0.83);
+    // Bug2a 根治: citation の title が cs DB 実メタから解決される (従来 title:null ハードコード)。
+    expect(result.citations?.[0].title).toBe('配送日数について');
+    // 非エスカレーション正常系。
+    expect(result.escalated).toBe(false);
 
     // 社内枠 grounding: cs DB 実メタ解決 (full UUID / 表示専用)
     expect(result.groundingArticles).toHaveLength(1);
@@ -133,8 +137,10 @@ describe('reply-adapter (embed 一本化)', () => {
     expect(result.draft).not.toContain('通常2-3営業日です');
   });
 
-  it('fail-closed: 内部マーカー混入の reply_draft は parseOk=false / draft 空 / internalPreview に全文', async () => {
-    const LEAKY = `${SAFE_DRAFT}\n根拠: 社内記事#1\n📋 担当者メモ: 在庫確認`;
+  it('fail-closed: 本物のリークマーカー (INTERNAL_/センチネル) 混入の reply_draft は parseOk=false / draft 空 / internalPreview に全文', async () => {
+    // 現契約では reply_draft は顧客専用フィールド。本物のリーク信号 (INTERNAL_ / ORIGIN_CS
+    // センチネル) が混入した場合のみ送信安全ゲートが fail-closed する。
+    const LEAKY = `${SAFE_DRAFT}\nINTERNAL_NOTE: 在庫確認\n<<<ORIGIN_CS_INTERNAL_NOTES_V1>>>`;
     mockRun.mockResolvedValue({
       ok: true,
       result: { reply_draft: LEAKY, needs_escalation: false, sources: [] },
@@ -146,8 +152,23 @@ describe('reply-adapter (embed 一本化)', () => {
     expect(result.parseOk).toBe(false);
     expect(result.draft).toBe('');
     // 社内テキストはオペレータ用 internalPreview にのみ載る (全文)
-    expect(result.internalPreview).toContain('担当者メモ');
-    expect(result.internalPreview).toContain('根拠');
+    expect(result.internalPreview).toContain('INTERNAL_NOTE');
+  });
+
+  it('Bug1 根治: 汎用語 (根拠/担当者メモ/📋 等) を含む正当な顧客返信は parseOk=true (false-positive 解消)', async () => {
+    // fabef855 等で送信欄が無効化された false-positive クラス。汎用日本語語では弾かない。
+    const OK_DRAFT = `${SAFE_DRAFT}\nご請求の根拠となる明細を担当者メモとあわせてお送りします。📋`;
+    mockRun.mockResolvedValue({
+      ok: true,
+      result: { reply_draft: OK_DRAFT, needs_escalation: false, sources: [] },
+    });
+
+    const result = await generateRagReply(fakeSb, baseInput);
+
+    expect(result.ok).toBe(true);
+    expect(result.parseOk).toBe(true);
+    expect(result.draft).toBe(OK_DRAFT);
+    expect(result.escalated).toBe(false);
   });
 
   it('fail-closed: reply_draft 空は parseOk=false / draft 空', async () => {
@@ -161,6 +182,8 @@ describe('reply-adapter (embed 一本化)', () => {
     expect(result.ok).toBe(true);
     expect(result.parseOk).toBe(false);
     expect(result.draft).toBe('');
+    // 空だが非エスカレーション(稀): escalated=false で「回答不能」とは区別される。
+    expect(result.escalated).toBe(false);
   });
 
   it('needs_escalation=true → needsHuman=true / internalNotesText=escalation_reason', async () => {
@@ -179,7 +202,35 @@ describe('reply-adapter (embed 一本化)', () => {
     expect(result.ok).toBe(true);
     expect(result.parseOk).toBe(true);
     expect(result.needsHuman).toBe(true);
+    // Bug1 根治: エスカレーションは第一級フラグとして UI へ渡る。
+    expect(result.escalated).toBe(true);
     expect(result.internalNotesText).toBe('在庫状況の確認が必要です');
+  });
+
+  it('Bug1: 空 reply_draft + needs_escalation=true (fabef855 実データ型) → escalated=true / parseOk=false / draft空 / 理由あり', async () => {
+    mockRun.mockResolvedValue({
+      ok: true,
+      result: {
+        reply_draft: '',
+        needs_escalation: true,
+        escalation_reason:
+          'コンビニ決済の支払い手順テンプレートがナレッジに存在しないため。',
+        sources: [],
+      },
+    });
+
+    const result = await generateRagReply(fakeSb, baseInput);
+
+    expect(result.ok).toBe(true);
+    // 空なので送信安全ゲートは通らない(parseOk=false)…
+    expect(result.parseOk).toBe(false);
+    expect(result.draft).toBe('');
+    // …が、これは「分離失敗」ではなく「エスカレーション(回答不能)」だと区別できる。
+    expect(result.escalated).toBe(true);
+    expect(result.needsHuman).toBe(true);
+    expect(result.internalNotesText).toBe(
+      'コンビニ決済の支払い手順テンプレートがナレッジに存在しないため。',
+    );
   });
 
   it('lookup source (article_id 無し) は grounding/citations に含めない', async () => {
