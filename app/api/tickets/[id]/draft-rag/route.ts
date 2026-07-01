@@ -156,6 +156,9 @@ export async function POST(
     internalPreview: result.internalPreview ?? '',
     // 構造分離に成功したか。false なら UI は送信欄を空にし採用を無効化する。
     parseOk: result.parseOk ?? false,
+    // AI が回答不能でエスカレーション(人間対応要求)したか。UI はこれを「分離失敗エラー」と
+    // 区別し、理由付きの人間対応案内を表示する (Bug1 根治)。
+    escalated: result.escalated ?? false,
     // 社内枠 (読み取り専用) 表示用。draft/保存/送信には入れない (additive)。
     groundingArticles: result.groundingArticles ?? [],
     internalGroundingText: result.internalGroundingText ?? '',

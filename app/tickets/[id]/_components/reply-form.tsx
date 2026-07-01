@@ -55,6 +55,12 @@ type RagState =
       internalPreview: string;
       /** 構造分離に成功したか。false = 採用/編集不可 (送信欄空)。 */
       parseOk: boolean;
+      /**
+       * AI が回答不能でエスカレーション(人間対応)を要求したか。Bug1 根治:
+       * 「分離失敗エラー」とは別状態。true のときは赤エラーでなく人間対応案内+理由を表示し、
+       * 採用/編集は無効(draft の有無に関わらず自動採用しない)。
+       */
+      escalated: boolean;
       /** 社内枠「関連ナレッジ候補」(読み取り専用表示)。送信/保存しない。 */
       groundingArticles: GroundingArticle[];
       /** 社内枠「AI の参照メモ」(marker 除去済み)。送信/保存しない。 */
@@ -150,6 +156,7 @@ export default function ReplyForm({
       draft: result.draft,
       internalPreview: result.internalPreview ?? '',
       parseOk: result.parseOk === true,
+      escalated: result.escalated === true,
       groundingArticles: result.groundingArticles ?? [],
       internalGroundingText: result.internalGroundingText ?? '',
       internalNotesText: result.internalNotesText ?? '',
@@ -168,8 +175,8 @@ export default function ReplyForm({
 
   async function adoptRagDraft() {
     if (rag.kind !== 'preview') return;
-    // fail-closed: 分離失敗 or 顧客本文空のときは採用させない (社内テキスト保存防止)。
-    if (!rag.parseOk || !rag.draft.trim()) return;
+    // fail-closed: 分離失敗 / 顧客本文空 / エスカレーション(人間対応要求)時は採用させない。
+    if (!rag.parseOk || !rag.draft.trim() || rag.escalated) return;
     setBody(rag.draft);
     setSource('ai_draft');
     const adopted = rag.draft;
@@ -196,8 +203,8 @@ export default function ReplyForm({
 
   function editRagDraft() {
     if (rag.kind !== 'preview') return;
-    // 分離失敗時は textarea に入れない (混在テキスト混入防止)。
-    if (!rag.parseOk || !rag.draft.trim()) return;
+    // 分離失敗 / エスカレーション時は textarea に入れない (混在テキスト・未確認案の混入防止)。
+    if (!rag.parseOk || !rag.draft.trim() || rag.escalated) return;
     setBody(rag.draft);
     setSource('ai_draft');
     setRag({ kind: 'idle' });
@@ -259,8 +266,33 @@ export default function ReplyForm({
             </span>
           </div>
 
-          {/* 分離失敗 (fail-closed): 送信欄は空のまま、顧客向け部分は手動切り出し。 */}
-          {!rag.parseOk && (
+          {/* エスカレーション (AI 回答不能 → 人間対応): Bug1 根治。
+              正当な「回答できない」を分離失敗エラーと区別し、理由付きで人間対応を促す。 */}
+          {rag.escalated && (
+            <div
+              className="mb-2 rounded-md border border-amber-300 bg-amber-50 p-2.5 text-[12px] text-amber-900 flex items-start gap-1.5"
+              data-testid="rag-escalated"
+            >
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+              <span>
+                AIはこの問い合わせに自動で回答できませんでした（人間対応が必要です）。
+                {rag.internalNotesText.trim() && (
+                  <>
+                    {' '}
+                    理由：
+                    <span className="font-medium">
+                      {rag.internalNotesText.trim()}
+                    </span>
+                  </>
+                )}
+                <br />
+                下の返信欄にご担当者が返信を入力して保存してください。
+              </span>
+            </div>
+          )}
+
+          {/* 分離失敗 (fail-closed・稀): エスカレーションでない真の安全失敗のみ。 */}
+          {!rag.parseOk && !rag.escalated && (
             <div className="mb-2 rounded-md border border-rose-300 bg-rose-50 p-2.5 text-[12px] text-rose-800 flex items-start gap-1.5">
               <AlertTriangle size={14} className="mt-0.5 shrink-0" />
               <span>
@@ -270,8 +302,8 @@ export default function ReplyForm({
             </div>
           )}
 
-          {/* 顧客向け本文プレビュー (parseOk 時のみ。送信される唯一のテキスト)。 */}
-          {rag.parseOk && (
+          {/* 顧客向け本文プレビュー (parseOk かつ非エスカレーション時のみ。送信される唯一のテキスト)。 */}
+          {rag.parseOk && !rag.escalated && (
             <>
               <div className="text-[10px] font-semibold text-indigo-700 tracking-wider mb-1">
                 顧客向け返信 (この内容のみ送信されます)
@@ -299,7 +331,7 @@ export default function ReplyForm({
           {/* 社内用パネル (読み取り専用、絶対に送信されない)。
               parseOk=true: 構造化表示 (関連ナレッジ候補 / 対応メモ)。マーカー/ナレーション非表示。
               parseOk=false: fail-closed の稀な経路。オペレータが手動切り出しできるよう raw 全文を表示。 */}
-          {rag.parseOk ? (
+          {rag.parseOk || rag.escalated ? (
             <div className="mt-2 space-y-3">
               <div className="text-[10px] font-semibold text-gray-500 tracking-wider inline-flex items-center gap-1">
                 <Lock size={11} className="text-gray-400" />
@@ -355,8 +387,9 @@ export default function ReplyForm({
                 </div>
               )}
 
-              {/* 対応メモ (NOTES ブロックを箇条書き)。 */}
-              {rag.internalNotesText.trim() && (
+              {/* 対応メモ (NOTES ブロックを箇条書き)。エスカレーション時は理由を上の案内で
+                  既に表示しているため、ここでは重複表示しない。 */}
+              {!rag.escalated && rag.internalNotesText.trim() && (
                 <div>
                   <div className="text-[10px] font-semibold text-gray-500 tracking-wider mb-1">
                     対応メモ（送信されません）
@@ -438,7 +471,7 @@ export default function ReplyForm({
             <button
               type="button"
               onClick={editRagDraft}
-              disabled={!rag.parseOk || !rag.draft.trim()}
+              disabled={!rag.parseOk || !rag.draft.trim() || rag.escalated}
               className="inline-flex items-center gap-1.5 rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Pencil size={12} /> 編集
@@ -446,11 +479,13 @@ export default function ReplyForm({
             <button
               type="button"
               onClick={adoptRagDraft}
-              disabled={!rag.parseOk || !rag.draft.trim()}
+              disabled={!rag.parseOk || !rag.draft.trim() || rag.escalated}
               title={
-                !rag.parseOk
-                  ? '自動分離に失敗したため採用できません'
-                  : undefined
+                rag.escalated
+                  ? 'AIが回答できなかったため採用できません（人間対応してください）'
+                  : !rag.parseOk
+                    ? '自動分離に失敗したため採用できません'
+                    : undefined
               }
               className="inline-flex items-center gap-1.5 rounded-md bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed"
             >

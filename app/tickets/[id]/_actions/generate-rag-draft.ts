@@ -51,6 +51,8 @@ export interface GenerateRagDraftResult {
   internalPreview?: string;
   /** 構造分離に成功したか。false = fail-closed (送信欄空 / 採用不可)。 */
   parseOk?: boolean;
+  /** AI が回答不能でエスカレーション(人間対応)を要求したか。UI はエラーと区別して案内する。 */
+  escalated?: boolean;
   /** 社内枠 (読み取り専用) 表示用「関連ナレッジ候補」。表示専用 (送信/保存しない)。 */
   groundingArticles?: GroundingArticle[];
   /** 社内枠「AI の参照メモ」(marker 除去済み)。表示専用。 */
@@ -105,6 +107,7 @@ export async function generateRagDraft(
       internalPreview:
         typeof j.internalPreview === 'string' ? j.internalPreview : '',
       parseOk: j.parseOk === true,
+      escalated: j.escalated === true,
       groundingArticles: normalizeGroundingArticles(j.groundingArticles),
       internalGroundingText:
         typeof j.internalGroundingText === 'string' ? j.internalGroundingText : '',
