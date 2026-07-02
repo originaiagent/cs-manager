@@ -1,131 +1,38 @@
 'use client';
 
-// 〔これじゃない〕UI部品 (cs-manager)。origin-ai SoT 契約 (verdict='not_this' / reason任意) に準拠。
-// 小ボタン + 押下時のみ出る任意理由欄。送信は Server Action submitNotThisFeedbackAction
-// (鍵は server-only 注入)。返信下書き画面では <NotThisButton runId={rag.runId} /> の1行で貼れる。
+// 〔これじゃない〕UI は **@originaiagent/feedback の NotThisButton が SoT**。
+// cs-manager は薄写し UI を撤去し、package ボタンへ委譲する薄いアダプタのみを持つ。
+// アダプタの責務 = ①送信 submit を Server Action へ配線 ②cs-manager 既存の認証切れ復帰
+// (auth-recovery) を保全すること。ボタンの見た目/挙動(inline style, phases, done 表示)は package が SoT。
+//
+// reply-form 側の import (`import NotThisButton from './not-this-button'`) は不変。
 
-import { useState } from 'react';
-import { ThumbsDown, Loader2, Check } from 'lucide-react';
+import { NotThisButton as FeedbackButton } from '@originaiagent/feedback/button';
+import type { SubmitFeedbackRequest } from '@originaiagent/feedback';
 import { submitNotThisFeedbackAction } from '../_actions/submit-not-this-feedback';
-import {
-  AUTH_EXPIRED_MESSAGE,
-  loginHrefForHere,
-  runAction,
-} from '@/lib/client/auth-recovery';
-
-type Phase = 'idle' | 'open' | 'sending' | 'done' | 'error';
+import { AUTH_EXPIRED_MESSAGE, loginHrefForHere, runAction } from '@/lib/client/auth-recovery';
 
 export default function NotThisButton({
   runId,
   label = 'これじゃない',
 }: {
-  /** ai_embed_runs.id。空なら描画しない (run識別子が無い古いドラフト等)。 */
+  /** ai_embed_runs.id。空なら描画しない (package 側で条件描画)。 */
   runId: string | null | undefined;
   label?: string;
 }) {
-  const [phase, setPhase] = useState<Phase>('idle');
-  const [reason, setReason] = useState('');
-  const [errMsg, setErrMsg] = useState<string | null>(null);
-  const [authExpired, setAuthExpired] = useState(false);
-
-  if (!runId) return null;
-
-  if (phase === 'done') {
-    return (
-      <span
-        className="inline-flex items-center gap-1 text-xs text-gray-500"
-        data-testid="not-this-done"
-      >
-        <Check className="h-3 w-3" /> フィードバック受領
-      </span>
-    );
-  }
-
-  async function send() {
-    setPhase('sending');
-    setErrMsg(null);
-    setAuthExpired(false);
-    // 既存規約: client から Server Action は runAction() で包み、認証切れ(throw/戻り値なし)を
-    // 再ログイン導線へ復帰させる(無限ローディング/汎用エラー固着の防止)。
-    const r = await runAction(() => submitNotThisFeedbackAction(runId as string, reason.trim() || null));
+  // 既存規約: client から Server Action は runAction() で包み、認証切れ(throw/戻り値なし)を
+  // 再ログイン導線へ復帰させる(無限ローディング/汎用エラー固着の防止)。auth-recovery を保全する。
+  const submit = async (req: SubmitFeedbackRequest) => {
+    const r = await runAction(() => submitNotThisFeedbackAction(req.run_id, req.reason ?? null));
     if (r.authExpired) {
-      setPhase('error');
-      setAuthExpired(true);
-      setErrMsg(AUTH_EXPIRED_MESSAGE);
-      return;
+      // 認証切れ: 再ログインへ誘導(既存挙動の保全)。ボタンは安定ラベルを表示。
+      if (typeof window !== 'undefined') {
+        window.location.href = loginHrefForHere();
+      }
+      return { ok: false, error: AUTH_EXPIRED_MESSAGE };
     }
-    if (r.result.ok) {
-      setPhase('done');
-    } else {
-      setPhase('error');
-      setErrMsg(r.result.error ?? '送信に失敗しました');
-    }
-  }
+    return r.result;
+  };
 
-  return (
-    <span className="inline-flex flex-col gap-1" data-testid="not-this-root">
-      {phase === 'idle' || phase === 'error' ? (
-        <button
-          type="button"
-          onClick={() => setPhase('open')}
-          className="inline-flex items-center gap-1 rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
-          data-testid="not-this-button"
-        >
-          <ThumbsDown className="h-3 w-3" /> 〔{label}〕
-        </button>
-      ) : null}
-
-      {phase === 'open' || phase === 'sending' ? (
-        <span className="flex flex-col gap-1" data-testid="not-this-form">
-          <textarea
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            rows={2}
-            placeholder="理由(任意)。※社外秘・個人情報は書かないでください"
-            className="w-64 rounded border border-gray-300 p-1 text-xs"
-            data-testid="not-this-reason"
-            disabled={phase === 'sending'}
-          />
-          <span className="flex gap-2">
-            <button
-              type="button"
-              onClick={send}
-              disabled={phase === 'sending'}
-              className="inline-flex items-center gap-1 rounded bg-gray-800 px-2 py-1 text-xs text-white hover:bg-gray-700 disabled:opacity-50"
-              data-testid="not-this-submit"
-            >
-              {phase === 'sending' ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-              {phase === 'sending' ? '送信中…' : '送信'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setPhase('idle');
-                setReason('');
-              }}
-              disabled={phase === 'sending'}
-              className="rounded px-2 py-1 text-xs text-gray-500 hover:underline"
-              data-testid="not-this-cancel"
-            >
-              やめる
-            </button>
-          </span>
-        </span>
-      ) : null}
-
-      {phase === 'error' && errMsg ? (
-        <span className="text-xs text-red-600" data-testid="not-this-error">
-          {errMsg}
-          {authExpired ? (
-            <>
-              {' '}
-              <a href={loginHrefForHere()} className="underline">
-                再ログイン
-              </a>
-            </>
-          ) : null}
-        </span>
-      ) : null}
-    </span>
-  );
+  return <FeedbackButton runId={runId} submit={submit} label={label} />;
 }

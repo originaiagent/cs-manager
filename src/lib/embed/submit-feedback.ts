@@ -17,11 +17,11 @@ if (typeof window !== 'undefined') {
   throw new Error('submit-feedback.ts is server-only and must not be imported in the browser');
 }
 
-/** origin-ai feedback endpoint (SoT 契約と一致)。 */
-const EMBED_FEEDBACK_PATH = '/api/embed/feedback';
-const REQUEST_TIMEOUT_MS = 10_000;
-/** reason 最大長 (origin-ai contract MAX_REASON_LEN と一致。送信側でも防御的に cap)。 */
-const MAX_REASON_LEN = 2000;
+// 〔これじゃない〕送信の transport / contract は **@originaiagent/feedback が SoT**。
+// cs-manager は薄写しを撤去し、endpoint/payload/reason 正規化を package に委譲する
+// (createEmbedFeedbackSubmit は同一 fetch 形 + AbortSignal timeout + 安定ラベルを提供)。
+import { createEmbedFeedbackSubmit } from '@originaiagent/feedback/server';
+import { normalizeReason } from '@originaiagent/feedback';
 
 export interface SubmitFeedbackResult {
   ok: boolean;
@@ -32,6 +32,7 @@ export interface SubmitFeedbackResult {
 /**
  * 〔これじゃない〕を origin-ai へ送信する。run_id = ai_embed_runs.id。
  * 200 → ok:true。それ以外 → ok:false + 安定ラベル。鍵/raw は返さない。
+ * 鍵未配布 (key/baseUrl 未設定) → fail-closed (embed_key_unprovisioned)。
  */
 export async function submitNotThisFeedback(args: {
   runId: string;
@@ -46,24 +47,14 @@ export async function submitNotThisFeedback(args: {
     return { ok: false, reason: 'missing_run_id' };
   }
 
-  const trimmed = args.reason && args.reason.trim() ? args.reason.trim() : null;
-  const reason = trimmed && trimmed.length > MAX_REASON_LEN ? trimmed.slice(0, MAX_REASON_LEN) : trimmed;
-
-  try {
-    const res = await fetch(`${baseUrl}${EMBED_FEEDBACK_PATH}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Embed-Key': key },
-      body: JSON.stringify({
-        run_id: args.runId,
-        verdict: 'not_this',
-        reason,
-      }),
-      cache: 'no-store',
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    if (res.status === 200) return { ok: true };
-    return { ok: false, reason: `feedback_${res.status}` };
-  } catch {
-    return { ok: false, reason: 'feedback_request_failed' };
-  }
+  const submit = createEmbedFeedbackSubmit({
+    baseUrl,
+    authHeaders: { 'X-Embed-Key': key },
+  });
+  const r = await submit({
+    run_id: args.runId,
+    verdict: 'not_this',
+    reason: normalizeReason(args.reason),
+  });
+  return r.ok ? { ok: true } : { ok: false, reason: r.error ?? 'feedback_request_failed' };
 }
