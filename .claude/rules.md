@@ -195,6 +195,25 @@ parent_goal_change / business_priority / external_communication / cost_commitmen
 - DATABASE_URLへの直接接続やマイグレーション埋め込みは禁止
 - 対象プロジェクトIDはCLAUDE.mdの「Supabase接続」を参照。なければユーザーに確認（推測禁止）
 
+## origin-ai async 窓口を呼ぶフロント（共通待機部品 必須）
+
+origin-ai の async スキル（execution_mode=async）は worker が 300s〜1700s 走る。これを呼ぶ
+**フロントが worker 完走を待ちきれず「失敗」表示する穴**を各ツールで個別に踏まないため、待ち方は
+origin-ai 提供の共通部品に一本化する（AI処理は origin-ai 集約・ツールは入口だけ、の待機版）。
+
+- async 窓口（`/api/embed/run` → poll `/api/embed/runs/{id}`）を呼ぶフロントは、
+  **共通待機部品 `src/lib/origin-async-wait`（SoT=origin-ai dashboard/lib/async-wait）を使う**。
+  `waitForAsyncRun(makeEmbedRunPoller(statusUrl))` で待つ。**poll ループ・最大待機秒・deadline を自作しない。**
+  ※ 部品は **async を採用したリポにのみ adopt-on-need で vendor 配布**される（dispatch-sync の
+  `ASYNC_WAIT_TARGETS` allowlist）。本リポにファイルが無い場合は async 未採用＝この規約は休眠中。
+  async を採用する際に allowlist へ追記して配布を解禁する（窓口の呼び方は origin-ai
+  `docs/async-common-window-recipe.md`）。
+- 最大待機は worker dispatch 枠に追従する単一ソース `ASYNC_POLL_DEADLINE_MS` を使う（**秒数を直書きしない**）。
+- 規約: running/queued 中は失敗に倒さない / 端末スリープ・通信瞬断から run_id 保持で復帰 / deadline 直前に
+  最終 poll / completed のみ描画・worker failed の時だけ失敗 / running 超過で再 start しない。
+- `src/lib/origin-async-wait/*` は **vendored（自動配布・provenance ヘッダ付き）。直接編集禁止**（dispatch-sync で上書き）。
+- 詳細: origin-ai `docs/async-front-wait-common-design.md` / `docs/skill-design-v3.md §2.1`。
+
 ## デプロイ運用
 
 - デプロイはmainブランチ上でのみ実行。フィーチャーブランチからの直デプロイ禁止
