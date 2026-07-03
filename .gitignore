@@ -20,3 +20,5 @@ tests/e2e/screenshots/
 tmp/
 .DS_Store
 .env*
+.claude/.session/
+.disable-hooks

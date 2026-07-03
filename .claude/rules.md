@@ -1,23 +1,12 @@
-# 共通行動原則（全リポ共通・同期対象）
+# 共通行動原則 詳細リファレンス（全リポ共通・同期対象）
 
+> **常時ロードされるルールは `.claude/rules/` 配下に自動ロードされる**（00-core.md=コア行動原則 / verification.md=完了基準 / git-workflow.md / root-cause-first.md）。**本ファイルは詳細リファレンス**であり、仕様・手順の正確な記述を必要時に参照する。
 > tool-template から自動同期。改善提案は docs/evolution-log.md に記録 → トム承認後に反映。
 > **簡潔さ最優先**: 肝心な規律が埋もれないこと。追記は既存と統合し冗長を削る。1ルール数行。膨らむなら古い/重複セクションを整理してから足す。
 
-## 自律境界（AIエージェントの判断範囲・2026-06-18）
+## 自律境界（AIエージェントの判断範囲）
 
-原則: 判断可能なものは全部自分で決めて進める。subagent並列・bypassPermissions・トークン潤沢で爆速（Dynamic Workflows）。いちいち人間に戻さない。
-
-**自分で決めて進める（戻さない）**
-- スコープ内の実装・設計判断、リポの clone/checkout、dark/additive/可逆な変更、PR→main 自動マージ（dark/additive に限る）
-- ゲートが部分的に塞がっても、原因が本タスクと無関係 or スコープ外なら → backlog 起票して先へ進む（止まらない）
-- スコープ外の不具合・改善の発見 → backlog 起票のみして本筋続行
-- 「止まるか / 安全で可逆な手で進むか」で迷ったら → 進む
-
-**人間に戻す（これだけ）**
-- 親ゴール / スコープの変更
-- BC-break / 本番データ破壊 / ロールバック不能
-- 課金発生・アカウント / 権限 / IAM 付与など人間しかできない物理作業
-- go-live（本番フラグ ON＝世に出す）
+→ `.claude/rules/00-core.md`「自律境界」へ移設（常時ロード）。自分で決めて進める領域と人間に戻す4条件はそちらが正。
 
 ## 作業フロー（全作業でこの順序に従う）
 
@@ -53,7 +42,7 @@ B) UI変更（レイアウト/表示/操作） → /browse でブラウザを開
    - 等（変更に応じたユーザー操作を再現すること）
 C) A+B 両方ある場合 → 両方やれ
 
-「コードが正しい」≠「動く」。ブラウザで見ていない変更は未検証。
+完了基準（UI変更3要素 / curl+DB実データ裏取り / 生エビデンス必須）は `.claude/rules/verification.md` が正。
 UI変更でブラウザ検証なしのpushは Step 5 違反 = push禁止。
 
 検証後にdev serverを確実に停止。
@@ -64,7 +53,8 @@ UI変更でブラウザ検証なしのpushは Step 5 違反 = push禁止。
 
 codex exec "git diff --merge-base origin/main を読んで、このコード変更を日本語でレビューしてください。論理バグ、エッジケース、既存機能への影響、セキュリティ問題を指摘してください。問題なければ APPROVE と明記してください。"
 
-→ APPROVE が出るまで修正→再レビュー。APPROVE なしの push は禁止。
+→ 重大な指摘が消える（APPROVE 相当）まで修正→再レビュー。重大が残る push は禁止。
+呼ぶ回数・打ち切り・棚上げの運用は下記「セカンドオピニオン（codex）運用規約」に従う（軽微・理論上の指摘でゼロ指摘まで回さない）。
 
 **大規模アーキ変更・DBスキーマ変更時は実装前にもプランレビュー：**
 
@@ -78,11 +68,41 @@ codex exec --sandbox read-only "計画書を読んで、影響範囲・破壊リ
 - Step 4/5で問題発見 → Step 3に戻り修正。問題がなくなるまで繰り返す
 - 3回修正しても解決しない → エスカレーション（技術用語禁止、平易な表現で報告）
 
+## セカンドオピニオン（codex）運用規約
+
+codex（セカンドオピニオン）はゼロ指摘まで回すものではない。**重大な指摘が消えたら打ち切り、残りの軽微・理論上の指摘は棚上げして先へ進む。** 打ち切りはトムに聞かず、エージェントが自分で判断する。
+
+### 呼ぶタイミング（最小限に絞る）
+- **設計レビュー**: 大規模・重要変更（3ファイル以上 / 新API / 認証・認可 / スキーマ / ツール間連携 / セキュリティ）の着手前に1回
+- **コードレビュー**: PR作成後に1回
+- **再レビュー**: **重大な指摘が残っている時だけ**再実行する。軽微・理論上の指摘のための再レビューは禁止
+- **呼び出し予算の目安**: 1タスクあたり「設計1回 + コードレビュー最大3周（初回+再2回）」。これを超えそうなら打ち切りを優先する。codex は共有資源で、過剰呼び出しは上限枯渇＝開発中断を招く
+
+### 重大 / 軽微の判定
+- **重大（修正必須・再レビュー対象）**: 通常の使い方で起きる誤動作 / データ破壊・不可逆操作 / 認証・権限・情報漏洩の実害 / ビルド・テストが通らない / 仕様を満たさない
+- **軽微（棚上げ可）**: 意図的な難読化や不自然な操作でしか起きない抜け道 / 発生確率の低い理論上のエッジケース / スタイル・可読性 / 「あれば尚良い」改善
+
+### 打ち切り（自己判断・トムに聞かない）
+次のいずれかを満たしたら打ち切る:
+1. 重大な指摘がゼロ
+2. コードレビュー3周を終えて残るのが軽微のみ
+3. 2周連続で新しい重大クラスの指摘が出ていない（＝同一クラスの縁ケースを潰し続けている状態）
+
+打ち切ったら、残った軽微・理論上の指摘を **dev_backlog に起票**（Core API 経由。起票手段が無ければ docs/lessons-learned.md に記録）してから先へ進む。トムに続行可否を仰がない。
+
+### 完了報告への記載
+「codexレビュー: N周実施 / 重大の残 0 / 棚上げ M件（起票先: …）」の1行を必ず含める。
+
+### なぜ
+抜け道潰し系のコードは指摘が原理的に尽きない。重大が消えた時点で止めるのが正しい。完璧主義でゼロ指摘を追うと、修正が新たな指摘と退行を生み、開発が終わらない。
+
 ## サブエージェント起動ルール（Anthropic公式準拠）
 
 **YOU MUST apply this rule for research, investigation, or multi-file refactoring tasks.**
 
 並列起動（最大10体）の条件: 独立3領域以上の調査 / 複数ファイル並行修正 / 複数ディレクトリ探索 / 独立複数仮説の並行検証。必須: 担当範囲を重複なく明記、何を返すか指定、スコープ具体化。単一で足りるのは 1ファイル完結 / 全体俯瞰の最初の一発目 / 1領域完結。並列化条件該当時は単一タスク指示でも分担案を提示し承認後に並列実行。
+
+委譲ポリシー（司令塔が自分でやる範囲 / scout・builder・scribe・verifier の使い分け / 委譲実績の報告義務）は `.claude/rules/00-core.md`「委譲ポリシー」が正。
 
 ## 影響範囲の調査（変更前に必須）
 
@@ -195,6 +215,25 @@ parent_goal_change / business_priority / external_communication / cost_commitmen
 - DATABASE_URLへの直接接続やマイグレーション埋め込みは禁止
 - 対象プロジェクトIDはCLAUDE.mdの「Supabase接続」を参照。なければユーザーに確認（推測禁止）
 
+## origin-ai async 窓口を呼ぶフロント（共通待機部品 必須）
+
+origin-ai の async スキル（execution_mode=async）は worker が 300s〜1700s 走る。これを呼ぶ
+**フロントが worker 完走を待ちきれず「失敗」表示する穴**を各ツールで個別に踏まないため、待ち方は
+origin-ai 提供の共通部品に一本化する（AI処理は origin-ai 集約・ツールは入口だけ、の待機版）。
+
+- async 窓口（`/api/embed/run` → poll `/api/embed/runs/{id}`）を呼ぶフロントは、
+  **共通待機部品 `src/lib/origin-async-wait`（SoT=origin-ai dashboard/lib/async-wait）を使う**。
+  `waitForAsyncRun(makeEmbedRunPoller(statusUrl))` で待つ。**poll ループ・最大待機秒・deadline を自作しない。**
+  ※ 部品は **async を採用したリポにのみ adopt-on-need で vendor 配布**される（dispatch-sync の
+  `ASYNC_WAIT_TARGETS` allowlist）。本リポにファイルが無い場合は async 未採用＝この規約は休眠中。
+  async を採用する際に allowlist へ追記して配布を解禁する（窓口の呼び方は origin-ai
+  `docs/async-common-window-recipe.md`）。
+- 最大待機は worker dispatch 枠に追従する単一ソース `ASYNC_POLL_DEADLINE_MS` を使う（**秒数を直書きしない**）。
+- 規約: running/queued 中は失敗に倒さない / 端末スリープ・通信瞬断から run_id 保持で復帰 / deadline 直前に
+  最終 poll / completed のみ描画・worker failed の時だけ失敗 / running 超過で再 start しない。
+- `src/lib/origin-async-wait/*` は **vendored（自動配布・provenance ヘッダ付き）。直接編集禁止**（dispatch-sync で上書き）。
+- 詳細: origin-ai `docs/async-front-wait-common-design.md` / `docs/skill-design-v3.md §2.1`。
+
 ## デプロイ運用
 
 - デプロイはmainブランチ上でのみ実行。フィーチャーブランチからの直デプロイ禁止
@@ -221,6 +260,8 @@ parent_goal_change / business_priority / external_communication / cost_commitmen
 **背景（incident-log）**: 2026-04-29 / origin-ai builderモード PR #137/#138 がローカルテスト + コードレビュー通過後に本番で partial-create 発生 / 根本原因: merge 前に本番URLでのフルE2E未実施 / 再発防止: 本ルールを tool-template に永続化、全ツール配布。
 
 ## 完了報告
+
+完了と判定してよい基準は `.claude/rules/verification.md` を満たすこと（テスト未完走のまま push した場合は本報告と PR 本文に「テスト未検証」と明記）。
 
 ```
 【完了報告】
