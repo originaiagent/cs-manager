@@ -28,6 +28,7 @@
 3. `CLAUDE.md` — テンプレートのプレースホルダーを実際の値に置換
    - Supabase project IDが入力された場合 → `{SUPABASE_PROJECT_ID}` を入力値に置換し、Supabase接続セクションを有効化
    - Supabase project IDが未入力・不明の場合 → Supabase接続セクションをコメントで残し、完了報告に「後でCLAUDE.mdにSupabase project IDを追記してください」を含める
+   - `{INTEGRATION_NOTES}` → 他ツールとの連携情報（共有テーブル・API・連携経路）に置換。連携が無い新規ツールは「なし」と記載（リテラルのまま残さない）
 4. `docs/architecture.md` — ツールの技術仕様
 5. デプロイ先別の初期ファイル構成 — setup-guide.md のセクション2を参照
 

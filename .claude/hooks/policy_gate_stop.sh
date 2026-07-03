@@ -11,20 +11,19 @@ if [ -f "$CLAUDE_PROJECT_DIR/.disable-hooks" ]; then exit 0; fi
 
 INPUT=$(cat)
 
-if [ "$(echo "$INPUT" | jq -r '.stop_hook_active // false')" = "true" ]; then exit 0; fi
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$HOOK_DIR/lib/gate_common.sh" ]; then exit 0; fi
+# shellcheck source=lib/gate_common.sh
+source "$HOOK_DIR/lib/gate_common.sh"
 
-TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
+gc_exit_if_stop_active "$INPUT"   # 再入ガード（parser 不在でも grep で先に評価）
+# ここから transcript 解析が必要 → jq/node どちらも無ければ fail-closed（9周目P2-A）
+gc_require_json_parser
+
+TRANSCRIPT=$(gc_input_field "$INPUT" transcript_path)
 if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then exit 0; fi
 
-if command -v tac >/dev/null 2>&1; then REVERSE="tac"; else REVERSE="tail -r"; fi
-
-LAST=$($REVERSE "$TRANSCRIPT" 2>/dev/null | head -200 | jq -rs '
-  map(select(.type == "assistant" and .message.content != null))
-  | first
-  | (.message.content // [])
-  | map(select(.type == "text") | .text)
-  | join("\n")
-' 2>/dev/null)
+LAST=$(gc_last_assistant_message "$TRANSCRIPT")
 
 if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then exit 0; fi
 
