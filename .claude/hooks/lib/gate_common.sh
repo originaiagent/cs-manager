@@ -83,8 +83,18 @@ gc_exit_if_stop_active() {
   fi
 }
 
-# transcript ($1) から最終 assistant メッセージの text を抽出して stdout へ
-# （jq → node フォールバック。逆順走査 + 先頭200行はどちらの経路も同一）
+# transcript ($1) から「最終 assistant ターンの全 text」を連結して stdout へ。
+#
+# 実 Claude Code transcript では 1 ターンが content ブロック単位で複数の assistant
+# jsonl エントリに分割される（thinking / text / tool_use が各 n:1 の別エントリ）。
+# 旧実装は「最後の 1 assistant エントリ」の text しか見ず、行頭に「🛑中断」等を書いた
+# text が別（先頭側）エントリにあると取り逃していた（goal-gate が中断を認識せず BLOCK）。
+#
+# 修正: 末尾から遡り、メインスレッド（isSidechain!=true）の assistant エントリの
+# text ブロック（thinking/tool_use 除外）を、直前の「実ユーザー入力ターン」境界まで
+# 全て収集して自然順で連結する。境界 = 非 sidechain の user エントリで content が
+# 文字列 or text ブロックを含むもの（tool_result のみの user はターン内なので跨ぐ）。
+# jq → node フォールバック。逆順走査 + 先頭 400 行（分割で行数が増えるため 200→400）。
 gc_last_assistant_message() {
   local transcript="$1"
   if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
@@ -94,37 +104,61 @@ gc_last_assistant_message() {
   if command -v tac >/dev/null 2>&1; then reverse="tac"; else reverse="tail -r"; fi
   case "$(gc_json_parser)" in
     jq)
-      $reverse "$transcript" 2>/dev/null | head -200 | jq -rs '
-        map(select(.type == "assistant" and .message.content != null))
-        | first
-        | (.message.content // [])
-        | map(select(.type == "text") | .text)
-        | join("\n")
+      # 入力は逆順（新しい行が先頭）。reduce で境界まで text を収集し、最後に自然順へ。
+      $reverse "$transcript" 2>/dev/null | head -400 | jq -rs '
+        reduce .[] as $e ({done:false, texts:[]};
+          if .done then .
+          else
+            ($e.isSidechain == true) as $side
+            | if ($e.type == "user") and ($side | not) then
+                ($e.message.content) as $c
+                | if ($c | type) == "string" then .done = true
+                  elif ($c | type) == "array"
+                       and ([$c[] | select(.type == "text")] | length > 0) then .done = true
+                  else . end
+              elif ($e.type == "assistant") and ($side | not) then
+                .texts += ((($e.message.content // [])
+                            | map(select(.type == "text") | .text)) | reverse)
+              else . end
+          end
+        )
+        | .texts | reverse | join("\n")
       ' 2>/dev/null
       ;;
     node)
-      $reverse "$transcript" 2>/dev/null | head -200 | node -e '
+      $reverse "$transcript" 2>/dev/null | head -400 | node -e '
         let d = "";
         process.stdin.on("data", (c) => (d += c));
         process.stdin.on("end", () => {
+          const texts = [];
+          let done = false;
           for (const line of d.split("\n")) {
+            if (done) break;
             if (!line.trim()) continue;
             let o;
             try { o = JSON.parse(line); } catch (e) { continue; }
-            if (o && o.type === "assistant" && o.message && o.message.content != null) {
-              const texts = (Array.isArray(o.message.content) ? o.message.content : [])
-                .filter((c) => c && c.type === "text")
-                .map((c) => c.text);
-              process.stdout.write(texts.join("\n"));
-              return;
+            const side = o && o.isSidechain === true;
+            if (o && o.type === "user" && !side) {
+              const c = o.message && o.message.content;
+              if (typeof c === "string") { done = true; }
+              else if (Array.isArray(c) && c.some((b) => b && b.type === "text")) { done = true; }
+              // tool_result のみの user はターン内なので跨ぐ
+            } else if (o && o.type === "assistant" && !side) {
+              const c = (o.message && o.message.content) || [];
+              const t = (Array.isArray(c) ? c : [])
+                .filter((b) => b && b.type === "text")
+                .map((b) => b.text);
+              // 入力は逆順。自然順復元のため末尾から push（後で全体 reverse）
+              for (let i = t.length - 1; i >= 0; i--) texts.push(t[i]);
             }
           }
+          texts.reverse();
+          process.stdout.write(texts.join("\n"));
         });
       ' 2>/dev/null
       ;;
   esac
 }
-
 # package.json（cwd）の .scripts[$1] を返す（string のみ。jq → node フォールバック）
 gc_pkg_script() {
   case "$(gc_json_parser)" in
