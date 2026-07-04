@@ -37,6 +37,55 @@ TRANSCRIPT=$(gc_input_field "$INPUT" transcript_path)
 LAST=$(gc_last_assistant_message "$TRANSCRIPT")
 if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then exit 0; fi
 
+# ============================================================================
+# 検査①: 動作確認コマンドの実行実績（S-1 機械裏取り・完了主張時のみ）
+# ============================================================================
+# 完了主張（gc_is_done_claim: 完了キーワード or report_package status=done）なのに、
+# このセッションの transcript に検証系コマンドの tool_use 実績が1件も無ければ block する
+# （「検証したと言うが実行していない」虚偽完了の構造的防止）。キーワード無しの
+# status=done も捕捉するため、下の報告キーワード早期 return より前で判定する。
+# サブエージェント（isSidechain）の実行も実績として数える（verifier 委譲を妨げない）。
+# grep ベースの補助ゲート（文面遵守が一次）: Write 内容の "curl " 等による偽陽性通過は
+# 許容し、正当な完了を止める偽ブロックを避ける側に倒す。JSONL は compact / 空白あり
+# 両形式を許容（"key": "value" 形も対象）。
+if declare -f gc_is_done_claim >/dev/null 2>&1 && gc_is_done_claim "$LAST"; then
+  # 開示エスケープ（理由必須）: 実行できない性質の変更（ドキュメントのみ等）
+  if ! printf '%s\n' "$LAST" | grep -qE '動作確認対象外[:：][[:space:]]*[^[:space:]]'; then
+    # 走査対象 = メイン transcript + サブエージェント transcript（<transcript>/subagents/ 配下）。
+    # サブエージェントの実行記録は「同一ファイルの isSidechain 行」の版と「別ファイル」の版が
+    # あるため両方を見る（別ファイルを見ないと verifier 委譲が偽ブロックされる）。
+    # 各シグネチャは grep -q の最初のヒットで即終了（大きな transcript でも安価）。
+    SUB_DIR="${TRANSCRIPT%.jsonl}/subagents"
+    scan_evidence() { # $1 = tool_use 行に要求する ERE。ヒットで 0
+      local pat="$1" f
+      grep -E '"type"[[:space:]]*:[[:space:]]*"tool_use"' "$TRANSCRIPT" 2>/dev/null | grep -qE "$pat" && return 0
+      if [ -d "$SUB_DIR" ]; then
+        while IFS= read -r -d '' f; do
+          grep -E '"type"[[:space:]]*:[[:space:]]*"tool_use"' "$f" 2>/dev/null | grep -qE "$pat" && return 0
+        done < <(find "$SUB_DIR" -type f -name '*.jsonl' -print0 2>/dev/null)
+      fi
+      return 1
+    }
+    # Bash の検証コマンドシグネチャ（1箇所に集約。ランナー追加はここに1語足す）
+    BASH_VERIFY_SIG='curl |wget |psql |(npm|pnpm|yarn|bun)( run)? test|npm run (e2e|smoke|verify)|npx playwright|vitest|jest|playwright|pytest|go test|cargo test|node --test|prod-smoke|bash [^"]*test|python3? [^"]*test'
+    VERIFIED=0
+    # (a) MCP 検証ツールの実呼び出し（ToolSearch のロード文字列と誤認しないよう name キーで判定）
+    scan_evidence '"name"[[:space:]]*:[[:space:]]*"mcp__[^"]*__(execute_sql|get_logs)"' && VERIFIED=1
+    # (b) ブラウザ操作ツール
+    [ "$VERIFIED" -eq 0 ] && scan_evidence '"name"[[:space:]]*:[[:space:]]*"mcp__claude-in-chrome__' && VERIFIED=1
+    # (c) Bash の検証コマンド
+    [ "$VERIFIED" -eq 0 ] && scan_evidence "\"name\"[[:space:]]*:[[:space:]]*\"Bash\".*(${BASH_VERIFY_SIG})" && VERIFIED=1
+    # (d) 検証系スキルの起動
+    [ "$VERIFIED" -eq 0 ] && scan_evidence '"skill"[[:space:]]*:[[:space:]]*"(browse|qa|qa-only|benchmark|verify)"' && VERIFIED=1
+    if [ "$VERIFIED" -eq 0 ]; then
+      echo "[Evidence Check] BLOCK: 完了主張だが、このセッションに動作確認コマンドの実行実績が無い（curl / execute_sql / テスト実行 / ブラウザ操作等の tool_use が transcript に見つからない）。" >&2
+      echo "  → 実際に動作確認コマンドを実行してから報告せよ（サブエージェントに実行させた場合も実績になる）。" >&2
+      echo "  → 実行できない性質の変更（ドキュメントのみ等）は、報告に「動作確認対象外: <理由>」を明記すれば通過する。" >&2
+      exit 2
+    fi
+  fi
+fi
+
 # 完了報告キーワード（report_package_validator.sh と同じ regex）を含む時のみ検査
 if ! printf '%s\n' "$LAST" | grep -qE "$GC_REPORT_KEYWORDS"; then exit 0; fi
 

@@ -209,6 +209,27 @@ gc_first_json_with_key() {
   esac
 }
 
+# 最終メッセージ ($1) が「完了主張」なら 0 を返す:
+#   GC_DONE_KEYWORDS マッチ、または fence 内 report_package（schema_version +
+#   task_package_id で同定した最初の JSON）の status=done。
+# stop-test-gate.sh（テスト強制）と evidence-check.sh（動作確認実績ゲート）が共用する
+# 単一ソース。見出し・キーワード無しの素 JSON 完了主張もここで捕捉される。
+gc_is_done_claim() {
+  local last="$1" fence rp tpid status
+  if printf '%s\n' "$last" | grep -qE "$GC_DONE_KEYWORDS"; then return 0; fi
+  fence=$(printf '%s\n' "$last" | awk '
+    /^[[:space:]]*```json[[:space:]]*$/ { in_block=1; next }
+    /^[[:space:]]*```[[:space:]]*$/ && in_block==1 { in_block=0; next }
+    in_block==1 { print }
+  ')
+  [ -z "$fence" ] && return 1
+  rp=$(printf '%s\n' "$fence" | gc_first_json_with_key schema_version)
+  [ -z "$rp" ] && return 1
+  tpid=$(gc_input_field "$rp" task_package_id)
+  status=$(gc_input_field "$rp" status)
+  [ -n "$tpid" ] && [ "$tpid" != "null" ] && [ "$status" = "done" ]
+}
+
 # POSIX 互換のパスハッシュ（md5sum は Linux 限定のため cksum を使用。macOS/Linux 両対応）
 gc_path_hash() {
   printf '%s' "$1" | cksum | awk '{print $1}'

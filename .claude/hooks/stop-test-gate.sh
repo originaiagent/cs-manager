@@ -25,34 +25,15 @@ if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then exit 0; fi
 LAST=$(gc_last_assistant_message "$TRANSCRIPT")
 if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then exit 0; fi
 # ---- 発火判定 + 完了主張の判定 ----
-# 発火 = 報告キーワードマッチ or 完了主張。完了主張 = GC_DONE_KEYWORDS マッチ、
-# または report_package の status=done（同定は goal-gate と同じ3キー:
-# schema_version+task_package_id+status）。キーワード判定より先に fence を解析するのは、
-# 見出しもキーワードも無い素の report_package(status=done) がキーワードゲートで
-# 素通りしてテストを回避する穴を塞ぐため。進捗報告(partial/blocked)では npm テストを
-# 強制しない（未検証フラグの開示確認のみ報告全般で実施）。
+# 発火 = 報告キーワードマッチ or 完了主張。完了主張の定義（GC_DONE_KEYWORDS または
+# report_package status=done）は lib/gate_common.sh の gc_is_done_claim に単一ソース化
+# （evidence-check.sh の動作確認実績ゲートと共用）。見出しもキーワードも無い素の
+# report_package(status=done) がキーワードゲートで素通りしてテストを回避する穴を塞ぐ。
+# 進捗報告(partial/blocked)では npm テストを強制しない（未検証フラグの開示確認のみ）。
 KEYWORD_HIT=0
 if printf '%s\n' "$LAST" | grep -qE "$GC_REPORT_KEYWORDS"; then KEYWORD_HIT=1; fi
 IS_DONE_CLAIM=0
-if printf '%s\n' "$LAST" | grep -qE "$GC_DONE_KEYWORDS"; then
-  IS_DONE_CLAIM=1
-else
-  STG_FENCE_JSON=$(printf '%s\n' "$LAST" | awk '
-    /^[[:space:]]*```json[[:space:]]*$/ { in_block=1; next }
-    /^[[:space:]]*```[[:space:]]*$/ && in_block==1 { in_block=0; next }
-    in_block==1 { print }
-  ')
-  if [ -n "$STG_FENCE_JSON" ]; then
-    STG_RP=$(printf '%s\n' "$STG_FENCE_JSON" | gc_first_json_with_key schema_version)
-    if [ -n "$STG_RP" ]; then
-      STG_TPID=$(gc_input_field "$STG_RP" task_package_id)
-      STG_STATUS=$(gc_input_field "$STG_RP" status)
-      if [ -n "$STG_TPID" ] && [ "$STG_TPID" != "null" ] && [ "$STG_STATUS" = "done" ]; then
-        IS_DONE_CLAIM=1
-      fi
-    fi
-  fi
-fi
+if gc_is_done_claim "$LAST"; then IS_DONE_CLAIM=1; fi
 if [ "$KEYWORD_HIT" -eq 0 ] && [ "$IS_DONE_CLAIM" -eq 0 ]; then exit 0; fi
 
 # ---- push-gate テスト未検証フラグの検査（P2-C: evidence-check から責務移管）----
