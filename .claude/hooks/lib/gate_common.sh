@@ -10,9 +10,16 @@
 #
 # 子リポへは sync-template 経由で配布されるため、tool-template 側のみで編集すること。
 
-# 完了報告キーワード regex（report_package_validator.sh の REPORT_KEYWORDS と同一定義を維持すること）
+# 完了主張キーワード（stop-test-gate のテスト強制トリガ。報告全般より狭い。
+# 「Done条件」は説明文でも出る語＝完了主張ではないため含めない。
+# regex は macOS(BSD grep)/Linux 差を避け \s でなく [[:space:]] を使う）
 # shellcheck disable=SC2034
-GC_REPORT_KEYWORDS='完了報告|report_package|Done\s*条件|完了しました|✅\s*完了|完了です'
+GC_DONE_KEYWORDS='完了報告|完遂報告|完了しました|✅[[:space:]]*完了|完了です'
+# 報告キーワード regex（report_package_validator / evidence-check / goal-gate /
+# stop-test-gate の発火用。validator は REPORT_KEYWORDS="$GC_REPORT_KEYWORDS" で
+# ここを単一ソースとする＝二重定義禁止）
+# shellcheck disable=SC2034
+GC_REPORT_KEYWORDS="${GC_DONE_KEYWORDS}|report_package|Done[[:space:]]*条件|進捗報告"
 
 # .disable-hooks エスケープ（全 hook 共通）
 gc_exit_if_disabled() {

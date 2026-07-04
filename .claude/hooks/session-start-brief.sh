@@ -88,4 +88,44 @@ if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
   echo "・⚠️ 現在 ${BRANCH} ブランチにいる。実装前に featureブランチ（claude/xxx）を切れ。mainへの直接pushは禁止。"
 fi
 
+# ---- ④ ルール鮮度チェック（対象は .claude/ 配下のみ。ロード対象を増やしたら判定パスも更新すること）----
+# 「セッションが新しい≠ルールが最新」: 古い作業ブランチ引き継ぎで origin/main の最新
+# 行動ルール未取込のまま動くのを検知する。hook は検知と推奨コマンドの提示のみ（自動実行しない）。
+# 限界: 子リポで sync PR 未マージの場合は origin/main 自体が古く検知不能（配布運用の範囲）。
+FRESH_NOTE=""
+if declare -f gc_run_limited >/dev/null 2>&1; then
+  # 明示 refspec で refs/remotes/origin/main を確実に更新（FETCH_HEAD のみ更新される形を防ぐ）。
+  # timeout は git ネイティブ（http lowSpeed / ssh ConnectTimeout+BatchMode）+ gc_run_limited 10s の二重。
+  # gc_run_limited の kill で親 git が落ちても、転送子プロセスは自身の lowSpeed timeout で自然終了する。
+  if ! GIT_TERMINAL_PROMPT=0 gc_run_limited 10 \
+    git -C "$CLAUDE_PROJECT_DIR" -c http.lowSpeedLimit=1 -c http.lowSpeedTime=5 \
+      -c core.sshCommand='ssh -o ConnectTimeout=5 -o BatchMode=yes' \
+      fetch --no-tags --quiet origin '+refs/heads/main:refs/remotes/origin/main' >/dev/null 2>&1; then
+    FRESH_NOTE="（フェッチ未達・ローカル既知のmainと比較）"
+  fi
+else
+  FRESH_NOTE="（フェッチ省略・ローカル既知のmainと比較）"
+fi
+if git -C "$CLAUDE_PROJECT_DIR" rev-parse --verify --quiet refs/remotes/origin/main >/dev/null 2>&1; then
+  BEHIND=$(git -C "$CLAUDE_PROJECT_DIR" rev-list --count HEAD..origin/main -- .claude/ 2>/dev/null || echo 0)
+  case "$BEHIND" in (*[!0-9]*|"") BEHIND=0 ;; esac
+  # コミット履歴上は遅れていても内容が同一（cherry-pick/手動反映済み）なら警告しない
+  if [ "$BEHIND" -gt 0 ] && ! git -C "$CLAUDE_PROJECT_DIR" diff --quiet HEAD origin/main -- .claude/ 2>/dev/null; then
+    AHEAD=$(git -C "$CLAUDE_PROJECT_DIR" rev-list --count origin/main..HEAD -- .claude/ 2>/dev/null || echo 0)
+    case "$AHEAD" in (*[!0-9]*|"") AHEAD=0 ;; esac
+    # .claude/.session/ は本 hook 自身が直前に作るセッション一時ファイル（未追跡）で、
+    # origin/main に存在せず restore でも触れないため dirty 判定から除外する
+    DIRTY_CLAUDE=$(git -C "$CLAUDE_PROJECT_DIR" status --porcelain -- .claude/ ':(exclude).claude/.session' 2>/dev/null)
+    echo "・⚠️ ルール鮮度切れ${FRESH_NOTE}: このブランチの行動ルール(.claude/)は origin/main より ${BEHIND} コミット古い（セッションが新しくてもルールは最新ではない）。"
+    if [ "$AHEAD" -eq 0 ] && [ -z "$DIRTY_CLAUDE" ]; then
+      echo "  → 実装前に取り込め（可逆・自律境界内）: git restore --source=origin/main --staged --worktree .claude/ && git commit -m \"chore: catch up .claude from origin/main\" -- .claude/"
+      if [ -n "$(git -C "$CLAUDE_PROJECT_DIR" diff --name-only HEAD origin/main -- .claude/hooks/ .claude/settings.json 2>/dev/null)" ]; then
+        echo "  → 実行系(hooks/設定)も更新される。取り込み後キリの良いところでセッション再起動を推奨（再起動まで一部旧設定で動く）。"
+      fi
+    else
+      echo "  → このブランチは .claude/ を独自変更中 or 未コミット変更あり（自動取込コマンドは提示しない）。取り込むか、古いルールのまま進む場合はトムに平易に一言警告してから作業せよ。"
+    fi
+  fi
+fi
+
 exit 0
