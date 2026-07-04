@@ -90,7 +90,7 @@ if [ -n "$UNCHECKED" ] || [ "$CHECKED_COUNT" -eq 0 ]; then
         BQ_QUESTION=$(gc_input_field "$BQ_BLOCK" "blocking_question.question")
         if [ -n "$BQ_CATEGORY" ] && [ "$BQ_CATEGORY" != "null" ] && \
            [ -n "$BQ_QUESTION" ] && [ "$BQ_QUESTION" != "null" ]; then
-          exit 0
+          BQ_OK=1   # 単独では通過させない（下の中断3点セット判定で使用）
         fi
       fi
       # (ii) report_package JSON の status が blocked|partial → 通過。
@@ -121,8 +121,31 @@ if [ -n "$UNCHECKED" ] || [ "$CHECKED_COUNT" -eq 0 ]; then
         fi
       fi
     fi
-    # (iii) 行頭「🛑中断: <理由>」の中断宣言 → 通過
-    if printf '%s\n' "$LAST" | grep -q '^🛑中断:'; then exit 0; fi
+    # (i)+(iii) 統合: 中断は「行頭🛑中断」+「blocking_question JSON（category/question 非空）」の
+    # 両方が揃った時のみ通過（reporting.md 中断3点セットの機械担保。blocking_question を
+    # 参照セクションの奥に置いただけの曖昧な中断も、JSON 無しの🛑中断単独も通さない）
+    HAS_STOP_DECL=0
+    if printf '%s\n' "$LAST" | grep -q '^🛑中断:'; then HAS_STOP_DECL=1; fi
+    # A/B はトム可視の本文（コードフェンス外・「## 参照」より上）に必要。
+    # JSON フェンス内の proposed_default や参照セクションに埋めた選択肢は不可。
+    # フェンストグルは FENCE_JSON 抽出と同じくインデント付き ``` も対象にする
+    # （抽出側だけ寛容だと、インデントフェンス内の A)/B) が本文扱いになり迂回できるため）
+    AB_BODY=$(printf '%s\n' "$LAST" | sed '/^## 参照/,$d' | awk 'BEGIN{c=0} /^[[:space:]]*```/{c=1-c; next} !c{print}')
+    HAS_AB=0
+    if printf '%s\n' "$AB_BODY" | grep -qE 'A[)）]' && printf '%s\n' "$AB_BODY" | grep -qE 'B[)）]'; then HAS_AB=1; fi
+    if [ "${BQ_OK:-0}" -eq 1 ] && [ "$HAS_STOP_DECL" -eq 1 ] && [ "$HAS_AB" -eq 1 ]; then exit 0; fi
+    if [ "${BQ_OK:-0}" -eq 1 ] && [ "$HAS_STOP_DECL" -eq 1 ]; then
+      echo "[Goal Gate] BLOCK: 中断3点セットの「どうする？ A) <推奨案> B) <代替案>」が最上部に無い（reporting.md）。" >&2
+      exit 2
+    fi
+    if [ "${BQ_OK:-0}" -eq 1 ]; then
+      echo "[Goal Gate] BLOCK: blocking_question はあるが行頭「🛑中断: <理由1行>」宣言が無い。中断は3点セット（🛑中断行+最上部A/B+blocking_question JSON）で行え（reporting.md）。" >&2
+      exit 2
+    fi
+    if [ "$HAS_STOP_DECL" -eq 1 ]; then
+      echo "[Goal Gate] BLOCK: 🛑中断宣言に blocking_question JSON（category/question 非空）が無い。中断は3点セット（🛑中断行+最上部A/B+blocking_question JSON）で行え（reporting.md）。" >&2
+      exit 2
+    fi
   fi
   if [ "${RP_STUB_HINT:-0}" -eq 1 ]; then
     echo "[Goal Gate] BLOCK: blocked/partial の report_package はあるが、完了報告キーワードが無いため validator の完全検査が走らない（エビデンス無し素通りは不可）。" >&2

@@ -26,7 +26,7 @@ if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then exit 0; fi
 LAST=$(gc_last_assistant_message "$TRANSCRIPT")
 
 if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then exit 0; fi
-REPORT_KEYWORDS='完了報告|report_package|Done\s*条件|完了しました|✅\s*完了|完了です'
+REPORT_KEYWORDS="$GC_REPORT_KEYWORDS"   # 単一ソース: lib/gate_common.sh（直定義禁止）
 if ! printf '%s\n' "$LAST" | grep -qE "$REPORT_KEYWORDS"; then
   exit 0
 fi
