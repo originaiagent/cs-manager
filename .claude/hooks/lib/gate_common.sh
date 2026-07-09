@@ -215,8 +215,18 @@ gc_first_json_with_key() {
 # stop-test-gate.sh（テスト強制）と evidence-check.sh（動作確認実績ゲート）が共用する
 # 単一ソース。見出し・キーワード無しの素 JSON 完了主張もここで捕捉される。
 gc_is_done_claim() {
-  local last="$1" fence rp tpid status
+  local last="$1" report="${2:-}" fence rp tpid status
   if printf '%s\n' "$last" | grep -qE "$GC_DONE_KEYWORDS"; then return 0; fi
+  # セッション報告ファイル本文（$2）が status=done の report_package でも完了主張とみなす
+  # （見出し・キーワード無しの file-only 完了報告がゲートを素通りする穴を塞ぐ）。
+  if [ -n "$report" ]; then
+    rp=$(printf '%s\n' "$report" | gc_first_json_with_key schema_version)
+    if [ -n "$rp" ]; then
+      tpid=$(gc_input_field "$rp" task_package_id)
+      status=$(gc_input_field "$rp" status)
+      [ -n "$tpid" ] && [ "$tpid" != "null" ] && [ "$status" = "done" ] && return 0
+    fi
+  fi
   fence=$(printf '%s\n' "$last" | awk '
     /^[[:space:]]*```json[[:space:]]*$/ { in_block=1; next }
     /^[[:space:]]*```[[:space:]]*$/ && in_block==1 { in_block=0; next }
@@ -228,6 +238,17 @@ gc_is_done_claim() {
   tpid=$(gc_input_field "$rp" task_package_id)
   status=$(gc_input_field "$rp" status)
   [ -n "$tpid" ] && [ "$tpid" != "null" ] && [ "$status" = "done" ]
+}
+
+# セッション報告ファイル: 完了報告の report_package JSON をトム可視の会話から分離する受け渡し先。
+# 会話に貼らず .claude/.session/report-<session_id>.json に書く（reporting.md）。
+# validator / evidence-check がここを読む。入力 JSON ($1, Stop hook stdin) から
+# session_id を取り、ファイルパスを返す（session_id 空なら空を返す）。
+gc_session_report_file() {
+  local sid
+  sid=$(gc_sanitize_id "$(gc_input_field "$1" session_id)")
+  [ -z "$sid" ] && return 0
+  printf '%s/.claude/.session/report-%s.json\n' "$CLAUDE_PROJECT_DIR" "$sid"
 }
 
 # POSIX 互換のパスハッシュ（md5sum は Linux 限定のため cksum を使用。macOS/Linux 両対応）

@@ -48,8 +48,8 @@ SESSION_ID=$(gc_sanitize_id "$SESSION_ID")
 SESSION_DIR="$CLAUDE_PROJECT_DIR/.claude/.session"
 mkdir -p "$SESSION_DIR" 2>/dev/null
 
-# 48時間(2880分)より古い goal-*/marker-* を掃除（並行セッションの新しいファイルは消さない）
-find "$SESSION_DIR" -maxdepth 1 -type f \( -name 'goal-*' -o -name 'marker-*' \) -mmin +2880 -delete 2>/dev/null
+# 48時間(2880分)より古い goal-*/marker-*/report-* を掃除（並行セッションの新しいファイルは消さない）
+find "$SESSION_DIR" -maxdepth 1 -type f \( -name 'goal-*' -o -name 'marker-*' -o -name 'report-*' \) -mmin +2880 -delete 2>/dev/null
 
 # セッションマーカー（goal-gate の基準時刻）
 touch "$SESSION_DIR/marker-$SESSION_ID" 2>/dev/null
@@ -62,6 +62,15 @@ cat <<BRIEF
   達成時は「- [x] <条件> | 証跡: <非空テキスト(生ログ引用/ファイルパス/URL)>」に更新する。
   中断する場合は会話メッセージの行頭に「🛑中断: <理由>」を書く。
 BRIEF
+
+# ---- ⑤ 構造マップ参照の促し（毎セッションのコード再読・連携誤解を減らす）----
+# 実装前にコードを grep で読み解く前に「地図」（architecture.md / CLAUDE.md 連携情報）を見る。
+# 地図がテンプレ雛形のまま（未記入）なら、本セッションで実態を追記して以後の再読コストを無くす。
+echo "・実装前に docs/architecture.md と CLAUDE.md「連携情報」を読み、ツール構成・連携先を把握せよ（コードを grep で追う前に地図を見る）。"
+ARCH_FILE="$CLAUDE_PROJECT_DIR/docs/architecture.md"
+if [ -f "$ARCH_FILE" ] && grep -qE '\{(TOOL_NAME|TOOL_DESCRIPTION|FRAMEWORK|DEPLOY_TARGET|DATABASE|LIBRARIES|PRODUCTION_URL|PREVIEW_URL|DIRECTORY_STRUCTURE|SUPABASE_PROJECT_ID|PROJECT_SPECIFIC_NOTES|INTEGRATION_NOTES|LANGUAGE)\}|（初期セットアップ後に自動記載）|（開発進行に応じて追記）|（必要に応じて追記）' "$ARCH_FILE" 2>/dev/null; then
+  echo "  → ⚠️ docs/architecture.md がテンプレ雛形のまま（未記入箇所あり）。本セッションで実態（構成・API・環境変数・連携先）を追記し、次回以降の再読コストを無くせ。"
+fi
 
 # ---- ② integration-map 鮮度警告（ファイル不在 or 調査日不明なら skip）----
 MAP_FILE="$CLAUDE_PROJECT_DIR/docs/origin-integration-map.md"
