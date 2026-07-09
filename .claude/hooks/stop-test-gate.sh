@@ -33,7 +33,12 @@ if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then exit 0; fi
 KEYWORD_HIT=0
 if printf '%s\n' "$LAST" | grep -qE "$GC_REPORT_KEYWORDS"; then KEYWORD_HIT=1; fi
 IS_DONE_CLAIM=0
-if gc_is_done_claim "$LAST"; then IS_DONE_CLAIM=1; fi
+REPORT_BODY=""
+if declare -f gc_session_report_file >/dev/null 2>&1; then
+  _RF=$(gc_session_report_file "$INPUT")
+  [ -n "$_RF" ] && [ -f "$_RF" ] && REPORT_BODY=$(cat "$_RF" 2>/dev/null)
+fi
+if gc_is_done_claim "$LAST" "$REPORT_BODY"; then IS_DONE_CLAIM=1; fi
 if [ "$KEYWORD_HIT" -eq 0 ] && [ "$IS_DONE_CLAIM" -eq 0 ]; then exit 0; fi
 
 # ---- push-gate テスト未検証フラグの検査（P2-C: evidence-check から責務移管）----

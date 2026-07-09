@@ -27,8 +27,14 @@ LAST=$(gc_last_assistant_message "$TRANSCRIPT")
 
 if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then exit 0; fi
 REPORT_KEYWORDS="$GC_REPORT_KEYWORDS"   # 単一ソース: lib/gate_common.sh（直定義禁止）
+# 報告ファイルの有無を先に確定（declare -f ガードで gate_common 未同期でも安全に空へ倒す）
+REPORT_FILE=""
+if declare -f gc_session_report_file >/dev/null 2>&1; then REPORT_FILE=$(gc_session_report_file "$INPUT"); fi
 if ! printf '%s\n' "$LAST" | grep -qE "$REPORT_KEYWORDS"; then
-  exit 0
+  # キーワード無しでも報告ファイルが在れば完了報告として検査する（見出し省略の抜け穴封鎖）
+  if [ -z "$REPORT_FILE" ] || [ ! -f "$REPORT_FILE" ]; then
+    exit 0
+  fi
 fi
 
 
@@ -80,17 +86,26 @@ if [ "${#REQUIRED_FIELDS[@]}" -eq 0 ]; then
 fi
 
 # ============================================================================
-# JSON ブロック抽出 (```json ... ```)
+# report_package JSON の取得: セッション報告ファイル優先 → 会話内 ```json フェンス（後方互換）
+# トム可視の会話から機械用 JSON を分離するため、report-<session_id>.json があればそれを検証。
+# 無ければ従来どおりメッセージ内の ```json ブロックを読む（子リポ未同期・旧運用との互換）。
 # ============================================================================
-JSON_BLOCK=$(printf '%s\n' "$LAST" | awk '
-  /^[[:space:]]*```json[[:space:]]*$/ { in_block=1; next }
-  /^[[:space:]]*```[[:space:]]*$/ && in_block==1 { exit }
-  in_block==1 { print }
-')
+if [ -n "$REPORT_FILE" ] && [ -f "$REPORT_FILE" ]; then
+  JSON_BLOCK=$(cat "$REPORT_FILE" 2>/dev/null)
+  REPORT_SRC="file:$REPORT_FILE"
+else
+  JSON_BLOCK=$(printf '%s\n' "$LAST" | awk '
+    /^[[:space:]]*```json[[:space:]]*$/ { in_block=1; next }
+    /^[[:space:]]*```[[:space:]]*$/ && in_block==1 { exit }
+    in_block==1 { print }
+  ')
+  REPORT_SRC="inline"
+fi
 
 if [ -z "$JSON_BLOCK" ]; then
-  echo "[Report Validator] BLOCK: 完了報告に report_package JSON ブロックがありません" >&2
-  echo "  → \`\`\`json ... \`\`\` で report_package.schema.json 準拠の構造化報告を含めてください" >&2
+  echo "[Report Validator] BLOCK: report_package が見つかりません（ファイルにも会話にも無い）" >&2
+  echo "  → 推奨: .claude/.session/report-<session_id>.json に report_package.schema.json 準拠の JSON を書く（会話には貼らない）" >&2
+  echo "  → もしくは会話に \`\`\`json ... \`\`\` で含める（後方互換）" >&2
   echo "  → 必須 field: ${REQUIRED_FIELDS[*]}" >&2
   exit 2
 fi

@@ -37,6 +37,16 @@ TRANSCRIPT=$(gc_input_field "$INPUT" transcript_path)
 LAST=$(gc_last_assistant_message "$TRANSCRIPT")
 if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then exit 0; fi
 
+# report_package はセッション報告ファイルに書かれる運用（reporting.md）。
+# evidence_urls がファイル側にある場合も URL 実在検査が効くよう、検査②の URL 抽出源に
+# 報告ファイル本文を加える（本文の完了主張キーワード判定・自己申告検出は $LAST のまま）。
+REPORT_FILE=""
+if declare -f gc_session_report_file >/dev/null 2>&1; then REPORT_FILE=$(gc_session_report_file "$INPUT"); fi
+REPORT_BODY=""
+if [ -n "$REPORT_FILE" ] && [ -f "$REPORT_FILE" ]; then
+  REPORT_BODY=$(cat "$REPORT_FILE" 2>/dev/null)
+fi
+
 # ============================================================================
 # 検査①: 動作確認コマンドの実行実績（S-1 機械裏取り・完了主張時のみ）
 # ============================================================================
@@ -48,7 +58,7 @@ if [ -z "$LAST" ] || [ "$LAST" = "null" ]; then exit 0; fi
 # grep ベースの補助ゲート（文面遵守が一次）: Write 内容の "curl " 等による偽陽性通過は
 # 許容し、正当な完了を止める偽ブロックを避ける側に倒す。JSONL は compact / 空白あり
 # 両形式を許容（"key": "value" 形も対象）。
-if declare -f gc_is_done_claim >/dev/null 2>&1 && gc_is_done_claim "$LAST"; then
+if declare -f gc_is_done_claim >/dev/null 2>&1 && gc_is_done_claim "$LAST" "$REPORT_BODY"; then
   # 開示エスケープ（理由必須）: 実行できない性質の変更（ドキュメントのみ等）
   if ! printf '%s\n' "$LAST" | grep -qE '動作確認対象外[:：][[:space:]]*[^[:space:]]'; then
     # 走査対象 = メイン transcript + サブエージェント transcript（<transcript>/subagents/ 配下）。
@@ -99,7 +109,7 @@ fi
 
 # URL 抽出（ASCII の URL 文字のみにマッチさせ、日本語文が混ざるのを防止）
 URL_RE='https?://[A-Za-z0-9._~:/?#@!$&*+,;=%()-]+'
-URLS=$(printf '%s\n' "$LAST" \
+URLS=$(printf '%s\n%s\n' "$REPORT_BODY" "$LAST" \
   | grep -oE "$URL_RE" \
   | sed -E 's/[.,;:!?)]+$//' \
   | awk '!seen[$0]++' \

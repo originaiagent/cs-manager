@@ -28,6 +28,11 @@ SESSION_DIR="$CLAUDE_PROJECT_DIR/.claude/.session"
 GOAL_FILE="$SESSION_DIR/goal-${SESSION_ID}.md"
 MARKER_FILE="$SESSION_DIR/marker-${SESSION_ID}"
 
+# 直前タスクの完了報告ファイルが同一セッションに残ると validator が古い報告を検査して
+# しまう（session_id はセッション中一定）。新しいユーザーターンごとに掃除し、完了報告
+# ファイルは「当該ターン中に書き直された物」だけが検査対象になるようにする。
+rm -f "$SESSION_DIR/report-${SESSION_ID}.json" 2>/dev/null
+
 if [ ! -f "$GOAL_FILE" ] && [ -f "$MARKER_FILE" ]; then
   echo "🎯 リマインド: goal 未宣言。実装前に .claude/.session/goal-${SESSION_ID}.md へ「🎯 ゴール: <1行>」+「## 完了条件」（≤3件、各行「- [ ] <条件> | 証跡: 」）を書け。"
 fi

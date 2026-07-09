@@ -10,7 +10,9 @@ git checkout main && git pull origin main
 2. mainをベースにして新しいブランチを作成
 git checkout -b claude/fix-conflict-$(date +%Y%m%d%H%M)
 
-3. 直前の作業で変更したかった内容を、main上のコードに対して正しく適用し直す
+3. 直前の作業の変更を**差分として機械的に再適用**する（記憶からファイル全体を書き直さない＝他の変更を巻き戻す事故防止）:
+   - 旧ブランチのコミットを `git cherry-pick <sha>`、またはファイル単位で `git checkout <旧ブランチ> -- <path>` で当てる
+   - コンフリクト箇所のみ手で解消する。ファイル全体のコピペ再構成は禁止
 
 4. コンフリクトが起きないことを確認してからpush
 
