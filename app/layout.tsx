@@ -1,6 +1,7 @@
 import './globals.css';
 import type { Metadata } from 'next';
 import Sidebar from '@/components/layout/sidebar';
+import NoteWidget from '@/components/note-widget/NoteWidget';
 
 export const metadata: Metadata = {
   title: 'cs-manager',
@@ -19,6 +20,7 @@ export default function RootLayout({
         <main className="lg:ml-[240px] min-h-screen bg-gray-50/50">
           <div className="p-4 lg:p-8 pt-16 lg:pt-8">{children}</div>
         </main>
+        <NoteWidget />
       </body>
     </html>
   );
