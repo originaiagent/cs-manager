@@ -10,11 +10,18 @@
  *   一切渡らない)。振り分け(unverified→confirmed の判定)は AI と管理者が origin-ai 側で行うため、
  *   ここではテキストを送るだけの薄い UI に留める。
  *
- * 認証切れ復帰: 既存の auth-recovery (`runAction` / not-this-button.tsx と同じ挙動) を踏襲し、
- * Server Action が認証切れで到達しなかった場合は再ログインへ誘導する (無限ローディング防止)。
+ * 認証切れ復帰: 既存の auth-recovery (`runAction`) を踏襲し、Server Action が認証切れ/未ログイン
+ * (assertUser の throw 含む) で到達しなかった場合は authExpired として捕捉する (無限ローディング防止)。
+ * 本ウィジェットはルートレイアウト常駐で `/login` にも描画されるため、Server Action 側
+ * (`@/app/_actions/note` の assertUser) が path に依存せずユーザーセッションを検証する。
+ * 保存 (handleSave) は入力中の本文を保持するフォームのため、認証切れ時も強制遷移せず
+ * エラー表示 + 再ログイン Link に留める (record-form.tsx / article-form.tsx と同じ規約。
+ * データ保全優先 = src/lib/client/auth-recovery.ts のコメント方針)。取下げ (handleRetire) は
+ * 入力を持たないため not-this-button.tsx と同じ即時遷移のままで良い。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import {
   saveNoteAction,
   listNotesAction,
@@ -82,10 +89,8 @@ export default function NoteWidget() {
       saveNoteAction({ text: trimmed, ...(rationale.trim() ? { rationale: rationale.trim() } : {}) }),
     );
     if (r.authExpired) {
-      // 既存の認証切れ復帰 (not-this-button.tsx と同じ挙動): 再ログインへ誘導。
-      if (typeof window !== 'undefined') {
-        window.location.href = loginHrefForHere();
-      }
+      // 保存フォームは入力中の本文を持つため強制遷移しない (record-form.tsx / article-form.tsx
+      // と同じ規約: エラー表示 + 再ログイン Link に留め、データ保全を優先する)。
       setSaveError(AUTH_EXPIRED_MESSAGE);
       setSaving(false);
       return;
@@ -157,7 +162,19 @@ export default function NoteWidget() {
               />
             </details>
 
-            {saveError && <p className="text-[12px] text-red-600">{saveError}</p>}
+            {saveError && (
+              <p className="text-[12px] text-red-600">
+                {saveError}
+                {saveError === AUTH_EXPIRED_MESSAGE && (
+                  <Link
+                    href={loginHrefForHere()}
+                    className="ml-1.5 underline hover:no-underline font-medium"
+                  >
+                    再ログイン
+                  </Link>
+                )}
+              </p>
+            )}
 
             <button
               type="button"
