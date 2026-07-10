@@ -1,17 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { retireNote } from '@/lib/embed/submit-note';
+import { authorizeInternalApiRoute } from '@/lib/auth/api-auth';
 
 /**
  * 現場ナレッジ メモ 候補の取下げプロキシ (POST)。
  *
  * 中身は submit-note.ts (retireNote) への委譲のみ。認可方針は `../route.ts` と同一
- * (pilot・internal-key 未適用。理由は同ファイルのコメント参照)。
+ * (`authorizeInternalApiRoute` によるサーバ間専用ゲート。ブラウザからは
+ * `app/_actions/note.ts` の Server Action 経由でのみ到達する)。
  */
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
+  const authError = await authorizeInternalApiRoute(req);
+  if (authError) return authError;
+
   let body: unknown;
   try {
     body = await req.json();

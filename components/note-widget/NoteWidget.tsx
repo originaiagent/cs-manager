@@ -3,28 +3,26 @@
 /**
  * 現場ナレッジ メモ入力ウィジェット (全ページ右下常駐)。
  *
- * fetch 先は cs-manager 自身の `/api/note` (プロキシ) のみ。origin-ai を直叩きしない
- * (EMBED_CLIENT_KEY はブラウザに一切渡らない。鍵解決と転送はサーバ側 submit-note.ts が担う)。
- * 振り分け(unverified→confirmed の判定)は AI と管理者が origin-ai 側で行うため、
- * ここではテキストを送るだけの薄い UI に留める。
+ * 送信経路は cs-manager の正しい三段構成 (create-article.ts が手本):
+ *   本コンポーネント(client) → Server Action (`@/app/_actions/note`。middleware がユーザー
+ *   セッションを認可) → internalFetch (内部鍵をサーバ側でのみ付与) → `/api/note*`
+ *   (internal-key ゲート済み route)。origin-ai を直叩きしない (EMBED_CLIENT_KEY はブラウザに
+ *   一切渡らない)。振り分け(unverified→confirmed の判定)は AI と管理者が origin-ai 側で行うため、
+ *   ここではテキストを送るだけの薄い UI に留める。
+ *
+ * 認証切れ復帰: 既存の auth-recovery (`runAction` / not-this-button.tsx と同じ挙動) を踏襲し、
+ * Server Action が認証切れで到達しなかった場合は再ログインへ誘導する (無限ローディング防止)。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-
-interface SimilarItem {
-  title: string;
-  score: number;
-}
-
-interface NoteListItem {
-  id: string;
-  title: string;
-  snippet: string;
-  state: 'unverified' | 'confirmed';
-  destination: string;
-  created_at: string;
-  entered_by: string;
-}
+import {
+  saveNoteAction,
+  listNotesAction,
+  retireNoteAction,
+  type NoteSimilarItem as SimilarItem,
+  type NoteListItem,
+} from '@/app/_actions/note';
+import { runAction, AUTH_EXPIRED_MESSAGE, loginHrefForHere } from '@/lib/client/auth-recovery';
 
 const STATE_LABEL: Record<string, string> = {
   unverified: '🟡 未確認',
@@ -50,19 +48,21 @@ export default function NoteWidget() {
   const loadList = useCallback(async () => {
     setListLoading(true);
     setListError(null);
-    try {
-      const res = await fetch('/api/note?limit=10', { cache: 'no-store' });
-      const json = await res.json().catch(() => null);
-      if (!res.ok || !json || json.ok !== true) {
-        setListError('一覧の取得に失敗しました');
-        return;
-      }
-      setItems(Array.isArray(json.items) ? json.items : []);
-    } catch {
-      setListError('一覧の取得に失敗しました');
-    } finally {
+    const r = await runAction(() => listNotesAction(10));
+    if (r.authExpired) {
+      // 背景読み込みでの認証切れは、入力中の可能性があるため強制遷移はしない
+      // (エラー表示のみに留め、書き直し不要にする)。
+      setListError(AUTH_EXPIRED_MESSAGE);
       setListLoading(false);
+      return;
     }
+    if (!r.result.ok) {
+      setListError('一覧の取得に失敗しました');
+      setListLoading(false);
+      return;
+    }
+    setItems(r.result.items ?? []);
+    setListLoading(false);
   }, []);
 
   useEffect(() => {
@@ -78,51 +78,47 @@ export default function NoteWidget() {
     setSaving(true);
     setSaveError(null);
     setSimilar(null);
-    try {
-      const res = await fetch('/api/note', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: trimmed,
-          ...(rationale.trim() ? { rationale: rationale.trim() } : {}),
-        }),
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok || !json || json.ok !== true) {
-        // エラーでも入力テキストは消さない (書き直し不要にする)。
-        setSaveError('保存に失敗しました。時間をおいて再度お試しください。');
-        return;
+    const r = await runAction(() =>
+      saveNoteAction({ text: trimmed, ...(rationale.trim() ? { rationale: rationale.trim() } : {}) }),
+    );
+    if (r.authExpired) {
+      // 既存の認証切れ復帰 (not-this-button.tsx と同じ挙動): 再ログインへ誘導。
+      if (typeof window !== 'undefined') {
+        window.location.href = loginHrefForHere();
       }
-      setText('');
-      setRationale('');
-      setSimilar(Array.isArray(json.similar) ? json.similar : []);
-      void loadList();
-    } catch {
-      setSaveError('保存に失敗しました。時間をおいて再度お試しください。');
-    } finally {
+      setSaveError(AUTH_EXPIRED_MESSAGE);
       setSaving(false);
+      return;
     }
+    if (!r.result.ok) {
+      // エラーでも入力テキストは消さない (書き直し不要にする)。
+      setSaveError('保存に失敗しました。時間をおいて再度お試しください。');
+      setSaving(false);
+      return;
+    }
+    setText('');
+    setRationale('');
+    setSimilar(r.result.similar ?? []);
+    setSaving(false);
+    void loadList();
   }
 
   async function handleRetire(candidateId: string) {
     if (retiringId) return;
     setRetiringId(candidateId);
-    try {
-      const res = await fetch('/api/note/retire', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidateId }),
-      });
-      const json = await res.json().catch(() => null);
-      if (res.ok && json && json.ok === true) {
-        setItems((prev) => prev.filter((it) => it.id !== candidateId));
+    const r = await runAction(() => retireNoteAction(candidateId));
+    if (r.authExpired) {
+      if (typeof window !== 'undefined') {
+        window.location.href = loginHrefForHere();
       }
-      // 失敗時は一覧を据え置く (非破壊)。次回開いた際に再取得すれば復帰できる。
-    } catch {
-      // no-op: 上記コメントの通り一覧は据え置く。
-    } finally {
       setRetiringId(null);
+      return;
     }
+    if (r.result.ok) {
+      setItems((prev) => prev.filter((it) => it.id !== candidateId));
+    }
+    // 失敗時は一覧を据え置く (非破壊)。次回開いた際に再取得すれば復帰できる。
+    setRetiringId(null);
   }
 
   return (
