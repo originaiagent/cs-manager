@@ -61,7 +61,28 @@ cat <<BRIEF
   共有フォーマット: 1行目「🎯 ゴール: <1行>」、次に「## 完了条件」、各条件は「- [ ] <条件> | 証跡: 」。
   達成時は「- [x] <条件> | 証跡: <非空テキスト(生ログ引用/ファイルパス/URL)>」に更新する。
   中断する場合は会話メッセージの行頭に「🛑中断: <理由>」を書く。
+・（任意）このゴールがロードマップのどのマイルストーンの一枚かを goal ファイルに「紐付け: <マイルストーン名 or 単発>」で書く。ビジョン級の漠然依頼はそのまま goal 化せず、まず docs/roadmap.md へ分解してから着手する。
 BRIEF
+
+# ---- 🧭 北極星ライン + 進捗ゲージ（施策E: roadmap にマイルストーンが在る時のみ表示）----
+if declare -f gc_roadmap_gauge >/dev/null 2>&1; then
+  GAUGE=$(gc_roadmap_gauge)
+  if [ -n "$GAUGE" ]; then
+    NS=$(gc_north_star)
+    [ -z "$NS" ] && NS="（vision.md 未設定）"
+    echo "🧭 ${NS} ▸ ${GAUGE}"
+  fi
+fi
+
+# ---- ⚠️ 未完遂ゴール台帳の再提示（施策A: セッション跨ぎ継続）----
+if declare -f gc_unfinished_ledger_line >/dev/null 2>&1; then
+  UGL=$(gc_unfinished_ledger_line)
+  if [ -n "$UGL" ]; then
+    echo "・⚠️ 未完遂ゴールあり（前セッションから継続中の可能性）:"
+    printf '%s\n' "$UGL" | head -5 | sed 's/^/    /'
+    echo "  → 継続ならこのゴールを goal ファイルへ転記し、台帳エントリのキーを現セッションIDへ付け替えてから残条件で再開（完遂時に gate が消し込みを検証）。別件なら着手前に判断ログ1行。"
+  fi
+fi
 
 # ---- ⑤ 構造マップ参照の促し（毎セッションのコード再読・連携誤解を減らす）----
 # 実装前にコードを grep で読み解く前に「地図」（architecture.md / CLAUDE.md 連携情報）を見る。

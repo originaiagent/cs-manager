@@ -261,6 +261,68 @@ gc_sanitize_id() {
   printf '%s' "$1" | tr -cd 'A-Za-z0-9_-'
 }
 
+# ---- ゴール継続性（open-goals 台帳 / 🎯行ロック / 北極星ライン）共通関数 ----
+# 子リポへは sync-template 経由で配布。tool-template 側のみで編集すること。
+
+# goal ファイル ($1) の 🎯 行を1行だけ取り、前後空白を除いて返す（無ければ空）。
+# すり替え検知の基準。goal-reminder（保存）と goal-gate（照合）が同一関数で正規化を揃える。
+gc_goal_north_line() {
+  grep -m1 '^🎯' "$1" 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# open-goals 台帳の未完遂エントリの 🎯 行（先頭 "- 🎯"）を改行区切りで返す（無ければ空）。
+# 台帳はエントリ＝未完遂のみ（完遂で消し込む設計）なので全 🎯 行がそのまま未完遂ゴール。
+gc_unfinished_ledger_line() {
+  local content
+  content=$(cat "$CLAUDE_PROJECT_DIR/docs/open-goals.md" 2>/dev/null) || return 0
+  printf '%s\n' "$content" | grep -E '^[[:space:]]*- 🎯' | sed 's/^[[:space:]]*- //'
+}
+
+# 台帳（head=コミット済み / worktree=作業ツリー）に session_id のエントリ
+# （キー <!-- goal:<sid> -->）が在れば 0。取得不能は 1（fail-open: 台帳は継続補助であり
+# 取得失敗で誤 block させない。正しさゲートではない）。
+gc_ledger_has_entry() {
+  local src="$1" sid="$2" content
+  case "$src" in
+    head)     content=$(git -C "$CLAUDE_PROJECT_DIR" show HEAD:docs/open-goals.md 2>/dev/null) || return 1 ;;
+    worktree) content=$(cat "$CLAUDE_PROJECT_DIR/docs/open-goals.md" 2>/dev/null) || return 1 ;;
+    *)        return 1 ;;
+  esac
+  [ -n "$content" ] || return 1
+  printf '%s' "$content" | grep -qF "<!-- goal:$sid -->"
+}
+
+# docs/vision.md から北極星（1行指針）を抽出。優先: 「🧭 北極星:」明示行 →
+# 次善: 見出し/空行/（プレースホルダ）/箇条書きを除く最初の実文 → 最後の砦: H1 から "# " 除去。
+gc_north_star() {
+  local f="$CLAUDE_PROJECT_DIR/docs/vision.md" line
+  [ -f "$f" ] || return 0
+  line=$(grep -m1 '🧭[[:space:]]*北極星[:：]' "$f" 2>/dev/null | sed 's/.*北極星[:：][[:space:]]*//; s/[[:space:]]*$//')
+  if [ -z "$line" ]; then
+    line=$(grep -vE '^[[:space:]]*#|^[[:space:]]*$|^[[:space:]]*[（(]|^[[:space:]]*[-*>]' "$f" 2>/dev/null | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  fi
+  [ -z "$line" ] && line=$(grep -m1 '^#' "$f" 2>/dev/null | sed 's/^#\+[[:space:]]*//; s/[[:space:]]*$//')
+  printf '%s' "$line"
+}
+
+# roadmap.md のマイルストーン（"- [ ]/[x] ... | 完了の定義:" 行）から
+# "マイルストーン M/N 完了 ██░░ P%" ゲージ文字列を返す。0 件なら空（＝非表示）。
+gc_roadmap_gauge() {
+  local f="$CLAUDE_PROJECT_DIR/docs/roadmap.md" total done pct filled empty bar i
+  [ -f "$f" ] || return 0
+  total=$(grep -cE '^[[:space:]]*- \[[ xX]\].*\|[[:space:]]*完了の定義[:：]' "$f" 2>/dev/null)
+  case "$total" in (*[!0-9]*|"") total=0 ;; esac
+  [ "$total" -eq 0 ] && return 0
+  done=$(grep -cE '^[[:space:]]*- \[[xX]\].*\|[[:space:]]*完了の定義[:：]' "$f" 2>/dev/null)
+  case "$done" in (*[!0-9]*|"") done=0 ;; esac
+  pct=$(( done * 100 / total ))
+  filled=$(( pct / 10 )); [ "$filled" -gt 10 ] && filled=10
+  empty=$(( 10 - filled )); bar=""
+  i=0; while [ "$i" -lt "$filled" ]; do bar="${bar}█"; i=$((i+1)); done
+  i=0; while [ "$i" -lt "$empty" ]; do bar="${bar}░"; i=$((i+1)); done
+  printf 'マイルストーン %s/%s 完了 %s %s%%' "$done" "$total" "$bar" "$pct"
+}
+
 # push-gate.sh が timeout fail-open 時に設置する「テスト未検証」フラグのパス。
 # push-gate.sh / evidence-check.sh のインライン組み立て
 # （/tmp/claude_push_test_unverified_$(gc_path_hash "$CLAUDE_PROJECT_DIR")）と
