@@ -62,6 +62,22 @@ if [ ! -f "$GOAL_FILE" ]; then
 fi
 
 # ============================================================================
+# ①.5 🎯行ロック（親ゴールすり替え検知）— marker 在時のみ enforce（不在は fail-open）
+# ============================================================================
+GOALHASH_FILE="$SESSION_DIR/marker-${SESSION_ID}-goalhash"
+if [ -f "$GOALHASH_FILE" ] && declare -f gc_goal_north_line >/dev/null 2>&1; then
+  SAVED_NORTH=$(cat "$GOALHASH_FILE" 2>/dev/null)
+  CUR_NORTH=$(gc_goal_north_line "$GOAL_FILE")
+  if [ -n "$SAVED_NORTH" ] && [ "$SAVED_NORTH" != "$CUR_NORTH" ]; then
+    echo "[Goal Gate] BLOCK: 🎯ゴール行が宣言時から変更されている（親ゴールすり替えの疑い）。" >&2
+    echo "  宣言時: $SAVED_NORTH" >&2
+    echo "  現在  : $CUR_NORTH" >&2
+    echo "  → 親ゴール変更は人間承認事項（parent_goal_change・13カテゴリ）。元の🎯へ戻すか中断3点セット(blocking_question)で承認を取れ。" >&2
+    exit 2
+  fi
+fi
+
+# ============================================================================
 # ② 完了条件照合
 # ============================================================================
 UNCHECKED=$(grep -E '^[[:space:]]*- \[ \]' "$GOAL_FILE" 2>/dev/null)
@@ -133,7 +149,18 @@ if [ -n "$UNCHECKED" ] || [ "$CHECKED_COUNT" -eq 0 ]; then
     AB_BODY=$(printf '%s\n' "$LAST" | sed '/^## 参照/,$d' | awk 'BEGIN{c=0} /^[[:space:]]*```/{c=1-c; next} !c{print}')
     HAS_AB=0
     if printf '%s\n' "$AB_BODY" | grep -qE 'A[)）]' && printf '%s\n' "$AB_BODY" | grep -qE 'B[)）]'; then HAS_AB=1; fi
-    if [ "${BQ_OK:-0}" -eq 1 ] && [ "$HAS_STOP_DECL" -eq 1 ] && [ "$HAS_AB" -eq 1 ]; then exit 0; fi
+    if [ "${BQ_OK:-0}" -eq 1 ] && [ "$HAS_STOP_DECL" -eq 1 ] && [ "$HAS_AB" -eq 1 ]; then
+      # 中断3点セット完備 → 台帳登録を検証してから通過（施策A: 中断ゴールの永続化）。
+      # git show 成功（HEAD に台帳が在る採用リポ）で自エントリ不在の時だけ block。
+      # 取得不能（未採用リポ・HEAD無し）は fail-open で中断を通す。
+      HEAD_LEDGER=$(git -C "$CLAUDE_PROJECT_DIR" show HEAD:docs/open-goals.md 2>/dev/null); GIT_RC=$?
+      if [ "$GIT_RC" -eq 0 ] && ! printf '%s' "$HEAD_LEDGER" | grep -qF "<!-- goal:${SESSION_ID} -->"; then
+        echo "[Goal Gate] BLOCK: 中断だが未完遂ゴールが台帳 docs/open-goals.md に未登録（コミット済みHEADに <!-- goal:${SESSION_ID} --> が無い）。" >&2
+        echo "  → セッション跨ぎ継続のため登録＆コミット: docs/open-goals.md にエントリ追記（🎯行+残条件、キー <!-- goal:${SESSION_ID} -->）→ git add＆commit。" >&2
+        exit 2
+      fi
+      exit 0
+    fi
     if [ "${BQ_OK:-0}" -eq 1 ] && [ "$HAS_STOP_DECL" -eq 1 ]; then
       echo "[Goal Gate] BLOCK: 中断3点セットの「どうする？ A) <推奨案> B) <代替案>」が最上部に無い（reporting.md）。" >&2
       exit 2
@@ -181,6 +208,20 @@ if [ -f "$MARKER_FILE" ]; then
     echo "[Goal Gate] BLOCK: 全条件✅だが docs/progress.md がセッション開始以降更新されていない。docs/progress.md に作業記録を追記せよ。" >&2
     exit 2
   fi
+fi
+
+# ============================================================================
+# ④ 完遂時の台帳消し込み検証（施策A: 完遂後の台帳汚染ゼロ）
+# ============================================================================
+# HEAD or 作業ツリーに自エントリが残っていれば消し込みコミットを要求。
+# 未登録は素通り（単一セッション完遂＝登録前に完了 / 未採用リポ = 摩擦ゼロ）。
+CLR_HEAD=$(git -C "$CLAUDE_PROJECT_DIR" show HEAD:docs/open-goals.md 2>/dev/null)
+CLR_WT=$(cat "$CLAUDE_PROJECT_DIR/docs/open-goals.md" 2>/dev/null)
+if printf '%s' "$CLR_HEAD" | grep -qF "<!-- goal:${SESSION_ID} -->" \
+   || printf '%s' "$CLR_WT" | grep -qF "<!-- goal:${SESSION_ID} -->"; then
+  echo "[Goal Gate] BLOCK: 全条件✅だが台帳 docs/open-goals.md に自ゴールのエントリ（<!-- goal:${SESSION_ID} -->）が残っている。" >&2
+  echo "  → 完遂したので消し込め: docs/open-goals.md から当該エントリを削除 → git add＆commit（完遂と同じコミットで可）。" >&2
+  exit 2
 fi
 
 exit 0
