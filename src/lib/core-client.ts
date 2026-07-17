@@ -35,6 +35,23 @@ export interface FetchProductsResult {
   error?: string;
 }
 
+export interface FetchProductsByIdsResult {
+  ok: boolean;
+  /**
+   * Core が返した product 行。**チャンクが一部失敗しても成功分は積まれる** ため
+   * ok=false でも参照すること (成功チャンク由来の id を巻き添えで捨てない)。
+   * Core が返さなかった id は含まれない (存在しない product / 失敗チャンク)。
+   */
+  products?: CoreProduct[];
+  /**
+   * 取得に**失敗した**チャンクに含まれていた id (= 一時障害で不明)。
+   * 「Core が正常応答した上で返さなかった id」(= 存在しない product) とは区別する。
+   * 未設定/空 = 全チャンク成功。
+   */
+  failedIds?: string[];
+  error?: string;
+}
+
 export async function fetchProducts(limit: number = 1): Promise<FetchProductsResult> {
   if (!CORE_API_URL) {
     return { ok: false, count: 0, error: 'CORE_API_URL is not set' };
@@ -139,6 +156,102 @@ export async function fetchProductById(productId: string): Promise<FetchProductR
         : `Network error: ${error?.message ?? String(error)}`,
     };
   }
+}
+
+/**
+ * products/by-ids の 1 リクエスト最大 ids 数。
+ * origin-core server/routes/masterV1.ts の MAX_BULK=500 と同値 (超過は Core が 400)。
+ */
+export const PRODUCTS_BY_IDS_MAX_BULK = 500;
+
+/**
+ * Core products の一括取得 (N+1 撲滅の要)。
+ *
+ * - エンドポイント: GET /api/v1/master/products/by-ids?ids=CSV&fields=...
+ * - envelope は Core sendData 形 `{data: [product...], meta: {...}}` (実データで裏取り済)。
+ * - ids は 500 件ごとにチャンク分割して順次取得 (Core MAX_BULK)。
+ * - **Core は正整数 id のみ受理し、1 件でも不正値があるとチャンク全体が 400 になる**ため、
+ *   非正整数 id は呼出前に除外すること (product-resolver 側で未解決扱いにする)。
+ * - Core が返さなかった id (存在しない product) は単に data に含まれない (エラーにはならない)。
+ * - 落とさない設計: 失敗時は ok=false + error (status のみ) を返す。
+ * - **失敗はチャンク単位に隔離する**: 後続チャンクが落ちても取得済みチャンクの products は捨てず、
+ *   失敗チャンクの id だけを failedIds で返す (ok=false)。
+ *   全チャンク失敗なら products は空 = 従来の全滅と同じ。
+ *   1 チャンクの一時失敗 (429/timeout) が全 id を未解決にし「不良数が全製品 0」へ戻る事故の防止。
+ */
+export async function fetchProductsByIds(ids: string[]): Promise<FetchProductsByIdsResult> {
+  const uniqueIds = Array.from(new Set(ids.map((v) => v.trim()).filter((v) => v.length > 0)));
+  if (uniqueIds.length === 0) return { ok: true, products: [] };
+
+  // env は call-time 解決 (テスト時の env 上書き順序に依存しないため。lookupMallIdentifiersBulk と同流儀)
+  const coreApiUrl = process.env.CORE_API_URL?.replace(/\s+$/, '');
+  if (!coreApiUrl) {
+    return { ok: false, error: 'CORE_API_URL is not set' };
+  }
+  const entryKeys = getEntryKeys();
+  if (entryKeys.length === 0) {
+    return { ok: false, error: 'CORE_CREDENTIAL_KEY is not set' };
+  }
+  const base = coreApiUrl.replace(/\/$/, '');
+  // group_name は products 行に存在しない (Core 実データで確認済) が、単体取得と同じ
+  // フィールド集合を要求して戻り値の互換を保つ (Core の fields whitelist に含まれる)。
+  const fields = 'id,product_name,variation,product_group_id,group_name';
+
+  const products: CoreProduct[] = [];
+  const failedIds: string[] = [];
+  let firstError: string | undefined;
+
+  // try/catch は for の**内側**: timeout / network エラーもチャンク単位に閉じ込める
+  for (const chunk of chunkValues(uniqueIds, PRODUCTS_BY_IDS_MAX_BULK)) {
+    const url =
+      `${base}/api/v1/master/products/by-ids` +
+      `?ids=${encodeURIComponent(chunk.join(','))}` +
+      `&fields=${encodeURIComponent(fields)}`;
+
+    try {
+      const response = await fetchWithEntryKeys(
+        url,
+        {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          cache: 'no-store',
+          signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
+        },
+        { entryKeys },
+      );
+
+      if (!response.ok) {
+        // 非 2xx の body は反射しない (status のみ)。
+        try { await response.arrayBuffer(); } catch { /* ignore */ }
+        failedIds.push(...chunk);
+        if (!firstError) firstError = `Core API error: ${response.status} ${response.statusText}`;
+        continue;
+      }
+
+      const body = await response.json();
+      const rows = Array.isArray(body) ? body : (body?.data ?? []);
+      if (!Array.isArray(rows)) {
+        failedIds.push(...chunk);
+        if (!firstError) firstError = 'Unexpected response shape';
+        continue;
+      }
+      for (const row of rows) {
+        if (row && typeof row === 'object') products.push(row as CoreProduct);
+      }
+    } catch (error: any) {
+      const isTimeout = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+      failedIds.push(...chunk);
+      if (!firstError) {
+        firstError = isTimeout
+          ? `Timeout after ${CORE_API_TIMEOUT_MS}ms`
+          : `Network error: ${error?.message ?? String(error)}`;
+      }
+    }
+  }
+
+  if (failedIds.length === 0) return { ok: true, products };
+  // 一部/全部失敗: 成功分の products は必ず返す (呼出側が失敗 id だけを未解決にできる)
+  return { ok: false, products, failedIds, error: firstError };
 }
 
 // ============================================================================
