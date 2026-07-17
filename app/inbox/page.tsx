@@ -1,6 +1,7 @@
 import { unstable_noStore as noStore } from 'next/cache';
 import PageHeader from '@/components/ui/page-header';
 import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
+import { resolveGroupChildIds } from '@/lib/product-resolver';
 import FilterChips from './_components/filter-chips';
 import TicketCard from './_components/ticket-card';
 
@@ -57,7 +58,14 @@ export default async function InboxPage({
     if (ch) q = q.eq('channel_id', ch.id);
   }
   if (searchParams.product) {
-    q = q.eq('product_id', searchParams.product);
+    // tickets.product_id は子 products.id。一方 /quality/defect-rate からは親 group_id が渡る
+    // ため、親 group は子 product id 群へ展開して照合する (group 未解決 = 子 id 直指定や
+    // Core 不達時は従来通り指定 id との完全一致のみ)。
+    const children = await resolveGroupChildIds([searchParams.product]);
+    const productIds = Array.from(
+      new Set([searchParams.product, ...(children.get(searchParams.product) ?? [])]),
+    );
+    q = q.in('product_id', productIds);
   }
 
   const { data: tickets } = await q;
