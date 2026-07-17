@@ -19,7 +19,7 @@ OriginAI マルチチャネル統合カスタマーサポート + AI改善サイ
 - `CRON_SECRET`: Vercel Cron Bearer token (`/api/cron/*` 認可)
 - `CS_MCP_KNOWLEDGE_TOKEN`: MCP `knowledge_search` ツール専用の静的 Bearer トークン (origin-ai の `customer-reply-writer` agent が注入)。go-live は cs-manager と origin-ai に同一値。未設定時 Core credential `cs_mcp_knowledge.token` にフォールバック。`INTERNAL_API_KEY`/`origin_ai_internal` とは別物 (流用禁止)。log 禁止。
 - `EC_MANAGER_API_URL`: ec-manager 外部 API base URL (不良率の分母=期間販売数と FBA 返品の取得元)。未設定時は /quality/defect-rate が「販売数取得不可」表示に縮退 (ページは落ちない)。
-- `EC_MANAGER_API_KEY`: ec-manager `/api/external/*` の `x-api-key` (暫定 env フォールバック)。正は Core credential `ec_manager_sales_api` field `api_key` の実行時取得 (5 分 TTL)。log 禁止。
+- `EC_MANAGER_API_KEY`: ec-manager `/api/external/*` の `x-api-key` (= ec-manager 側 `SALES_API_KEY` と同値)。コードは Core credential `ec_manager_sales_api` (5 分 TTL) → env の順で解決するが、**`ec_manager_sales_api` は Core 未登録のため実運用は env が正**の経路 (ec-manager 自身も同じく env 運用。2026-07-17 時点、ec-manager の鍵でも 404 を実測)。Core 登録が済めば env は撤去可。log 禁止。
 
 ### ユーザー認証 (OIDC リダイレクト方式 / origin-core IdP)
 - `NEXT_PUBLIC_CORE_AUTH_ENABLED`: `true` でユーザーログインゲート ON (未設定/`true`以外=OFF=現行素通り)。ビルド時インライン。
