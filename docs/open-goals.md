@@ -4,8 +4,12 @@
 
 ## 進行中
 
-### 不良発生率ライブ化（製品別×原因別・任意期間）
-- 宣言: 2026-07-17 / セッション 2b90ec03 / ブランチ cs-manager `claude/defect-rate-live` + ec-manager `claude/external-sales-units-api`
-- 内容: 分母=ec-manager 実売数（/api/external/sales-units 新設）、分子=クレーム+FBA返品（/api/external/customer-returns 新設）を案件ユニークに名寄せ、AI原因分類（複数原因・小分け防止）で /quality/defect-rate を実データ化
-- 設計契約: scratchpad defect-rate-design.md（セッション内）/ codex レビューはトム指示によりスキップ
-- 完了条件: 両APIの実応答確認・/quality/defect-rate 実表示確認・テスト/ビルド通過・両リポPR作成
+（なし）
+
+## 完了
+
+### 不良発生率ライブ化（製品別×原因別・任意期間） — 2026-07-17 本番反映済
+- PR: cs-manager #68 (機能) / #69 (小分け・二重分類の根治) / ec-manager #450 (外部API)
+- 反映内容: migration 2本適用、ec-manager Cloud Run デプロイ、Vercel env 追加、cs-manager デプロイ、cron 実稼働
+- 実測: 販売数 API と画面表示が一致 (20,987個)、原因ラベルの既存語彙再利用率 7%→93%
+- 申し送り: CS対応記録の product 未入力 (177件) / case_category の非正規値3件 / 詳細は各PR本文
