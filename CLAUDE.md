@@ -11,6 +11,7 @@ OriginAI マルチチャネル統合カスタマーサポート + AI改善サイ
 - `CORE_API_URL`: Core API endpoint
 - `CORE_CREDENTIAL_KEY`: per-tool scoped 入口鍵 (X-Internal-API-Key)。Core への outbound (credential / master 取得) の唯一の entry 鍵。接続鍵 Core 集約 Done-1 で旧 global `INTERNAL_API_KEY` を置換。inbound 検証 (origin-core→/api/ai/*) と self-loop (Server Action→internalFetch→/api/*) の共有内部鍵は Core `core_internal_shared` から実行時取得する (env 直読みなし)。log 禁止。
   - 旧 `INTERNAL_API_KEY` は runtime app code から完全除去済 (env からも除去)。CI/運用 scripts (`scripts/*`) と vendored `templates/*` のみ carve-out として残置。
+- `CORE_MAX_CONCURRENCY`: Core への同時リクエスト数上限 (未設定時 6)。`fetchWithEntryKeys` を通る全 Core 呼び出しに効くプロセス内セマフォ。429/503 は指数バックオフで最大 2 回リトライ (`Retry-After` 優先・上限 5 秒)。無制限並列で Core が 429 を返し製品解決がランダムに全滅する事故 (不良数が全製品 0) の再発防止。
 - `ORIGIN_AI_URL`: AI API endpoint
 - `ORIGIN_AI_API_KEY`: AI API key
 - `ORIGIN_AI_TOOL_NAME`: cs-manager
@@ -41,6 +42,8 @@ npm run dev
 - `/api/diag/core`: Check Core API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 - `/api/diag/ai`: Check AI API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 - `/api/diag/yahoo-egress`: Yahoo 固定IPプロキシ経路の疎通確認 (requires `X-Diag-Token`)。proxy 経由で Yahoo 公開ホストへ実リクエストし `{ok, viaProxy, yahooStatus}` を返す。fail-closed で 502。
+- `/api/diag/defect-rate`: 不良率集計の**数字だけ**を返す検証口 (requires `X-Diag-Token`)。ページと同一クエリ (`?period=&month=&granularity=&from=&to=&view=&basis=`) で `loadDefectRateData` を共用し、`{rows, totalCases, factoryCases, responsibility, salesUnitsTotal, salesOk, returnsOk, asinResolutionDegraded, unmapped, coreRequests, elapsedMs}` を返す。製品名・注文番号・PII は含めない。
+  - 本番の `/quality/defect-rate` は OIDC ゲート内で curl 検証できず「本番だけ不良数 0」を見逃した経緯への対処。**デプロイ後はこの口で `totalCases > 0` と `coreRequests` (数十以下が正常。数百なら N+1 退行) を必ず確認する。**
 
 ## 不良率 (/quality/defect-rate)
 - フィルタ: view (all | factory)、basis (occurred=発生日 | ordered=注文日)

@@ -215,8 +215,9 @@ export async function resolveSalesUnits(range: {
 export interface ResolvedAmazonAsins {
   ok: boolean;
   error?: string;
-  /** lookup 失敗でキャッシュ外 ASIN が未解決のまま残った (ok=true でも一部 ASIN が
-   *  製品未解決になり得る。工場向けエビデンス画面の縮退注記に使う) */
+  /** ASIN lookup 失敗でキャッシュ外 ASIN が未解決のまま残った、または 子 product の
+   *  by-ids 取得が一部チャンクで失敗した (ok=true でも一部 ASIN / 製品が未解決になり得る。
+   *  工場向けエビデンス画面の縮退注記に使う) */
   degraded: boolean;
   /** ASIN → 子 product_id */
   asinToChild: Map<string, string>;
@@ -328,14 +329,25 @@ export async function resolveAmazonAsins(asins: string[]): Promise<ResolvedAmazo
 
   const products = await resolveProductsByIds(Array.from(new Set(asinToChild.values())));
   const childToGroup = new Map<string, string>();
+  let productLookupDegraded = false;
   for (const [childId, p] of products) {
     if (p.resolved && p.group_id) childToGroup.set(childId, p.group_id);
+    // 子 product 取得が一時障害で欠けた分も縮退として surface する。
+    // (立てないと diag が asinResolutionDegraded:false を報告し、静かに製品未解決へ縮退する)
+    if (p.degraded) productLookupDegraded = true;
   }
+
+  // lookupError は「初回失敗→再試行成功」でも残るため、縮退時のみ載せる (既存の guard を踏襲)
+  const error = degraded && lookupError
+    ? lookupError
+    : productLookupDegraded
+      ? 'Core products/by-ids failed for some product ids'
+      : undefined;
 
   return {
     ok: true,
-    ...(degraded && lookupError ? { error: lookupError } : {}),
-    degraded,
+    ...(error ? { error } : {}),
+    degraded: degraded || productLookupDegraded,
     asinToChild,
     childToGroup,
   };
