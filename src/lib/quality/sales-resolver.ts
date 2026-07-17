@@ -215,38 +215,116 @@ export async function resolveSalesUnits(range: {
 export interface ResolvedAmazonAsins {
   ok: boolean;
   error?: string;
+  /** lookup 失敗でキャッシュ外 ASIN が未解決のまま残った (ok=true でも一部 ASIN が
+   *  製品未解決になり得る。工場向けエビデンス画面の縮退注記に使う) */
+  degraded: boolean;
   /** ASIN → 子 product_id */
   asinToChild: Map<string, string>;
   /** 子 product_id → 親 group_id (解決できたもののみ) */
   childToGroup: Map<string, string>;
 }
 
+/** ASIN→product_id はマスタ対応で事実上不変のため長め TTL (30分) */
+const ASIN_CACHE_TTL_MS = 30 * 60 * 1000;
+// 母集団はモール横断の全 ASIN で無上限成長し得るため FIFO で抑止 (salesCache と同じ流儀)
+const ASIN_CACHE_MAX_ENTRIES = 2000;
+/** Core lookup 失敗時の再試行までの待機 (1 回だけ再試行) */
+const ASIN_LOOKUP_RETRY_DELAY_MS = 300;
+
+interface AsinCacheEntry {
+  ts: number;
+  /** Core 未登録 ASIN (null) もキャッシュし、毎回の空振り lookup を防ぐ */
+  productId: string | null;
+}
+
+const asinCache = new Map<string, AsinCacheEntry>();
+
+/** 新鮮なキャッシュ命中のみ返す。期限切れは読み時に delete (成長抑止) */
+function getFreshAsinCacheEntry(asin: string): AsinCacheEntry | undefined {
+  const entry = asinCache.get(asin);
+  if (!entry) return undefined;
+  if (Date.now() - entry.ts >= ASIN_CACHE_TTL_MS) {
+    asinCache.delete(asin);
+    return undefined;
+  }
+  return entry;
+}
+
+function setAsinCacheEntry(asin: string, productId: string | null): void {
+  if (!asinCache.has(asin) && asinCache.size >= ASIN_CACHE_MAX_ENTRIES) {
+    const oldest = asinCache.keys().next().value;
+    if (oldest !== undefined) asinCache.delete(oldest);
+  }
+  asinCache.set(asin, { ts: Date.now(), productId });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * FBA 返品行の ASIN 群を 子 product_id / 親 group_id へ解決する
  * (sales-units に現れない ASIN も返品には現れ得るため、販売数解決とは独立に引く)。
- * 失敗は ok:false + 空 Map (該当返品は集計側で「未紐付け返品」として可視化される)。
+ *
+ * Core lookup-bulk の一時的な失敗 (429 等) でリロード毎に製品紐付けが揺れる問題への対処:
+ * - ASIN → productId をモジュールスコープでキャッシュ (TTL 30分)。キャッシュ新鮮な ASIN は
+ *   Core へ問い合わせない。未登録 ASIN (productId=null) もキャッシュする。
+ * - キャッシュ外の ASIN のみ Core へ問い合わせ、失敗時は 300ms 待って 1 回だけ再試行。
+ * - 2 回とも失敗した場合、その ASIN 群は未解決のまま (キャッシュはしない=次回また試す)。
+ *   ただしキャッシュ済み ASIN の結果はそのまま返す (degraded:true, ok は「全滅」時のみ false)。
  */
 export async function resolveAmazonAsins(asins: string[]): Promise<ResolvedAmazonAsins> {
   const uniq = Array.from(new Set(asins.map((a) => a.trim()).filter(Boolean)));
   if (uniq.length === 0) {
-    return { ok: true, asinToChild: new Map(), childToGroup: new Map() };
+    return { ok: true, degraded: false, asinToChild: new Map(), childToGroup: new Map() };
   }
 
-  let hits: Map<string, { productId: string }>;
-  try {
-    // 子ASIN は identifier_2 (identifier_1=親ASIN。Core SDK amazonAsinMap と同一契約)
-    hits = await lookupMallIdentifiersBulk(AMAZON_MALL_CODE, 'identifier_2', uniq);
-  } catch (e) {
+  const asinToChild = new Map<string, string>();
+  const needLookup: string[] = [];
+  for (const asin of uniq) {
+    const cached = getFreshAsinCacheEntry(asin);
+    if (cached) {
+      if (cached.productId) asinToChild.set(asin, cached.productId);
+      continue;
+    }
+    needLookup.push(asin);
+  }
+
+  let degraded = false;
+  let lookupError: string | undefined;
+  if (needLookup.length > 0) {
+    let hits: Map<string, { productId: string }> | null = null;
+    for (let attempt = 0; attempt < 2 && hits === null; attempt++) {
+      if (attempt > 0) await delay(ASIN_LOOKUP_RETRY_DELAY_MS);
+      try {
+        // 子ASIN は identifier_2 (identifier_1=親ASIN。Core SDK amazonAsinMap と同一契約)
+        hits = await lookupMallIdentifiersBulk(AMAZON_MALL_CODE, 'identifier_2', needLookup);
+      } catch (e) {
+        lookupError = `Core mall-identifiers lookup failed: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+
+    if (hits) {
+      for (const asin of needLookup) {
+        const hit = hits.get(asin);
+        setAsinCacheEntry(asin, hit ? hit.productId : null);
+        if (hit) asinToChild.set(asin, hit.productId);
+      }
+    } else {
+      degraded = true;
+    }
+  }
+
+  if (degraded && asinToChild.size === 0) {
+    // 全滅 (キャッシュ命中も無く lookup も失敗): 従来どおり ok:false
     return {
       ok: false,
-      error: `Core mall-identifiers lookup failed: ${e instanceof Error ? e.message : String(e)}`,
+      ...(lookupError ? { error: lookupError } : {}),
+      degraded: true,
       asinToChild: new Map(),
       childToGroup: new Map(),
     };
   }
-
-  const asinToChild = new Map<string, string>();
-  for (const [asin, hit] of hits) asinToChild.set(asin, hit.productId);
 
   const products = await resolveProductsByIds(Array.from(new Set(asinToChild.values())));
   const childToGroup = new Map<string, string>();
@@ -254,5 +332,11 @@ export async function resolveAmazonAsins(asins: string[]): Promise<ResolvedAmazo
     if (p.resolved && p.group_id) childToGroup.set(childId, p.group_id);
   }
 
-  return { ok: true, asinToChild, childToGroup };
+  return {
+    ok: true,
+    ...(degraded && lookupError ? { error: lookupError } : {}),
+    degraded,
+    asinToChild,
+    childToGroup,
+  };
 }

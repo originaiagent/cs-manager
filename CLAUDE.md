@@ -18,7 +18,7 @@ OriginAI マルチチャネル統合カスタマーサポート + AI改善サイ
 - `SUPABASE_SERVICE_ROLE_KEY`: Supabase service role key
 - `CRON_SECRET`: Vercel Cron Bearer token (`/api/cron/*` 認可)
 - `CS_MCP_KNOWLEDGE_TOKEN`: MCP `knowledge_search` ツール専用の静的 Bearer トークン (origin-ai の `customer-reply-writer` agent が注入)。go-live は cs-manager と origin-ai に同一値。未設定時 Core credential `cs_mcp_knowledge.token` にフォールバック。`INTERNAL_API_KEY`/`origin_ai_internal` とは別物 (流用禁止)。log 禁止。
-- `EC_MANAGER_API_URL`: ec-manager 外部 API base URL (不良率の分母=期間販売数と FBA 返品の取得元)。未設定時は /quality/defect-rate が「販売数取得不可」表示に縮退 (ページは落ちない)。
+- `EC_MANAGER_API_URL`: ec-manager 外部 API base URL (不良率の分母=期間販売数と FBA 返品の取得元)。利用エンドポイント: `/api/external/sales-units` (期間販売数)・`/api/external/customer-returns` (FBA返品)・`/api/external/order-dates` (Amazon注文日)。未設定時は /quality/defect-rate が「販売数取得不可」表示に縮退 (ページは落ちない)。
 - `EC_MANAGER_API_KEY`: ec-manager `/api/external/*` の `x-api-key` (= ec-manager 側 `SALES_API_KEY` と同値)。コードは Core credential `ec_manager_sales_api` (5 分 TTL) → env の順で解決するが、**`ec_manager_sales_api` は Core 未登録のため実運用は env が正**の経路 (ec-manager 自身も同じく env 運用。2026-07-17 時点、ec-manager の鍵でも 404 を実測)。Core 登録が済めば env は撤去可。log 禁止。
 
 ### ユーザー認証 (OIDC リダイレクト方式 / origin-core IdP)
@@ -41,6 +41,11 @@ npm run dev
 - `/api/diag/core`: Check Core API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 - `/api/diag/ai`: Check AI API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 - `/api/diag/yahoo-egress`: Yahoo 固定IPプロキシ経路の疎通確認 (requires `X-Diag-Token`)。proxy 経由で Yahoo 公開ホストへ実リクエストし `{ok, viaProxy, yahooStatus}` を返す。fail-closed で 502。
+
+## 不良率 (/quality/defect-rate)
+- フィルタ: view (all | factory)、basis (occurred=発生日 | ordered=注文日)
+- エクスポート: `/quality/defect-rate/export` (CSV、OIDC ゲート内)
+- Note: 製品改善タブは廃止済み
 
 ## Yahoo egress 固定IPプロキシ (送信元IP固定)
 - cs-manager → Yahoo API の通信だけを **固定グローバルIP `104.198.123.146`** (GCP asia-northeast1, 東京) 経由で出す。Vercel egress は毎回変わるが Yahoo 利用申請は固定IP登録を要求するため。
