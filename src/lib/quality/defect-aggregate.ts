@@ -22,7 +22,14 @@
  */
 
 import { DEFECT_TYPE_LABELS } from '@/lib/format';
-import { normalizeMajorCategory, type MajorCategory } from './defect-taxonomy';
+import {
+  normalizeMajorCategory,
+  resolveResponsibility,
+  resolveCaseResponsibility,
+  RESPONSIBILITIES,
+  type MajorCategory,
+  type Responsibility,
+} from './defect-taxonomy';
 
 // ---------------------------------------------------------------------------
 // 入力型
@@ -45,6 +52,8 @@ export interface DefectTicketInput {
   /** channel_meta から抽出した注文番号 (extractOrderNumberFromChannelMeta) */
   order_number: string | null;
   channel_code: string | null;
+  /** tickets.created_at (timestamptz ISO)。発生日の元値 (工場エビデンス化 C3a-2 で additive 追加) */
+  created_at?: string | null;
 }
 
 /** customer_service_records の不良系 1 行分 */
@@ -60,6 +69,8 @@ export interface DefectCsrInput {
   defect_type: string | null;
   order_number: string | null;
   order_channel: string | null;
+  /** customer_service_records.record_date (date, YYYY-MM-DD)。発生日の元値 (C3a-2 additive) */
+  record_date?: string | null;
 }
 
 /** FBA 返品のうち return-reasons.ts で不良系にマップされた 1 行分 */
@@ -69,6 +80,10 @@ export interface FbaDefectReturnInput {
   quantity: number | null;
   causeLabel: string;
   majorCategory: MajorCategory;
+  /** 返品日 (YYYY-MM-DD)。発生日の元値 (C3a-2 additive) */
+  returnDate?: string | null;
+  /** FBA 返品理由コード原文 (ReturnReasonMapping.fbaReason)。責任区分判定に使う (C3a-1) */
+  fbaReason?: string;
 }
 
 /** 製品解決情報 (呼び出し側で Core lookup 済み) */
@@ -92,8 +107,41 @@ export interface SalesUnitsInput {
 }
 
 // ---------------------------------------------------------------------------
+// 集計基準 (basis) — 工場エビデンス化 C3a-4
+//   occurred (既定): 発生日 (ticket 作成 / CSR 記録日 / FBA 返品日) が期間内の案件を数える
+//   ordered: 注文日が期間内の案件を数える (分母 = ec-manager 実売数の order_date 軸と整合)。
+//            注文日が解決できない案件は発生日でフォールバックし、件数を結果に含めて UI 注記する
+// ---------------------------------------------------------------------------
+
+export const DEFECT_BASES = ['occurred', 'ordered'] as const;
+export type DefectBasis = (typeof DEFECT_BASES)[number];
+
+// ---------------------------------------------------------------------------
 // 出力型
 // ---------------------------------------------------------------------------
+
+/** ドリルダウン / CSV エクスポート用の案件明細 (C3a-2) */
+export interface DefectCaseDetail {
+  /** 発生日 (ticket created / CSR record_date / FBA return_date の最早値, YYYY-MM-DD。入力に日付が無い場合 '') */
+  occurred_date: string;
+  /** 注文日 (C3a-3 の orderDates で解決した最早値。不明 null) */
+  order_date: string | null;
+  sources: ('ticket' | 'csr' | 'fba')[];
+  causes: { label: string; major: MajorCategory; responsibility: Responsibility; fbaReason?: string }[];
+  /** 案件代表の責任区分 (factory 優先 → logistics > listing > unverified) */
+  responsibility: Responsibility;
+  order_numbers: string[];
+  count: number;
+  /** リンク用 (あれば) */
+  ticket_id?: string;
+  /** リンク用 (あれば。複数 CSR 統合時は最初の 1 件) */
+  csr_id?: string;
+  /**
+   * 経路表示用のチャネルコード (ticket 由来 channels.code 優先、無ければ CSR の
+   * order_channel)。UI/CSV の「経路」列で 楽天/メール等 を出し分ける (C3b additive)
+   */
+  channel_code?: string;
+}
 
 export interface DefectAggRow {
   /** 親 group_id (親未解決の子は子 id をそのまま group 扱い = legacy フォールバック) */
@@ -114,6 +162,12 @@ export interface DefectAggRow {
   sales_units: number | null;
   /** total_cases / sales_units (sales_units が無い/0 なら null = UI で '-') */
   rate: number | null;
+  /** 責任区分 = factory の案件数 (C3a-2。total_cases と同じ count 換算) */
+  factory_cases: number;
+  /** 案件代表の責任区分 → 案件数 (合計 = total_cases) */
+  responsibility_breakdown: Record<Responsibility, number>;
+  /** ドリルダウン / エクスポート用の案件明細 (発生日降順) */
+  cases: DefectCaseDetail[];
 }
 
 export interface DefectAggregateResult {
@@ -130,6 +184,11 @@ export interface DefectAggregateResult {
     /** 製品未特定のまま残った ticket/CSR 案件数 */
     defectCases: number;
   };
+  /**
+   * basis='ordered' 時、注文日が解決できず発生日でフォールバックして数えた案件数
+   * (count 換算、UI 注記用)。basis='occurred' では常に 0。
+   */
+  orderedFallbackCases: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +223,24 @@ export function extractOrderNumberFromChannelMeta(channelMeta: unknown): string 
 }
 
 // ---------------------------------------------------------------------------
+// 日付正規化 (C3a-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * timestamptz ISO / date 文字列を JST の YYYY-MM-DD に正規化する (不正・空は null)。
+ * date 型由来の 'YYYY-MM-DD' はそのまま (record_date / returnDate は既に JST 日付)。
+ * timestamptz (tickets.created_at) は +9h して日付部を取る (period.ts と同じ JST 固定)。
+ */
+export function toJstYmd(v: string | null | undefined): string | null {
+  const t = v?.trim();
+  if (!t) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  const ms = Date.parse(t);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms + 9 * 3_600_000).toISOString().slice(0, 10);
+}
+
+// ---------------------------------------------------------------------------
 // 集計本体
 // ---------------------------------------------------------------------------
 
@@ -171,6 +248,8 @@ export function extractOrderNumberFromChannelMeta(channelMeta: unknown): string 
 interface CaseCauseInfo {
   major: MajorCategory;
   structured: boolean;
+  /** FBA 返品理由コード原文 (責任区分判定・明細表示用。C3a-1) */
+  fbaReason?: string;
 }
 
 /** 統合後の 1 案件 */
@@ -183,21 +262,77 @@ interface DefectCase {
   /** 案件数 (FBA 独立案件は quantity、その他は 1) */
   count: number;
   src: { tickets: number; csr: number; fba: number };
+  /** 発生日 (統合元レコードの最早値, YYYY-MM-DD。日付の無い legacy 入力は null) */
+  occurred: string | null;
+  /** リンク用 id (あれば) */
+  ticketId?: string;
+  csrId?: string;
+  /** 経路表示用チャネルコード (ticket channels.code 優先 / CSR order_channel フォールバック) */
+  channelCode?: string;
 }
 
 /** cause 追加 (ルール 4: 同一ラベルは structured (AI 等) の major を優先) */
-function addCause(c: DefectCase, label: string, major: MajorCategory, structured: boolean): void {
+function addCause(
+  c: DefectCase,
+  label: string,
+  major: MajorCategory,
+  structured: boolean,
+  fbaReason?: string,
+): void {
   const l = label.trim();
   if (!l) return;
   const existing = c.causes.get(l);
   if (!existing || (!existing.structured && structured)) {
-    c.causes.set(l, { major, structured });
+    // major を差し替える場合も、既に付いていた FBA 理由コードは失わない
+    c.causes.set(l, { major, structured, fbaReason: fbaReason ?? existing?.fbaReason });
+  } else if (fbaReason && !existing.fbaReason) {
+    // 同一ラベルが AI 側優先で残る場合も理由コードは保持 (責任区分は fbaReason 優先のため)
+    existing.fbaReason = fbaReason;
   }
+}
+
+/** 発生日を統合する (最早値を代表値とする) */
+function mergeOccurred(c: DefectCase, ymd: string | null): void {
+  if (!ymd) return;
+  if (!c.occurred || ymd < c.occurred) c.occurred = ymd;
 }
 
 function trimOrNull(v: string | null | undefined): string | null {
   const t = v?.trim();
   return t ? t : null;
+}
+
+/** 責任区分カウンタの初期値 (全区分 0) */
+function zeroResponsibilityBreakdown(): Record<Responsibility, number> {
+  const rec = {} as Record<Responsibility, number>;
+  for (const r of RESPONSIBILITIES) rec[r] = 0;
+  return rec;
+}
+
+/** 案件 → 明細 (DefectCaseDetail) 変換。責任区分は cause 単位で判定し案件代表値を導出 (C3a-1/2) */
+function toCaseDetail(c: DefectCase, orderDate: string | null): DefectCaseDetail {
+  const causes = Array.from(c.causes, ([label, info]) => ({
+    label,
+    major: info.major,
+    responsibility: resolveResponsibility({ majorCategory: info.major, fbaReason: info.fbaReason }),
+    ...(info.fbaReason ? { fbaReason: info.fbaReason } : {}),
+  }));
+  const sources: DefectCaseDetail['sources'] = [];
+  if (c.src.tickets > 0) sources.push('ticket');
+  if (c.src.csr > 0) sources.push('csr');
+  if (c.src.fba > 0) sources.push('fba');
+  return {
+    occurred_date: c.occurred ?? '',
+    order_date: orderDate,
+    sources,
+    causes,
+    responsibility: resolveCaseResponsibility(causes.map((x) => x.responsibility)),
+    order_numbers: Array.from(c.orderNumbers),
+    count: c.count,
+    ...(c.ticketId ? { ticket_id: c.ticketId } : {}),
+    ...(c.csrId ? { csr_id: c.csrId } : {}),
+    ...(c.channelCode ? { channel_code: c.channelCode } : {}),
+  };
 }
 
 interface RowAcc {
@@ -208,6 +343,8 @@ interface RowAcc {
   causeCounts: Map<string, number>;
   causeMajors: Map<string, CaseCauseInfo>;
   src: { tickets: number; csr: number; fba: number };
+  respBreakdown: Record<Responsibility, number>;
+  caseDetails: DefectCaseDetail[];
 }
 
 function newRowAcc(group: string, variationChildId: string | null, variationText: string | null): RowAcc {
@@ -219,10 +356,12 @@ function newRowAcc(group: string, variationChildId: string | null, variationText
     causeCounts: new Map(),
     causeMajors: new Map(),
     src: { tickets: 0, csr: 0, fba: 0 },
+    respBreakdown: zeroResponsibilityBreakdown(),
+    caseDetails: [],
   };
 }
 
-function addCaseToRow(acc: RowAcc, c: DefectCase): void {
+function addCaseToRow(acc: RowAcc, c: DefectCase, detail: DefectCaseDetail): void {
   acc.total += c.count;
   for (const [label, info] of c.causes) {
     // 1 案件内の同一 cause は Map 化で既に 1 回のみ → 案件数 (count) 分だけ加算
@@ -234,6 +373,8 @@ function addCaseToRow(acc: RowAcc, c: DefectCase): void {
   if (c.src.csr > 0) acc.src.csr += c.count;
   if (c.src.fba > 0) acc.src.fba += c.count;
   if (!acc.variationText && c.variationText) acc.variationText = c.variationText;
+  acc.respBreakdown[detail.responsibility] += c.count;
+  acc.caseDetails.push(detail);
 }
 
 function toRow(acc: RowAcc, salesUnits: number | null): DefectAggRow {
@@ -249,6 +390,10 @@ function toRow(acc: RowAcc, salesUnits: number | null): DefectAggRow {
     sources: acc.src,
     sales_units: salesUnits,
     rate: salesUnits != null && salesUnits > 0 ? acc.total / salesUnits : null,
+    factory_cases: acc.respBreakdown.factory,
+    responsibility_breakdown: acc.respBreakdown,
+    // ドリルダウンは新しい案件が上に来るよう発生日降順 (発生日不明 '' は最後)
+    cases: [...acc.caseDetails].sort((a, b) => b.occurred_date.localeCompare(a.occurred_date)),
   };
 }
 
@@ -270,8 +415,38 @@ export function aggregateDefectCases(input: {
   fbaReturns: FbaDefectReturnInput[];
   resolution: ProductResolutionInput;
   sales: SalesUnitsInput;
+  /** 集計基準 (C3a-4)。省略時 'occurred' = 現行どおり発生日基準 */
+  basis?: DefectBasis;
+  /**
+   * 基準日で絞る期間 (YYYY-MM-DD, 両端 inclusive, JST)。省略時はフィルタしない
+   * (呼び出し側が期間内のみ渡す現行方式との後方互換)。ordered 基準では
+   * 「取得は期間+前方余裕で広めに引き、ここで注文日基準に絞る」使い方を想定。
+   */
+  range?: { start: string; end: string } | null;
+  /** 注文番号 → 注文日 (YYYY-MM-DD)。order-dates.ts resolveOrderDates の結果 (C3a-3) */
+  orderDates?: ReadonlyMap<string, string>;
 }): DefectAggregateResult {
-  const { tickets, csrs, fbaReturns, resolution, sales } = input;
+  const { tickets, csrs, fbaReturns, resolution, sales, orderDates } = input;
+  const basis: DefectBasis = input.basis ?? 'occurred';
+  const range = input.range ?? null;
+
+  /** 基準日が期間内か (日付が取れない案件は fail-open で残す = 黙って落とさない) */
+  const withinRange = (basisDate: string | null): boolean => {
+    if (!range) return true;
+    if (!basisDate) return true;
+    return basisDate >= range.start && basisDate <= range.end;
+  };
+
+  /** 案件の注文日 = 注文番号のうち解決できた日付の最早値 (最初の注文) */
+  const orderDateOf = (orderNumbers: Iterable<string>): string | null => {
+    if (!orderDates) return null;
+    let min: string | null = null;
+    for (const on of orderNumbers) {
+      const d = orderDates.get(on);
+      if (d && (!min || d < min)) min = d;
+    }
+    return min;
+  };
 
   // 親未解決の子は子 id をそのまま group 扱い (sales-resolver と同一のフォールバック規則)
   const groupOf = (child: string | null): string | null =>
@@ -291,6 +466,9 @@ export function aggregateDefectCases(input: {
       orderNumbers: new Set(),
       count: 1,
       src: { tickets: 1, csr: 0, fba: 0 },
+      occurred: toJstYmd(t.created_at),
+      ticketId: t.id,
+      ...(trimOrNull(t.channel_code) ? { channelCode: trimOrNull(t.channel_code)! } : {}),
     };
     if (t.causes.length > 0) {
       for (const cause of t.causes) addCause(c, cause.label, cause.major, true);
@@ -321,9 +499,16 @@ export function aggregateDefectCases(input: {
         orderNumbers: new Set(),
         count: 1,
         src: { tickets: 0, csr: 1, fba: 0 },
+        occurred: null,
       };
       cases.push(target);
     }
+    // リンク用 csr_id は最初の 1 件。発生日は統合元の最早値
+    if (!target.csrId) target.csrId = r.id;
+    mergeOccurred(target, toJstYmd(r.record_date));
+    // 経路表示: ticket 由来チャネルが無い案件のみ CSR の注文チャネルで補完
+    const csrChannel = trimOrNull(r.order_channel);
+    if (!target.channelCode && csrChannel) target.channelCode = csrChannel;
     // 製品情報は CSR 優先 (手入力で親/バリエーションが正確)。CSR 側が空なら ticket 由来を維持
     const csrGroup = trimOrNull(r.product_id);
     if (csrGroup) target.groupId = csrGroup;
@@ -352,10 +537,12 @@ export function aggregateDefectCases(input: {
     const qty = Number.isFinite(qtyRaw) && qtyRaw >= 1 ? Math.floor(qtyRaw) : 1;
     const asin = trimOrNull(f.asin);
     const child = asin ? (resolution.asinToChild.get(asin) ?? null) : null;
+    const returnYmd = toJstYmd(f.returnDate);
     const matched = orderId ? orderIndex.get(orderId) : undefined;
     if (matched) {
       matched.src.fba += 1;
-      addCause(matched, f.causeLabel, f.majorCategory, true);
+      addCause(matched, f.causeLabel, f.majorCategory, true, f.fbaReason);
+      mergeOccurred(matched, returnYmd);
       // 製品未特定の案件 (実データでは CSR の product 未入力が大半) は
       // FBA 側の ASIN 解決で製品を補完する (案件は増やさず帰属先だけ確定)
       if (!matched.groupId && child) {
@@ -365,8 +552,11 @@ export function aggregateDefectCases(input: {
       continue;
     }
     if (!child) {
-      // ASIN 解決不可 → 行にせず「未紐付け返品」として可視化 (quantity 換算)
-      unmappedFbaReturns += qty;
+      // ASIN 解決不可 → 行にせず「未紐付け返品」として可視化 (quantity 換算)。
+      // range 指定時は案件と同じ基準日 (ordered なら注文日、無ければ返品日) で絞り整合させる
+      const basisDate =
+        basis === 'ordered' ? ((orderId ? orderDates?.get(orderId) : null) ?? returnYmd) : returnYmd;
+      if (withinRange(basisDate ?? null)) unmappedFbaReturns += qty;
       continue;
     }
     const c: DefectCase = {
@@ -377,11 +567,26 @@ export function aggregateDefectCases(input: {
       orderNumbers: new Set(orderId ? [orderId] : []),
       count: qty,
       src: { tickets: 0, csr: 0, fba: 1 },
+      occurred: returnYmd,
     };
-    addCause(c, f.causeLabel, f.majorCategory, true);
+    addCause(c, f.causeLabel, f.majorCategory, true, f.fbaReason);
     cases.push(c);
     // 同一注文の複数返品行 (別 SKU / 別 reason) は同一案件へ統合する
     if (orderId && !orderIndex.has(orderId)) orderIndex.set(orderId, c);
+  }
+
+  // --- 基準日フィルタ (C3a-4): 注文日 (ordered) / 発生日 (occurred) が期間内の案件のみ数える ---
+  let orderedFallbackCases = 0;
+  const countedCases: Array<{ c: DefectCase; orderDate: string | null }> = [];
+  for (const c of cases) {
+    const orderDate = orderDateOf(c.orderNumbers);
+    const basisDate = basis === 'ordered' ? (orderDate ?? c.occurred) : c.occurred;
+    if (!withinRange(basisDate)) continue;
+    if (basis === 'ordered' && !orderDate) {
+      // 注文日不明 → 発生日で代用した案件数 (UI 注記用)
+      orderedFallbackCases += c.count;
+    }
+    countedCases.push({ c, orderDate });
   }
 
   // --- 行化: 親 group 単位 + バリエーション単位 ---
@@ -392,17 +597,19 @@ export function aggregateDefectCases(input: {
   const variationKeyOf = (c: { variationChildId: string | null; variationText: string | null }) =>
     c.variationChildId ?? (c.variationText ? `text:${c.variationText}` : '(unknown)');
 
-  for (const c of cases) {
+  for (const { c, orderDate } of countedCases) {
     if (!c.groupId) {
       unresolvedDefectCases += c.count;
       continue;
     }
+    // 明細は 1 案件 1 オブジェクト (親行・バリエーション行で同一参照を共有)
+    const detail = toCaseDetail(c, orderDate);
     let p = parentAcc.get(c.groupId);
     if (!p) {
       p = newRowAcc(c.groupId, null, null);
       parentAcc.set(c.groupId, p);
     }
-    addCaseToRow(p, c);
+    addCaseToRow(p, c, detail);
     // 親行に variationText を混ぜない (addCaseToRow が補完するのはバリエーション行用)
     p.variationText = null;
 
@@ -412,7 +619,7 @@ export function aggregateDefectCases(input: {
       v = newRowAcc(c.groupId, c.variationChildId, c.variationText);
       variationAcc.set(vk, v);
     }
-    addCaseToRow(v, c);
+    addCaseToRow(v, c, detail);
   }
 
   // --- 販売数を紐付け + 不良ゼロの sales-only 行を補完 ---
@@ -458,5 +665,6 @@ export function aggregateDefectCases(input: {
       fbaReturns: unmappedFbaReturns,
       defectCases: unresolvedDefectCases,
     },
+    orderedFallbackCases,
   };
 }

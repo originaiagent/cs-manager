@@ -491,3 +491,314 @@ describe('extractOrderNumberFromChannelMeta', () => {
     expect(extractOrderNumberFromChannelMeta({ orderNumber: '   ' })).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 工場エビデンス化 (C3a-2/C3a-4): 責任区分・案件明細・集計基準
+// ---------------------------------------------------------------------------
+
+describe('aggregateDefectCases: 責任区分 (C3a-2)', () => {
+  it('案件代表の責任区分を count 換算で集計する (factory_cases / responsibility_breakdown)', () => {
+    const r = run({
+      tickets: [
+        ticket({
+          id: 't1',
+          product_id: 'child-1',
+          causes: [{ label: '水が出ない', major: 'function_defect' }], // factory
+        }),
+      ],
+      csrs: [
+        csr({ id: 'c1', product_id: 'group-A', defect_type: '自由記述の不良' }), // other→unverified
+      ],
+      fbaReturns: [
+        fba({
+          orderId: '503-1111111-1111111',
+          asin: 'B0TEST',
+          quantity: 2,
+          causeLabel: '配送中破損',
+          majorCategory: 'damaged',
+          fbaReason: 'DAMAGED_BY_CARRIER', // logistics (fbaReason 優先)
+        }),
+      ],
+      asinToChild: [['B0TEST', 'child-1']],
+      childToGroup: [['child-1', 'group-A']],
+    });
+    expect(r.parentRows).toHaveLength(1);
+    const row = r.parentRows[0];
+    expect(row.total_cases).toBe(4); // 1 + 1 + 2
+    expect(row.factory_cases).toBe(1);
+    expect(row.responsibility_breakdown).toEqual({
+      factory: 1,
+      logistics: 2, // quantity=2 の FBA 独立案件
+      listing: 0,
+      unverified: 1,
+    });
+    // 合計 = total_cases
+    const sum = Object.values(row.responsibility_breakdown).reduce((s, n) => s + n, 0);
+    expect(sum).toBe(row.total_cases);
+  });
+
+  it('1 案件に factory 原因が 1 つでもあれば案件代表は factory', () => {
+    const r = run({
+      tickets: [
+        ticket({
+          id: 't1',
+          product_id: 'child-1',
+          order_number: '503-2222222-2222222',
+          causes: [{ label: 'サイズが違う', major: 'size_mismatch' }], // listing
+        }),
+      ],
+      fbaReturns: [
+        fba({
+          orderId: '503-2222222-2222222',
+          asin: 'B0TEST',
+          causeLabel: '不良・故障',
+          majorCategory: 'function_defect',
+          fbaReason: 'DEFECTIVE', // factory
+        }),
+      ],
+      asinToChild: [['B0TEST', 'child-1']],
+      childToGroup: [['child-1', 'group-A']],
+    });
+    const row = r.parentRows[0];
+    expect(row.total_cases).toBe(1);
+    expect(row.factory_cases).toBe(1);
+    expect(row.cases[0].responsibility).toBe('factory');
+    expect(row.cases[0].causes.map((c) => c.responsibility).sort()).toEqual([
+      'factory',
+      'listing',
+    ]);
+  });
+
+  it('同一ラベルが AI 側優先で残っても FBA 理由コードは保持され責任区分に効く', () => {
+    const r = run({
+      tickets: [
+        ticket({
+          id: 't1',
+          product_id: 'child-1',
+          order_number: '503-3333333-3333333',
+          causes: [{ label: '配送中破損', major: 'damaged' }], // AI 由来 (structured)
+        }),
+      ],
+      fbaReturns: [
+        fba({
+          orderId: '503-3333333-3333333',
+          asin: 'B0TEST',
+          causeLabel: '配送中破損', // 同一ラベル
+          majorCategory: 'damaged',
+          fbaReason: 'DAMAGED_BY_CARRIER',
+        }),
+      ],
+      asinToChild: [['B0TEST', 'child-1']],
+      childToGroup: [['child-1', 'group-A']],
+    });
+    const detail = r.parentRows[0].cases[0];
+    expect(detail.causes).toHaveLength(1);
+    expect(detail.causes[0].fbaReason).toBe('DAMAGED_BY_CARRIER');
+    expect(detail.causes[0].responsibility).toBe('logistics'); // fbaReason 優先
+  });
+});
+
+describe('aggregateDefectCases: 案件明細 cases (C3a-2)', () => {
+  it('明細に発生日 (最早値)・ソース・注文番号・リンク id が入る', () => {
+    const r = run({
+      tickets: [
+        ticket({
+          id: 't1',
+          product_id: 'child-1',
+          order_number: '503-4444444-4444444',
+          created_at: '2026-07-10T03:00:00Z', // JST 2026-07-10
+          causes: [{ label: '水が出ない', major: 'function_defect' }],
+        }),
+      ],
+      csrs: [
+        csr({ id: 'c1', ticket_id: 't1', product_id: 'group-A', defect_type: '異音', record_date: '2026-07-08' }),
+      ],
+      fbaReturns: [
+        fba({ orderId: '503-4444444-4444444', asin: 'B0TEST', returnDate: '2026-07-12', fbaReason: 'DEFECTIVE' }),
+      ],
+      asinToChild: [['B0TEST', 'child-1']],
+      childToGroup: [['child-1', 'group-A']],
+    });
+    expect(r.parentRows[0].cases).toHaveLength(1);
+    const d = r.parentRows[0].cases[0];
+    expect(d.occurred_date).toBe('2026-07-08'); // 統合元の最早値 (CSR)
+    expect(d.order_date).toBeNull(); // orderDates 未指定
+    expect(d.sources).toEqual(['ticket', 'csr', 'fba']);
+    expect(d.order_numbers).toEqual(['503-4444444-4444444']);
+    expect(d.count).toBe(1);
+    expect(d.ticket_id).toBe('t1');
+    expect(d.csr_id).toBe('c1');
+    // バリエーション行にも同じ明細が入る
+    expect(r.variationRows[0].cases).toHaveLength(1);
+  });
+
+  it('created_at (UTC) は JST 日付へ変換される (日跨ぎ)', () => {
+    const r = run({
+      tickets: [
+        ticket({ id: 't1', product_id: 'child-1', created_at: '2026-07-09T16:00:00Z' }), // JST 7/10 1:00
+      ],
+      childToGroup: [['child-1', 'group-A']],
+    });
+    expect(r.parentRows[0].cases[0].occurred_date).toBe('2026-07-10');
+  });
+
+  it('orderDates を渡すと明細の order_date に解決結果 (最早値) が入る', () => {
+    const r = aggregateDefectCases({
+      tickets: [
+        ticket({
+          id: 't1',
+          product_id: 'child-1',
+          order_number: '249-1111111-1111111',
+          created_at: '2026-07-10T00:00:00Z',
+        }),
+      ],
+      csrs: [],
+      fbaReturns: [],
+      resolution: { asinToChild: new Map(), childToGroup: new Map([['child-1', 'group-A']]) },
+      sales: NO_SALES,
+      orderDates: new Map([['249-1111111-1111111', '2026-06-20']]),
+    });
+    expect(r.parentRows[0].cases[0].order_date).toBe('2026-06-20');
+  });
+
+  it('明細は発生日降順に並ぶ', () => {
+    const r = run({
+      csrs: [
+        csr({ id: 'c1', product_id: 'group-A', defect_type: '不良', record_date: '2026-07-01' }),
+        csr({ id: 'c2', product_id: 'group-A', defect_type: '不良', record_date: '2026-07-05' }),
+        csr({ id: 'c3', product_id: 'group-A', defect_type: '不良', record_date: '2026-07-03' }),
+      ],
+    });
+    expect(r.parentRows[0].cases.map((c) => c.occurred_date)).toEqual([
+      '2026-07-05',
+      '2026-07-03',
+      '2026-07-01',
+    ]);
+  });
+
+  it('日付なしの legacy 入力は occurred_date が空文字 (後方互換・案件は落とさない)', () => {
+    const r = run({
+      tickets: [ticket({ id: 't1', product_id: 'child-1' })],
+      childToGroup: [['child-1', 'group-A']],
+    });
+    expect(r.parentRows[0].cases[0].occurred_date).toBe('');
+    expect(r.parentRows[0].total_cases).toBe(1);
+  });
+
+  it('sales-only 行は明細が空で責任区分は全ゼロ', () => {
+    const r = run({ sales: salesOf({ groups: [['group-B', 50]] }) });
+    expect(r.parentRows[0].cases).toEqual([]);
+    expect(r.parentRows[0].factory_cases).toBe(0);
+  });
+});
+
+describe('aggregateDefectCases: 集計基準 basis (C3a-4)', () => {
+  const rangeJul = { start: '2026-07-01', end: '2026-07-31' };
+
+  it('range 未指定は現行どおり全件 (後方互換)', () => {
+    const r = run({
+      csrs: [csr({ id: 'c1', product_id: 'group-A', defect_type: '不良', record_date: '2026-05-01' })],
+    });
+    expect(r.parentRows[0].total_cases).toBe(1);
+    expect(r.orderedFallbackCases).toBe(0);
+  });
+
+  it("basis='occurred': 発生日が期間外の案件を数えない", () => {
+    const r = aggregateDefectCases({
+      tickets: [],
+      csrs: [
+        csr({ id: 'c1', product_id: 'group-A', defect_type: '不良', record_date: '2026-07-10' }),
+        csr({ id: 'c2', product_id: 'group-A', defect_type: '不良', record_date: '2026-08-05' }), // 期間外
+      ],
+      fbaReturns: [],
+      resolution: { asinToChild: new Map(), childToGroup: new Map() },
+      sales: NO_SALES,
+      basis: 'occurred',
+      range: rangeJul,
+    });
+    expect(r.parentRows[0].total_cases).toBe(1);
+  });
+
+  it("basis='ordered': 注文日が期間内の案件を数える (発生日が期間外でも)", () => {
+    const r = aggregateDefectCases({
+      tickets: [],
+      csrs: [
+        // 発生 8月 / 注文 7月 → ordered では数える
+        csr({
+          id: 'c1',
+          product_id: 'group-A',
+          defect_type: '不良',
+          record_date: '2026-08-05',
+          order_number: '408672-20260715-0123456789',
+        }),
+        // 発生 7月 / 注文 6月 → ordered では数えない
+        csr({
+          id: 'c2',
+          product_id: 'group-A',
+          defect_type: '不良',
+          record_date: '2026-07-10',
+          order_number: '408672-20260615-0123456789',
+        }),
+      ],
+      fbaReturns: [],
+      resolution: { asinToChild: new Map(), childToGroup: new Map() },
+      sales: NO_SALES,
+      basis: 'ordered',
+      range: rangeJul,
+      orderDates: new Map([
+        ['408672-20260715-0123456789', '2026-07-15'],
+        ['408672-20260615-0123456789', '2026-06-15'],
+      ]),
+    });
+    expect(r.parentRows[0].total_cases).toBe(1);
+    expect(r.parentRows[0].cases[0].order_date).toBe('2026-07-15');
+    expect(r.orderedFallbackCases).toBe(0);
+  });
+
+  it("basis='ordered': 注文日不明は発生日でフォールバックし件数を返す", () => {
+    const r = aggregateDefectCases({
+      tickets: [],
+      csrs: [
+        csr({ id: 'c1', product_id: 'group-A', defect_type: '不良', record_date: '2026-07-10' }), // 注文番号なし
+        csr({ id: 'c2', product_id: 'group-A', defect_type: '不良', record_date: '2026-06-10' }), // 期間外→除外
+      ],
+      fbaReturns: [],
+      resolution: { asinToChild: new Map(), childToGroup: new Map() },
+      sales: NO_SALES,
+      basis: 'ordered',
+      range: rangeJul,
+      orderDates: new Map(),
+    });
+    expect(r.parentRows[0].total_cases).toBe(1);
+    expect(r.orderedFallbackCases).toBe(1); // c1 のみ (c2 はフォールバック日も期間外)
+  });
+
+  it('日付が全く取れない案件は fail-open で数える (黙って落とさない)', () => {
+    const r = aggregateDefectCases({
+      tickets: [ticket({ id: 't1', product_id: 'child-1' })], // created_at なし
+      csrs: [],
+      fbaReturns: [],
+      resolution: { asinToChild: new Map(), childToGroup: new Map([['child-1', 'group-A']]) },
+      sales: NO_SALES,
+      basis: 'occurred',
+      range: rangeJul,
+    });
+    expect(r.parentRows[0].total_cases).toBe(1);
+  });
+
+  it('未紐付け FBA 返品 (unmapped.fbaReturns) も基準日で絞られる', () => {
+    const r = aggregateDefectCases({
+      tickets: [],
+      csrs: [],
+      fbaReturns: [
+        fba({ orderId: '503-1111111-1111111', asin: 'B0UNKNOWN', quantity: 2, returnDate: '2026-07-10' }),
+        fba({ orderId: '503-2222222-2222222', asin: 'B0UNKNOWN', quantity: 3, returnDate: '2026-08-10' }), // 期間外
+      ],
+      resolution: { asinToChild: new Map(), childToGroup: new Map() },
+      sales: NO_SALES,
+      basis: 'occurred',
+      range: rangeJul,
+    });
+    expect(r.unmapped.fbaReturns).toBe(2);
+  });
+});

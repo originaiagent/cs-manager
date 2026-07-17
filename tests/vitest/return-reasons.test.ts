@@ -12,18 +12,21 @@ import {
 } from '@/lib/quality/return-reasons';
 
 describe('mapReturnReason', () => {
-  it('不良系の代表コードをマップする', () => {
+  it('不良系の代表コードをマップする (fbaReason に理由コード原文を保持: C3a-1)', () => {
     expect(mapReturnReason('DEFECTIVE')).toEqual({
       majorCategory: 'function_defect',
       causeLabel: '不良・故障',
+      fbaReason: 'DEFECTIVE',
     });
     expect(mapReturnReason('MISSING_PARTS')).toEqual({
       majorCategory: 'missing_part',
       causeLabel: '部品欠品',
+      fbaReason: 'MISSING_PARTS',
     });
     expect(mapReturnReason('NOT_AS_DESCRIBED')).toEqual({
       majorCategory: 'description_mismatch',
       causeLabel: '説明と相違',
+      fbaReason: 'NOT_AS_DESCRIBED',
     });
     expect(mapReturnReason('DAMAGED_BY_FC')?.majorCategory).toBe('damaged');
     expect(mapReturnReason('DAMAGED_BY_CARRIER')?.majorCategory).toBe('damaged');
@@ -31,9 +34,10 @@ describe('mapReturnReason', () => {
     expect(mapReturnReason('QUALITY_UNACCEPTABLE')?.causeLabel).toBe('品質不良');
   });
 
-  it('大小文字・前後空白を正規化して照合する', () => {
+  it('大小文字・前後空白を正規化して照合する (fbaReason は正規化済み大文字)', () => {
     expect(mapReturnReason('defective')?.majorCategory).toBe('function_defect');
     expect(mapReturnReason('  DEFECTIVE  ')?.majorCategory).toBe('function_defect');
+    expect(mapReturnReason('defective')?.fbaReason).toBe('DEFECTIVE');
   });
 
   it('顧客都合コードは undefined (不良集計から除外)', () => {
