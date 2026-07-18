@@ -10,6 +10,8 @@
  *     レスポンス/ブラウザ/ログへ一切露出しない。鍵未配布 (key/baseUrl 未設定) → fail。
  *   - 非同期: /api/embed/run は 202 queued を返す。result は runs ポーリングで取得する
  *     (gemma 生成は数十秒。タイムアウトで切らないよう deadline=150s, transient retry)。
+ *     deadline/interval は呼出側が {@link RunEmbedOneshotArgs.deadlineMs}/{@link RunEmbedOneshotArgs.intervalMs}
+ *     で additive に上書きできる (省略時は現行の 150s/2s 既定不変。cron 背景処理等の短い予算向け)。
  *   - エラーは安定ラベル (reason) のみ返す。stack / env / raw input / run 本文を出さない。
  *   - server-only: クライアントバンドル混入を防ぐためモジュール先頭で window を弾く
  *     (`server-only` パッケージ非導入のため runtime guard で相当を担保)。
@@ -42,18 +44,35 @@ export interface RunEmbedOneshotArgs {
   targetId: string;
   /** oneshot への入力。origin-ai 側 skill の input_text_keys / lookup args で消費される。 */
   input: Record<string, unknown>;
+  /**
+   * ポーリング締切 (ms)。additive オプション、省略時は既定 {@link DEFAULT_POLL_DEADLINE_MS}
+   * (= 現行 150s 不変)。cron 背景処理等、cs-reply:draft より短い予算で回したい呼出側が指定する。
+   */
+  deadlineMs?: number;
+  /**
+   * ポーリング間隔 (ms)。additive オプション、省略時は既定 {@link DEFAULT_POLL_INTERVAL_MS}
+   * (= 現行 2s 不変。テスト時のみ env `EMBED_RUN_POLL_INTERVAL_MS` による短縮も従来どおり有効)。
+   */
+  intervalMs?: number;
 }
 
-const POLL_DEADLINE_MS = 150_000;
+/** 既定 poll deadline (ms)。呼出側が {@link RunEmbedOneshotArgs.deadlineMs} を省略した時の値。 */
+export const DEFAULT_POLL_DEADLINE_MS = 150_000;
+/** 既定 poll interval (ms)。呼出側が {@link RunEmbedOneshotArgs.intervalMs} を省略した時の値。 */
+export const DEFAULT_POLL_INTERVAL_MS = 2_000;
+
+const POLL_DEADLINE_MS = DEFAULT_POLL_DEADLINE_MS;
 
 // 個別 HTTP リクエスト上限 (codex code review): per-request timeout が無いと、hung な接続で
 //   POLL_DEADLINE_MS が「fetch が返った後」にしか効かず、安定 reason へ fail-closed できず
 //   Vercel 側の function kill 待ちになる。各 fetch を AbortSignal.timeout で個別に中断する。
 const REQUEST_TIMEOUT_MS = 15_000;
 
-// poll 間隔は既定 2s。テスト時のみ EMBED_RUN_POLL_INTERVAL_MS で短縮 (本番未設定=2s)。
-function pollIntervalMs(): number {
-  return Number(process.env.EMBED_RUN_POLL_INTERVAL_MS) || 2000;
+// poll 間隔は既定 2s (呼出側指定 > EMBED_RUN_POLL_INTERVAL_MS > DEFAULT_POLL_INTERVAL_MS の優先順)。
+// テスト時は EMBED_RUN_POLL_INTERVAL_MS で短縮 (本番未設定時は呼出側指定 or 既定 2s)。
+function pollIntervalMs(explicitMs?: number): number {
+  if (typeof explicitMs === 'number' && explicitMs > 0) return explicitMs;
+  return Number(process.env.EMBED_RUN_POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS;
 }
 
 /**
@@ -101,10 +120,10 @@ export async function runEmbedOneshotAndPoll(
   }
 
   // 2. poll GET /api/embed/runs/{run_id} until completed/failed/deadline。
-  const deadline = Date.now() + POLL_DEADLINE_MS;
+  const deadline = Date.now() + (args.deadlineMs && args.deadlineMs > 0 ? args.deadlineMs : POLL_DEADLINE_MS);
   let notFound = 0;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, pollIntervalMs()));
+    await new Promise((r) => setTimeout(r, pollIntervalMs(args.intervalMs)));
     let pollResp: Response;
     try {
       pollResp = await fetch(`${baseUrl}/api/embed/runs/${runId}`, {

@@ -142,7 +142,13 @@ const TICKET = {
   classify_attempts: 1,
 };
 
+// このテストスイートはクレーム RPC / 予算ガードのループ挙動 (AI 呼出経路とは独立) を見るため、
+// 明示的に legacy 経路 (invokeChat 直呼び) へ固定する。embed 経路 (既定) のテストは
+// defect-classify-embed.test.ts に分離した。
+const OLD_CLASSIFY_VIA_EMBED = process.env.CLASSIFY_VIA_EMBED;
+
 beforeEach(() => {
+  process.env.CLASSIFY_VIA_EMBED = 'false';
   invokeChatMock.mockReset();
   invokeChatMock.mockResolvedValue({
     ok: true,
@@ -162,6 +168,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // process.env.X = undefined は文字列 "undefined" になってしまうため、元が未設定なら delete する。
+  if (OLD_CLASSIFY_VIA_EMBED === undefined) {
+    delete process.env.CLASSIFY_VIA_EMBED;
+  } else {
+    process.env.CLASSIFY_VIA_EMBED = OLD_CLASSIFY_VIA_EMBED;
+  }
   vi.restoreAllMocks(); // Date.now spy 等を戻す
 });
 

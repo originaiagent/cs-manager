@@ -12,7 +12,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { runEmbedOneshotAndPoll } from '@/lib/embed/run-oneshot';
+import {
+  runEmbedOneshotAndPoll,
+  DEFAULT_POLL_DEADLINE_MS,
+  DEFAULT_POLL_INTERVAL_MS,
+} from '@/lib/embed/run-oneshot';
 
 const BASE = 'https://origin-ai.example.com';
 
@@ -115,5 +119,37 @@ describe('runEmbedOneshotAndPoll', () => {
     const out = await runEmbedOneshotAndPoll(ARGS);
     expect(out.ok).toBe(false);
     expect(out.reason).toBe('embed_run_failed');
+  });
+});
+
+describe('runEmbedOneshotAndPoll: deadline/interval オプション (additive・既定不変)', () => {
+  it('既定の poll deadline/interval は 150s/2s のまま変わらない', () => {
+    expect(DEFAULT_POLL_DEADLINE_MS).toBe(150_000);
+    expect(DEFAULT_POLL_INTERVAL_MS).toBe(2_000);
+  });
+
+  it('deadlineMs を短く指定すると、その締切で poll deadline に倒れる (呼出側オプションが効く)', async () => {
+    // 常に running を返し続ける fetch (=既定 150s ならまず終わらない) に対し、
+    // deadlineMs=5ms を指定すると短い締切で embed_run_poll_deadline に倒れることを確認する。
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/embed/run')) return res(202, { run_id: 'run-1' });
+      return res(200, { status: 'running' });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const out = await runEmbedOneshotAndPoll({ ...ARGS, deadlineMs: 5, intervalMs: 1 });
+    expect(out.ok).toBe(false);
+    expect(out.reason).toBe('embed_run_poll_deadline');
+  });
+
+  it('intervalMs 省略時は EMBED_RUN_POLL_INTERVAL_MS (既存のテスト短縮手段) が従来どおり効く', async () => {
+    // ARGS に intervalMs を渡さない呼出は、既存の env 短縮 (beforeEach で 1ms 設定済) が
+    // そのまま有効であること (回帰確認)。
+    mockFetchSequence([
+      res(200, { status: 'queued' }),
+      res(200, { status: 'completed', result: { reply_draft: 'ok', needs_escalation: false } }),
+    ]);
+    const out = await runEmbedOneshotAndPoll(ARGS);
+    expect(out.ok).toBe(true);
   });
 });

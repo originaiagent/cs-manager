@@ -36,11 +36,20 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { invokeChat } from '@/lib/ai-client';
 import { maskText, resolveRagInternalKey } from '@/lib/first-response/mask';
 import { resolveProductsByIds } from '@/lib/product-resolver';
+import { runEmbedOneshotAndPoll } from '@/lib/embed/run-oneshot';
 import {
   MAJOR_CATEGORIES,
   normalizeMajorCategory,
   type MajorCategory,
 } from './defect-taxonomy';
+import {
+  classifyViaEmbed,
+  validateEmbedCauseArray,
+  DEFECT_CLASSIFY_EMBED_SLUG,
+  DEFECT_CLASSIFY_EMBED_TARGET_TYPE,
+  CLASSIFY_EMBED_POLL_DEADLINE_MS,
+  CLASSIFY_EMBED_POLL_INTERVAL_MS,
+} from './classify-embed';
 
 /** tickets.case_category の許可値 (format.ts CASE_CATEGORY_LABELS と同一キー) */
 export const CASE_CATEGORIES = ['defect', 'shipping', 'usage', 'other'] as const;
@@ -180,11 +189,42 @@ export interface DefectClassifyResult {
 }
 
 /**
+ * origin-ai embed (`cs:classify-defect`) の run.result を fail-closed で検証する。
+ *
+ * 旧経路の extractClassification (trim/lowercase 正規化・不正要素の黙殺) とは別物:
+ * category は許可 enum に完全一致、causes は配列必須で 0〜3 件・各要素とも enum 完全一致
+ * (不正要素・重複は黙って除外せず結果全体を invalid にする)。単体テスト対象の純関数。
+ */
+export function validateEmbedDefectResult(
+  result: unknown,
+): { category: CaseCategory; causes: DefectCause[] } | null {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const obj = result as Record<string, unknown>;
+
+  const category = obj.category;
+  if (typeof category !== 'string' || !(CASE_CATEGORIES as readonly string[]).includes(category)) {
+    return null;
+  }
+
+  const causes = validateEmbedCauseArray(obj.causes);
+  if (causes === null) return null;
+
+  // defect 以外は causes を持たせない (旧経路 parseCandidate と同じ意味論。形状自体は検証済)。
+  return { category: category as CaseCategory, causes: category === 'defect' ? causes : [] };
+}
+
+/**
  * 問い合わせ文 (subject + 最初の inbound 本文) を masked 化し、origin-ai に分類させる。
+ * ticketId: embed 経路の target_id (実在保証済のチケット UUID)。
  * existingLabels: 同一製品の既存 cause_label 一覧 (小分け防止のためプロンプトに提示。PII 非含有の症状ラベル)。
+ *
+ * ロールバックスイッチ (G2, env `CLASSIFY_VIA_EMBED`): 既定は origin-ai embed oneshot
+ * (`cs:classify-defect`) 経由。'false' で現行 invokeChat 直呼び経路 (本文JSON regexフォールバック込み)
+ * へ即時復帰する。
  */
 export async function classifyDefectInquiry(
   internalKey: string,
+  ticketId: string,
   rawSubject: string | null,
   rawBody: string,
   existingLabels: string[],
@@ -195,7 +235,7 @@ export async function classifyDefectInquiry(
     return { ok: false, maskFailed: false, error: 'empty inquiry text' };
   }
 
-  // (1) PII マスク (外部送信前に必須。失敗は fail-closed)
+  // (1) PII マスク (外部送信前に必須。失敗は fail-closed。embed/legacy 共通)
   let masked: string;
   try {
     const m = await maskText(internalKey, rawParts);
@@ -215,11 +255,37 @@ export async function classifyDefectInquiry(
     };
   }
 
-  // (2) masked テキストのみを origin-ai に渡す (skill 名は rag_config 駆動)
   const labels = existingLabels
     .map((l) => l.trim())
     .filter(Boolean)
     .slice(0, MAX_EXISTING_LABELS);
+
+  // (2a) embed 経路 (既定): origin-ai oneshot `cs:classify-defect` を1本起動。
+  //   本文JSON regexフォールバックは新経路では使わない (fail-closed 形状検証のみ)。
+  if (classifyViaEmbed()) {
+    const run = await runEmbedOneshotAndPoll({
+      slug: DEFECT_CLASSIFY_EMBED_SLUG,
+      targetType: DEFECT_CLASSIFY_EMBED_TARGET_TYPE,
+      targetId: ticketId,
+      input: {
+        inquiry_masked: masked,
+        existing_labels: labels,
+        categories: CASE_CATEGORIES,
+      },
+      deadlineMs: CLASSIFY_EMBED_POLL_DEADLINE_MS,
+      intervalMs: CLASSIFY_EMBED_POLL_INTERVAL_MS,
+    });
+    if (!run.ok || !run.result) {
+      return { ok: false, maskFailed: false, error: run.reason ?? 'embed_run_failed' };
+    }
+    const validated = validateEmbedDefectResult(run.result);
+    if (!validated) {
+      return { ok: false, maskFailed: false, error: 'embed_result_invalid_shape' };
+    }
+    return { ok: true, category: validated.category, causes: validated.causes, maskFailed: false };
+  }
+
+  // (2b) legacy 経路 (CLASSIFY_VIA_EMBED=false): 現行 invokeChat 直呼び (変更なし)。
   const message = [
     `[skill: ${classifySkill}] 次の顧客問い合わせ(個人情報マスク済)を分類してください。`,
     `- category: ${CASE_CATEGORIES.join(' / ')} から1つ`,
@@ -493,6 +559,7 @@ export async function runDefectClassification(
 
     const cls = await classifyDefectInquiry(
       internalKey,
+      ticket.id,
       ticket.subject,
       inboundBody,
       existingLabels,
