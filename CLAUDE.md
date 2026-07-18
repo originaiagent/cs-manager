@@ -64,7 +64,7 @@ npm run dev
   - 1 サイクルあたり最大送信件数 20 件 (Vercel タイムアウト対策)
 - `/api/cron/classify-defects`: 15分間隔（`*/15 * * * *`）。未分類 tickets (case_category is null) を古い順に最大 20 件 AI 分類 (PII マスク済テキストのみ origin-ai へ)。defect 時は `ticket_defect_causes` に複数原因 (正規化ラベル+大分類) を保存。skill 名は rag_config `defect_classify_skill` (default `cs_defect_classify`)。
   - 認可: 上記同パターン。前提: migration `20260717000000_defect_causes.sql` 適用済みであること。
-- `/api/cron/classify-return-comments`: 30分間隔（`*/30 * * * *`）。FBA返品 (ec-manager `/api/external/customer-returns`) の直近35日分のうち `customerComments` が非空の行を対象に、原子的クレーム RPC (`claim_fba_return_classify_batch`) 経由で最大20件AI分類し、症状ラベル (例:「水が出ない」) を `fba_return_symptoms` へ保存する。skill 名は tickets 分類と同一の rag_config `defect_classify_skill` (ラベル語彙分裂防止のため共有)。**顧客コメント原文は PII マスク後のみ origin-ai へ送信し、原文はどのテーブル・ログにも保存しない。**
+- `/api/cron/classify-return-comments`: **日次 05:30 JST**（`30 20 * * *` = 20:30 UTC）。上流の FBA 返品取込 (ec-manager GH Actions `fba-returns-daily.yml` が 05:00 JST 実行) の 30 分後に走らせる。**上流が日次更新のため、それより高頻度に回しても新規データは無く無駄**（当初 30 分間隔で入れたがトム指摘により是正 2026-07-19）。AI 費用は実行回数ではなく未分類コメント件数で決まるため、日次化してもコストは変わらない。FBA返品 (ec-manager `/api/external/customer-returns`) の直近35日分のうち `customerComments` が非空の行を対象に、原子的クレーム RPC (`claim_fba_return_classify_batch`) 経由で最大20件AI分類し、症状ラベル (例:「水が出ない」) を `fba_return_symptoms` へ保存する。skill 名は tickets 分類と同一の rag_config `defect_classify_skill` (ラベル語彙分裂防止のため共有)。**顧客コメント原文は PII マスク後のみ origin-ai へ送信し、原文はどのテーブル・ログにも保存しない。**
   - 認可: 上記同パターン。前提: migration `20260718000000_fba_return_symptoms.sql` 適用済みであること。
 
 ## DB Schema (Phase 1.1+)
