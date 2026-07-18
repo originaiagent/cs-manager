@@ -48,9 +48,9 @@ export interface EmbedLabelledCause {
  * causes/symptoms 配列の fail-closed 形状検証 (embed 経路専用)。
  *
  * - 配列必須 (欠落・非配列は invalid)。0〜3 件のみ許容 (4件以上は invalid)。
- * - 各要素: object であること / label は非空文字列 (trim はしない = 空白のみの文字列は
- *   「非空文字列」として通すが、それは呼出元の origin-ai 側 output_schema が保証する範囲。
- *   ここでは trim による救済・正規化を行わないという指示に従う)。
+ * - 各要素: object であること / label は非空文字列。空白のみの文字列 (例 "   ") は
+ *   trim 後に空になるため invalid 判定する (判定にのみ trim を使う。値の整形・保存への
+ *   trim 適用=救済はしない。保存される label は常に原文のまま = fail-closed 維持)。
  * - major_category は許可 enum に完全一致 (大文字小文字・空白の正規化なし)。
  * - label の重複 (同一値の再掲) は invalid。
  * - 1つでも不正な要素があれば黙って除外せず、配列全体を invalid (null) にする。
@@ -66,7 +66,9 @@ export function validateEmbedCauseArray(value: unknown): EmbedLabelledCause[] | 
     const obj = item as Record<string, unknown>;
 
     const label = obj.label;
-    if (typeof label !== 'string' || label.length === 0) return null;
+    // 判定にのみ trim を使う (空白のみの label を invalid にする)。保存する label 自体は
+    // 原文のまま (trim 後の値に差し替える救済はしない = fail-closed 維持)。
+    if (typeof label !== 'string' || label.trim().length === 0) return null;
     if (seen.has(label)) return null; // 重複要素は不正扱い (黙殺しない)
 
     const majorCategory = obj.major_category;

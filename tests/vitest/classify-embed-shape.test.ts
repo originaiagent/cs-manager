@@ -55,6 +55,19 @@ describe('validateEmbedCauseArray (共通形状検証)', () => {
     expect(validateEmbedCauseArray([{ label: '', major_category: 'other' }])).toBeNull();
   });
 
+  it('label が空白のみ ("   " 等) は invalid (trim せず非空文字列として救済しない・codex CONCERN回帰)', () => {
+    expect(validateEmbedCauseArray([{ label: '   ', major_category: 'other' }])).toBeNull();
+    expect(validateEmbedCauseArray([{ label: '　', major_category: 'other' }])).toBeNull(); // 全角スペース
+    expect(validateEmbedCauseArray([{ label: '\t\n', major_category: 'other' }])).toBeNull();
+  });
+
+  it('label は判定にのみ trim を使い、保存値は原文のまま (前後空白ありの有効文字列は trim せず通す)', () => {
+    // 判定 (trim().length===0 か) と保存値 (label そのまま) を混同しないことの確認。
+    // 前後に空白があっても非空白文字を含む label は invalid にしない (救済的な trim 保存もしない)。
+    const got = validateEmbedCauseArray([{ label: ' 水が出ない ', major_category: 'function_defect' }]);
+    expect(got).toEqual([{ label: ' 水が出ない ', major_category: 'function_defect' }]);
+  });
+
   it('label / major_category 欠落要素は invalid', () => {
     expect(validateEmbedCauseArray([{ major_category: 'other' }])).toBeNull();
     expect(validateEmbedCauseArray([{ label: '割れ' }])).toBeNull();
