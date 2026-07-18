@@ -1,7 +1,7 @@
 /**
  * 不良エビデンス CSV エクスポート — 工場エビデンス化 C3b-3
  *
- * GET /quality/defect-rate/export?period=&month=&granularity=&from=&to=&view=&basis=
+ * GET /quality/defect-rate/export?period=&month=&granularity=&from=&to=&basis=
  * (不良率ページと同一クエリパラメータ。データ取得・集計も同一ローダを共用)
  *
  * 認可: このルートは /api/* ではないため middleware.ts の USER ゲート対象
@@ -35,7 +35,6 @@ export async function GET(req: NextRequest): Promise<Response> {
     granularity: sp.get('granularity') ?? undefined,
     from: sp.get('from') ?? undefined,
     to: sp.get('to') ?? undefined,
-    view: sp.get('view') ?? undefined,
     basis: sp.get('basis') ?? undefined,
   });
 
@@ -47,11 +46,10 @@ export async function GET(req: NextRequest): Promise<Response> {
   }));
   const csv = buildDefectEvidenceCsv({
     rows: csvRows,
-    view: data.view,
     basis: data.basis,
   });
 
-  const filename = `defect-evidence_${data.range.start}_${data.range.end}_${data.view}.csv`;
+  const filename = `defect-evidence_${data.range.start}_${data.range.end}.csv`;
   return new Response(UTF8_BOM + csv, {
     status: 200,
     headers: {

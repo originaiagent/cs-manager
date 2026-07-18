@@ -40,6 +40,7 @@ export interface CustomerReturnRow {
   detailedDisposition: string | null;
   status: string | null;
   productName: string | null;
+  customerComments: string | null;
 }
 
 export interface FetchSalesUnitsResult {
@@ -219,4 +220,55 @@ export async function fetchOrderDates(orderIds: string[]): Promise<FetchOrderDat
     }
   }
   return { ok: true, dates: merged };
+}
+
+// ---------------------------------------------------------------------------
+// 楽天注文明細 (rakuten-order-items) — 症状ハンドオフ (製品未特定率削減)
+// ---------------------------------------------------------------------------
+
+/** rakuten-order-items の 1 回のリクエストに載せる最大注文番号数 (ec-manager 側の上限 500) */
+export const RAKUTEN_ORDER_ITEMS_CHUNK_SIZE = 500;
+
+/** 楽天注文番号 → 商品管理番号/SKU管理番号 の 1 行 (1 注文が複数行を持ち得る) */
+export interface RakutenOrderItemRow {
+  orderNumber: string;
+  itemManagementNumber: string | null;
+  skuManagementNumber: string | null;
+}
+
+export interface FetchRakutenOrderItemsResult {
+  ok: boolean;
+  rows?: RakutenOrderItemRow[];
+  error?: string;
+}
+
+/**
+ * 楽天注文番号 → 商品管理番号/SKU管理番号 を取得する (注文番号から製品を特定するための素材)。
+ * ec-manager `/api/external/rakuten-order-items` を叩く。500 件ずつチャンクし、
+ * 1 チャンクでも失敗したら全体を ok:false にする (fetchOrderDates と同じ流儀。
+ * 部分成功を成功扱いにしない)。ヒットしない注文番号は rows に現れない。
+ */
+export async function fetchRakutenOrderItems(
+  orderNumbers: string[],
+): Promise<FetchRakutenOrderItemsResult> {
+  const unique = Array.from(
+    new Set(orderNumbers.map((v) => v.trim()).filter((v) => v !== '')),
+  );
+  if (unique.length === 0) return { ok: true, rows: [] };
+
+  const merged: RakutenOrderItemRow[] = [];
+  for (let i = 0; i < unique.length; i += RAKUTEN_ORDER_ITEMS_CHUNK_SIZE) {
+    const chunk = unique.slice(i, i + RAKUTEN_ORDER_ITEMS_CHUNK_SIZE);
+    const res = await requestEcManager('/api/external/rakuten-order-items', {
+      orderNumbers: chunk.join(','),
+    });
+    if (!res.ok) return { ok: false, error: res.error };
+
+    const body = res.json as { rows?: unknown };
+    if (!body || !Array.isArray(body.rows)) {
+      return { ok: false, error: 'Unexpected response shape (rows missing)' };
+    }
+    merged.push(...(body.rows as RakutenOrderItemRow[]));
+  }
+  return { ok: true, rows: merged };
 }
