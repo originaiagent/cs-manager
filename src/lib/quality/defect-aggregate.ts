@@ -22,14 +22,7 @@
  */
 
 import { DEFECT_TYPE_LABELS } from '@/lib/format';
-import {
-  normalizeMajorCategory,
-  resolveResponsibility,
-  resolveCaseResponsibility,
-  RESPONSIBILITIES,
-  type MajorCategory,
-  type Responsibility,
-} from './defect-taxonomy';
+import { normalizeMajorCategory, type MajorCategory } from './defect-taxonomy';
 
 // ---------------------------------------------------------------------------
 // 入力型
@@ -82,8 +75,13 @@ export interface FbaDefectReturnInput {
   majorCategory: MajorCategory;
   /** 返品日 (YYYY-MM-DD)。発生日の元値 (C3a-2 additive) */
   returnDate?: string | null;
-  /** FBA 返品理由コード原文 (ReturnReasonMapping.fbaReason)。責任区分判定に使う (C3a-1) */
+  /**
+   * FBA 返品理由コード原文 (ReturnReasonMapping.fbaReason)。CSV エクスポートの
+   * 「FBA理由コード」列にのみ使う (C3a-1。責任区分判定は撤去済み)。
+   */
   fbaReason?: string;
+  /** 顧客コメントAI分類による症状ラベル (あれば理由コード由来の粗いラベルより優先) */
+  symptoms?: Array<{ label: string; major: MajorCategory }>;
 }
 
 /** 製品解決情報 (呼び出し側で Core lookup 済み) */
@@ -92,6 +90,8 @@ export interface ProductResolutionInput {
   asinToChild: Map<string, string>;
   /** 子 product_id → 親 group_id (未解決の子は含めない = 子 id を group 扱いにフォールバック) */
   childToGroup: Map<string, string>;
+  /** 注文番号 → 製品 (order-products.ts。product_id 未入力の案件を注文番号から補完する) */
+  orderProducts?: ReadonlyMap<string, { childId: string | null; groupId: string }>;
 }
 
 /** 期間販売数 (sales-resolver.ts の解決結果) */
@@ -127,9 +127,7 @@ export interface DefectCaseDetail {
   /** 注文日 (C3a-3 の orderDates で解決した最早値。不明 null) */
   order_date: string | null;
   sources: ('ticket' | 'csr' | 'fba')[];
-  causes: { label: string; major: MajorCategory; responsibility: Responsibility; fbaReason?: string }[];
-  /** 案件代表の責任区分 (factory 優先 → logistics > listing > unverified) */
-  responsibility: Responsibility;
+  causes: { label: string; major: MajorCategory; fbaReason?: string }[];
   order_numbers: string[];
   count: number;
   /** リンク用 (あれば) */
@@ -162,10 +160,6 @@ export interface DefectAggRow {
   sales_units: number | null;
   /** total_cases / sales_units (sales_units が無い/0 なら null = UI で '-') */
   rate: number | null;
-  /** 責任区分 = factory の案件数 (C3a-2。total_cases と同じ count 換算) */
-  factory_cases: number;
-  /** 案件代表の責任区分 → 案件数 (合計 = total_cases) */
-  responsibility_breakdown: Record<Responsibility, number>;
   /** ドリルダウン / エクスポート用の案件明細 (発生日降順) */
   cases: DefectCaseDetail[];
 }
@@ -248,7 +242,7 @@ export function toJstYmd(v: string | null | undefined): string | null {
 interface CaseCauseInfo {
   major: MajorCategory;
   structured: boolean;
-  /** FBA 返品理由コード原文 (責任区分判定・明細表示用。C3a-1) */
+  /** FBA 返品理由コード原文 (CSV の FBA理由コード列表示用。C3a-1) */
   fbaReason?: string;
 }
 
@@ -286,7 +280,7 @@ function addCause(
     // major を差し替える場合も、既に付いていた FBA 理由コードは失わない
     c.causes.set(l, { major, structured, fbaReason: fbaReason ?? existing?.fbaReason });
   } else if (fbaReason && !existing.fbaReason) {
-    // 同一ラベルが AI 側優先で残る場合も理由コードは保持 (責任区分は fbaReason 優先のため)
+    // 同一ラベルが AI 側優先で残る場合も理由コードは保持 (CSV の FBA理由コード列表示用)
     existing.fbaReason = fbaReason;
   }
 }
@@ -302,19 +296,11 @@ function trimOrNull(v: string | null | undefined): string | null {
   return t ? t : null;
 }
 
-/** 責任区分カウンタの初期値 (全区分 0) */
-function zeroResponsibilityBreakdown(): Record<Responsibility, number> {
-  const rec = {} as Record<Responsibility, number>;
-  for (const r of RESPONSIBILITIES) rec[r] = 0;
-  return rec;
-}
-
-/** 案件 → 明細 (DefectCaseDetail) 変換。責任区分は cause 単位で判定し案件代表値を導出 (C3a-1/2) */
+/** 案件 → 明細 (DefectCaseDetail) 変換 */
 function toCaseDetail(c: DefectCase, orderDate: string | null): DefectCaseDetail {
   const causes = Array.from(c.causes, ([label, info]) => ({
     label,
     major: info.major,
-    responsibility: resolveResponsibility({ majorCategory: info.major, fbaReason: info.fbaReason }),
     ...(info.fbaReason ? { fbaReason: info.fbaReason } : {}),
   }));
   const sources: DefectCaseDetail['sources'] = [];
@@ -326,7 +312,6 @@ function toCaseDetail(c: DefectCase, orderDate: string | null): DefectCaseDetail
     order_date: orderDate,
     sources,
     causes,
-    responsibility: resolveCaseResponsibility(causes.map((x) => x.responsibility)),
     order_numbers: Array.from(c.orderNumbers),
     count: c.count,
     ...(c.ticketId ? { ticket_id: c.ticketId } : {}),
@@ -343,7 +328,6 @@ interface RowAcc {
   causeCounts: Map<string, number>;
   causeMajors: Map<string, CaseCauseInfo>;
   src: { tickets: number; csr: number; fba: number };
-  respBreakdown: Record<Responsibility, number>;
   caseDetails: DefectCaseDetail[];
 }
 
@@ -356,7 +340,6 @@ function newRowAcc(group: string, variationChildId: string | null, variationText
     causeCounts: new Map(),
     causeMajors: new Map(),
     src: { tickets: 0, csr: 0, fba: 0 },
-    respBreakdown: zeroResponsibilityBreakdown(),
     caseDetails: [],
   };
 }
@@ -373,7 +356,6 @@ function addCaseToRow(acc: RowAcc, c: DefectCase, detail: DefectCaseDetail): voi
   if (c.src.csr > 0) acc.src.csr += c.count;
   if (c.src.fba > 0) acc.src.fba += c.count;
   if (!acc.variationText && c.variationText) acc.variationText = c.variationText;
-  acc.respBreakdown[detail.responsibility] += c.count;
   acc.caseDetails.push(detail);
 }
 
@@ -390,8 +372,6 @@ function toRow(acc: RowAcc, salesUnits: number | null): DefectAggRow {
     sources: acc.src,
     sales_units: salesUnits,
     rate: salesUnits != null && salesUnits > 0 ? acc.total / salesUnits : null,
-    factory_cases: acc.respBreakdown.factory,
-    responsibility_breakdown: acc.respBreakdown,
     // ドリルダウンは新しい案件が上に来るよう発生日降順 (発生日不明 '' は最後)
     cases: [...acc.caseDetails].sort((a, b) => b.occurred_date.localeCompare(a.occurred_date)),
   };
@@ -530,6 +510,20 @@ export function aggregateDefectCases(input: {
       if (!orderIndex.has(on)) orderIndex.set(on, c);
     }
   }
+  /**
+   * FBA 返品 1 行分の cause を案件へ追加する。
+   * symptoms (顧客コメントAI分類) があればそれぞれを個別の cause として追加し、理由コード由来の
+   * 粗いラベル (causeLabel/majorCategory) は使わない。無ければ従来どおり単一ラベルを追加する
+   * (fbaReason は CSV の FBA理由コード列表示用のため、いずれの経路でも保持する)。
+   */
+  const addFbaCauses = (c: DefectCase, f: FbaDefectReturnInput): void => {
+    if (f.symptoms && f.symptoms.length > 0) {
+      for (const s of f.symptoms) addCause(c, s.label, s.major, true, f.fbaReason);
+      return;
+    }
+    addCause(c, f.causeLabel, f.majorCategory, true, f.fbaReason);
+  };
+
   let unmappedFbaReturns = 0;
   for (const f of fbaReturns) {
     const orderId = trimOrNull(f.orderId);
@@ -541,7 +535,7 @@ export function aggregateDefectCases(input: {
     const matched = orderId ? orderIndex.get(orderId) : undefined;
     if (matched) {
       matched.src.fba += 1;
-      addCause(matched, f.causeLabel, f.majorCategory, true, f.fbaReason);
+      addFbaCauses(matched, f);
       mergeOccurred(matched, returnYmd);
       // 製品未特定の案件 (実データでは CSR の product 未入力が大半) は
       // FBA 側の ASIN 解決で製品を補完する (案件は増やさず帰属先だけ確定)
@@ -569,10 +563,26 @@ export function aggregateDefectCases(input: {
       src: { tickets: 0, csr: 0, fba: 1 },
       occurred: returnYmd,
     };
-    addCause(c, f.causeLabel, f.majorCategory, true, f.fbaReason);
+    addFbaCauses(c, f);
     cases.push(c);
     // 同一注文の複数返品行 (別 SKU / 別 reason) は同一案件へ統合する
     if (orderId && !orderIndex.has(orderId)) orderIndex.set(orderId, c);
+  }
+
+  // --- 注文番号→製品の補完 (症状ハンドオフ): product_id 未入力の案件を注文番号から解決する ---
+  // ここまでの統合・件数はすべて確定済み。groupId が未確定の案件だけを対象に、
+  // 案件が持つ注文番号のうち最初に解決できた製品を採用する (件数は変えず帰属先だけ埋める)。
+  if (resolution.orderProducts) {
+    for (const c of cases) {
+      if (c.groupId) continue;
+      for (const on of c.orderNumbers) {
+        const hit = resolution.orderProducts.get(on);
+        if (!hit) continue;
+        c.groupId = hit.groupId;
+        if (!c.variationChildId && hit.childId) c.variationChildId = hit.childId;
+        break;
+      }
+    }
   }
 
   // --- 基準日フィルタ (C3a-4): 注文日 (ordered) / 発生日 (occurred) が期間内の案件のみ数える ---

@@ -1,31 +1,22 @@
 'use client';
 
 /**
- * 不良率テーブル (client component) — 工場エビデンス化 C3b-2
+ * 不良率テーブル (client component) — 症状別ハンドオフ (defect-symptom-handoff)
  *
- * サマリ行クリックで案件ドリルダウン (原因別内訳 + 案件一覧) を展開する。
+ * トム承認済みモック仕様: 製品ごとに tbody を分け、症状別の内訳をクリック不要で
+ * 常時表示する (旧: クリックで開くドリルダウンの中に隠れていた)。
+ * 案件一覧 (個別案件の明細) は既存どおりクリック展開のドリルダウンとして残す。
  * データ取得・名寄せは server (page.tsx → defect-rate-data.ts) が行い、
- * ここには serializable な行 VM だけが渡る。view (全体/工場起因のみ) の再計算は
- * 純関数 (defect-view.ts) を server/CSV と共用して定義ズレを防ぐ。
+ * ここには serializable な行 VM だけが渡る。
  * 顧客名・問い合わせ本文は表示しない (案件詳細はリンク先で見る)。
  */
 
-import { Fragment, useState } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { formatPercent } from '@/lib/format';
-import {
-  RESPONSIBILITY_LABELS,
-  resolveCaseResponsibility,
-  type Responsibility,
-} from '@/lib/quality/defect-taxonomy';
 import type { DefectAggRow, DefectBasis, DefectCaseDetail } from '@/lib/quality/defect-aggregate';
-import {
-  applyViewToRow,
-  caseRouteLabel,
-  topCauses,
-  type DefectView,
-} from '@/lib/quality/defect-view';
+import { caseRouteLabel, topCauses } from '@/lib/quality/defect-view';
 
 /** サマリ 1 行分の VM (server で名寄せ済み。serializable) */
 export interface DefectRateTableRow {
@@ -39,46 +30,26 @@ export interface DefectRateTableRow {
 interface Props {
   rows: DefectRateTableRow[];
   granularity: 'parent' | 'variation';
-  view: DefectView;
   basis: DefectBasis;
-  /** 不良率の閾値 (view 適用後の率で超過判定) */
+  /** 不良率の閾値 (超過時に行を強調) */
   threshold: number;
 }
 
-/** 責任区分バッジの配色 */
-const RESPONSIBILITY_BADGE_CLASS: Record<Responsibility, string> = {
-  factory: 'bg-rose-50 text-rose-700 border-rose-200',
-  logistics: 'bg-sky-50 text-sky-700 border-sky-200',
-  listing: 'bg-amber-50 text-amber-700 border-amber-200',
-  unverified: 'bg-gray-50 text-gray-600 border-gray-200',
-};
+/** 症状行の常時表示上限 (症状ラベルは AI 自由出力で無制限になり得るため頭打ちする) */
+const MAX_VISIBLE_CAUSES = 8;
 
-function ResponsibilityBadge({ value }: { value: Responsibility }) {
-  return (
-    <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] ${RESPONSIBILITY_BADGE_CLASS[value]}`}
-    >
-      {RESPONSIBILITY_LABELS[value]}
-    </span>
-  );
+/** 製品内の症状件数の最大値 (バー幅の相対計算用。症状無しは 0) */
+function maxCauseCount(breakdown: Record<string, number>): number {
+  const values = Object.values(breakdown);
+  return values.length > 0 ? Math.max(...values) : 0;
 }
 
-/** 案件明細集合のソース別件数 (view 適用後の内訳(t/c/f) 表示用に再計算) */
-function sourcesOfCases(cases: readonly DefectCaseDetail[]): {
-  tickets: number;
-  csr: number;
-  fba: number;
-} {
-  const acc = { tickets: 0, csr: 0, fba: 0 };
-  for (const c of cases) {
-    if (c.sources.includes('ticket')) acc.tickets += c.count;
-    if (c.sources.includes('csr')) acc.csr += c.count;
-    if (c.sources.includes('fba')) acc.fba += c.count;
-  }
-  return acc;
+/** 症状件数の合計 (breakdown は 1 案件が複数症状を持つと重複計上され得る) */
+function sumCauseCount(breakdown: Record<string, number>): number {
+  return Object.values(breakdown).reduce((sum, n) => sum + n, 0);
 }
 
-export default function DefectRateTable({ rows, granularity, view, basis, threshold }: Props) {
+export default function DefectRateTable({ rows, granularity, basis, threshold }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const toggle = (key: string) => {
@@ -90,254 +61,260 @@ export default function DefectRateTable({ rows, granularity, view, basis, thresh
     });
   };
 
-  const colCount = granularity === 'variation' ? 8 : 7;
+  const colCount = granularity === 'variation' ? 6 : 5;
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
-      <table className="w-full text-sm" data-testid="defect-rate-table">
-        <thead className="bg-gray-50 text-xs text-gray-500">
+    <div
+      className="overflow-x-auto rounded-xl border border-gray-200 bg-white"
+      data-testid="defect-rate-table-container"
+    >
+      <table
+        className="w-full min-w-[760px] text-[16px] leading-[1.6] text-gray-700"
+        data-testid="defect-rate-table"
+      >
+        <thead className="bg-gray-50">
           <tr>
-            <th className="text-left px-4 py-2.5 font-medium">製品</th>
+            <th className="px-4 py-2.5 text-left text-[13px] font-semibold tracking-[0.06em] text-gray-400">
+              製品 / 症状
+            </th>
             {granularity === 'variation' && (
-              <th className="text-left px-4 py-2.5 font-medium">バリエーション</th>
+              <th className="px-4 py-2.5 text-left text-[13px] font-semibold tracking-[0.06em] text-gray-400">
+                バリエーション
+              </th>
             )}
-            <th className="text-right px-4 py-2.5 font-medium">販売数</th>
-            <th className="text-right px-4 py-2.5 font-medium">不良数</th>
-            <th className="text-right px-4 py-2.5 font-medium">不良率</th>
-            <th className="text-right px-4 py-2.5 font-medium">工場起因</th>
-            <th className="text-left px-4 py-2.5 font-medium">主な原因</th>
-            <th className="text-right px-4 py-2.5 font-medium">内訳(t/c/f)</th>
+            <th className="px-4 py-2.5 text-right text-[13px] font-semibold tracking-[0.06em] text-gray-400">
+              期間販売数
+            </th>
+            <th className="px-4 py-2.5 text-right text-[13px] font-semibold tracking-[0.06em] text-gray-400">
+              不良数
+            </th>
+            <th className="px-4 py-2.5 text-right text-[13px] font-semibold tracking-[0.06em] text-gray-400">
+              不良率
+            </th>
+            <th className="hidden w-[190px] px-4 py-2.5 text-left text-[13px] font-semibold tracking-[0.06em] text-gray-400 sm:table-cell">
+              症状の内訳
+            </th>
           </tr>
         </thead>
-        <tbody>
-          {rows.map(({ rowKey, productName, variationLabel, row }) => {
-            const adjusted = applyViewToRow(row, view);
-            const over =
-              adjusted.rate != null && (row.sales_units ?? 0) > 0 && adjusted.rate >= threshold;
-            const factoryRate =
-              row.sales_units != null && row.sales_units > 0
-                ? row.factory_cases / row.sales_units
-                : null;
-            const top2 = topCauses(adjusted.cause_breakdown, 2);
-            const src = sourcesOfCases(adjusted.cases);
-            const isOpen = expanded.has(rowKey);
-            const expandable = adjusted.cases.length > 0;
-            return (
-              <Fragment key={rowKey}>
-                  <tr
-                    data-testid="defect-rate-row"
-                    onClick={expandable ? () => toggle(rowKey) : undefined}
-                    className={`border-t border-gray-100 ${over ? 'bg-rose-50/40' : ''} ${
-                      expandable ? 'cursor-pointer hover:bg-gray-50/60' : ''
-                    }`}
-                  >
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-1.5">
-                        {expandable ? (
-                          isOpen ? (
-                            <ChevronDown size={13} className="text-gray-400 shrink-0" />
-                          ) : (
-                            <ChevronRight size={13} className="text-gray-400 shrink-0" />
-                          )
-                        ) : (
-                          <span className="w-[13px] shrink-0" />
-                        )}
-                        <div>
-                          <div className="font-medium text-gray-900">{productName}</div>
-                          <div className="text-[10px] text-gray-400 mt-0.5">
-                            product_id: {row.group_id}
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-                    {granularity === 'variation' && (
-                      <td className="px-4 py-3 text-gray-700">{variationLabel}</td>
+        {rows.map(({ rowKey, productName, variationLabel, row }) => {
+          const over =
+            row.rate != null && (row.sales_units ?? 0) > 0 && row.rate >= threshold;
+          const isOpen = expanded.has(rowKey);
+          const expandable = row.cases.length > 0;
+          const allCauses = topCauses(row.cause_breakdown, Number.MAX_SAFE_INTEGER);
+          const causes = allCauses.slice(0, MAX_VISIBLE_CAUSES);
+          const hiddenCauseCount = allCauses.length - causes.length;
+          const maxCount = maxCauseCount(row.cause_breakdown);
+          const causeSum = sumCauseCount(row.cause_breakdown);
+          const showMismatchNote = row.total_cases > 0 && causeSum !== row.total_cases;
+          const noDefects = row.total_cases === 0;
+
+          return (
+            <tbody
+              key={rowKey}
+              className={`border-t border-gray-200 ${over ? 'bg-rose-50/40' : ''}`}
+              data-testid="defect-rate-product-group"
+            >
+              {/* tr.product: 製品サマリ行 */}
+              <tr
+                data-testid="defect-rate-row"
+                onClick={expandable ? () => toggle(rowKey) : undefined}
+                className={expandable ? 'cursor-pointer hover:bg-gray-50/60' : ''}
+              >
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-1.5">
+                    {expandable ? (
+                      isOpen ? (
+                        <ChevronDown size={14} className="shrink-0 text-gray-400" />
+                      ) : (
+                        <ChevronRight size={14} className="shrink-0 text-gray-400" />
+                      )
+                    ) : (
+                      <span className="w-[14px] shrink-0" />
                     )}
-                    <td className="px-4 py-3 text-right tabular-nums text-gray-700">
-                      {row.sales_units != null ? row.sales_units.toLocaleString() : '-'}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-gray-700">
-                      {adjusted.total_cases}
-                    </td>
-                    <td
-                      className={`px-4 py-3 text-right tabular-nums font-semibold ${
-                        over ? 'text-rose-700' : 'text-gray-700'
-                      }`}
-                    >
-                      {adjusted.rate != null ? formatPercent(adjusted.rate, 2) : '-'}
-                      {over && (
-                        <span className="ml-1 text-[10px] font-medium uppercase tracking-wide">
-                          超過
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-gray-700">
-                      {row.factory_cases}
-                      <span className="ml-1 text-[10px] text-gray-400">
-                        ({factoryRate != null ? formatPercent(factoryRate, 2) : '-'})
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-gray-600">
-                      {top2.length > 0
-                        ? top2.map((c) => `${c.label}${c.count}`).join('・')
-                        : '-'}
-                    </td>
-                    <td className="px-4 py-3 text-right tabular-nums text-[11px] text-gray-400">
-                      {src.tickets}/{src.csr}/{src.fba}
-                    </td>
-                  </tr>
-                {isOpen && expandable && (
-                  <CaseDrilldown
-                    colCount={colCount}
-                    adjustedCases={adjusted.cases}
-                    causeBreakdown={adjusted.cause_breakdown}
-                    salesUnits={row.sales_units}
-                    basis={basis}
-                  />
+                    <div>
+                      <div className="text-[18px] font-semibold text-gray-900">{productName}</div>
+                      <div className="mt-0.5 font-mono text-[12px] text-gray-400">
+                        product_id: {row.group_id}
+                      </div>
+                    </div>
+                  </div>
+                </td>
+                {granularity === 'variation' && (
+                  <td className="px-4 py-3 text-gray-700">{variationLabel}</td>
                 )}
-              </Fragment>
-            );
-          })}
-        </tbody>
+                <td className="px-4 py-3 text-right text-[17px] tabular-nums text-gray-700">
+                  {row.sales_units != null ? row.sales_units.toLocaleString() : '-'}
+                </td>
+                <td className="px-4 py-3 text-right text-[17px] font-semibold tabular-nums text-gray-900">
+                  {row.total_cases.toLocaleString()}
+                </td>
+                <td
+                  className={`px-4 py-3 text-right text-[22px] font-bold tabular-nums ${
+                    over ? 'text-rose-700' : noDefects ? 'text-gray-400' : 'text-gray-900'
+                  }`}
+                >
+                  {row.rate != null ? formatPercent(row.rate, 2) : '-'}
+                  {over && (
+                    <span className="ml-2 inline-flex items-center rounded-full bg-rose-600 px-2 py-0.5 align-middle text-[11px] font-semibold uppercase tracking-wide text-white">
+                      超過
+                    </span>
+                  )}
+                </td>
+                <td className="hidden px-4 py-3 sm:table-cell" />
+              </tr>
+
+              {/* tr.cause × N: 症状行 (クリック不要・常時表示) */}
+              {noDefects ? (
+                <tr>
+                  <td colSpan={colCount} className="px-4 py-3 text-[15px] text-gray-400">
+                    この期間に不良の報告なし
+                  </td>
+                </tr>
+              ) : (
+                <>
+                  {causes.map(({ label, count }) => {
+                    const rate =
+                      row.sales_units != null && row.sales_units > 0
+                        ? count / row.sales_units
+                        : null;
+                    const barPct = maxCount > 0 ? Math.max((count / maxCount) * 100, 3) : 0;
+                    return (
+                      <tr key={label} data-testid="defect-rate-cause-row">
+                        <td className="py-1.5 pl-8 pr-4">
+                          <span className="font-mono text-[15px] text-gray-400">┗</span>{' '}
+                          <span className="text-[16px] text-gray-700">{label}</span>
+                        </td>
+                        {granularity === 'variation' && <td className="px-4 py-1.5" />}
+                        <td className="px-4 py-1.5" />
+                        <td className="px-4 py-1.5 text-right text-[16px] tabular-nums text-gray-700">
+                          {count.toLocaleString()}
+                        </td>
+                        <td className="px-4 py-1.5 text-right text-[16px] font-semibold tabular-nums text-gray-700">
+                          {rate != null ? formatPercent(rate, 2) : '-'}
+                        </td>
+                        <td className="hidden px-4 py-1.5 sm:table-cell">
+                          <div className="h-[9px] w-full rounded-full bg-gray-100">
+                            <div
+                              className={`h-full rounded-full ${over ? 'bg-rose-500' : 'bg-brand-500'}`}
+                              style={{ width: `${barPct}%` }}
+                            />
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {hiddenCauseCount > 0 && (
+                    <tr data-testid="defect-rate-cause-row-more">
+                      <td colSpan={colCount} className="py-1.5 pl-8 pr-4 text-[13px] text-gray-400">
+                        他 {hiddenCauseCount} 件の症状
+                      </td>
+                    </tr>
+                  )}
+                </>
+              )}
+
+              {/* 症状の合計 ≠ 不良数 のときだけ注記 */}
+              {showMismatchNote && (
+                <tr>
+                  <td colSpan={colCount} className="px-4 pb-2 text-[13px] text-gray-400">
+                    ※ 1件に複数の症状があるため、症状の合計({causeSum})は不良数({row.total_cases}
+                    )と一致しない
+                  </td>
+                </tr>
+              )}
+
+              {/* 案件ドリルダウン (個別案件の明細) */}
+              {isOpen && expandable && (
+                <CaseDrilldown colCount={colCount} cases={row.cases} basis={basis} />
+              )}
+            </tbody>
+          );
+        })}
       </table>
     </div>
   );
 }
 
-/** ドリルダウン (原因別内訳 + 案件一覧)。展開行として colSpan で全幅表示 */
+/** ドリルダウン (案件一覧)。展開行として colSpan で全幅表示 */
 function CaseDrilldown({
   colCount,
-  adjustedCases,
-  causeBreakdown,
-  salesUnits,
+  cases,
   basis,
 }: {
   colCount: number;
-  adjustedCases: DefectCaseDetail[];
-  causeBreakdown: Record<string, number>;
-  salesUnits: number | null;
+  cases: DefectCaseDetail[];
   basis: DefectBasis;
 }) {
-  // 原因ラベル → 責任区分 (同一ラベルが複数区分を持つ縁ケースは案件代表値と同じ優先順)
-  const responsibilityByLabel = new Map<string, Responsibility[]>();
-  for (const c of adjustedCases) {
-    for (const cause of c.causes) {
-      const list = responsibilityByLabel.get(cause.label) ?? [];
-      list.push(cause.responsibility);
-      responsibilityByLabel.set(cause.label, list);
-    }
-  }
-  const causeRows = topCauses(causeBreakdown, Number.MAX_SAFE_INTEGER);
-
   return (
     <tr className="border-t border-gray-100 bg-gray-50/50" data-testid="defect-rate-drilldown">
       <td colSpan={colCount} className="px-6 py-4">
-        <div className="space-y-4">
-          {/* 原因別内訳 */}
-          <div>
-            <p className="text-[11px] font-medium text-gray-500 mb-1.5">原因別内訳</p>
-            <table className="text-xs">
-              <thead className="text-[10px] text-gray-400">
+        <div>
+          <p className="mb-1.5 text-[13px] font-medium text-gray-500">
+            案件一覧 ({cases.length} 案件)
+          </p>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-[13px]">
+              <thead className="text-[11px] text-gray-400">
                 <tr>
-                  <th className="text-left pr-6 pb-1 font-medium">原因</th>
-                  <th className="text-right pr-6 pb-1 font-medium">件数</th>
-                  <th className="text-left pr-6 pb-1 font-medium">責任区分</th>
-                  <th className="text-right pb-1 font-medium">率 (対販売数)</th>
+                  <th className="pb-1 pr-4 text-left font-medium">発生日</th>
+                  <th className="pb-1 pr-4 text-left font-medium">注文日</th>
+                  <th className="pb-1 pr-4 text-left font-medium">経路</th>
+                  <th className="pb-1 pr-4 text-left font-medium">症状</th>
+                  <th className="pb-1 pr-4 text-left font-medium">注文番号</th>
+                  <th className="pb-1 text-left font-medium">リンク</th>
                 </tr>
               </thead>
               <tbody>
-                {causeRows.map(({ label, count }) => (
-                  <tr key={label} className="text-gray-700">
-                    <td className="pr-6 py-0.5">{label}</td>
-                    <td className="pr-6 py-0.5 text-right tabular-nums">{count}</td>
-                    <td className="pr-6 py-0.5">
-                      <ResponsibilityBadge
-                        value={resolveCaseResponsibility(responsibilityByLabel.get(label) ?? [])}
-                      />
+                {cases.map((c, i) => (
+                  <tr
+                    key={`${c.ticket_id ?? c.csr_id ?? i}-${i}`}
+                    className="text-gray-700"
+                    data-testid="defect-case-row"
+                  >
+                    <td className="whitespace-nowrap py-1 pr-4 tabular-nums">
+                      {c.occurred_date || '-'}
                     </td>
-                    <td className="py-0.5 text-right tabular-nums">
-                      {salesUnits != null && salesUnits > 0
-                        ? formatPercent(count / salesUnits, 2)
-                        : '-'}
+                    <td className="whitespace-nowrap py-1 pr-4 tabular-nums">
+                      {basis === 'ordered' && !c.order_date ? (
+                        <span title="注文日不明のため発生日で代用">-</span>
+                      ) : (
+                        (c.order_date ?? '-')
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap py-1 pr-4">{caseRouteLabel(c)}</td>
+                    <td className="py-1 pr-4">
+                      {c.causes.length > 0 ? c.causes.map((x) => x.label).join('、') : '-'}
+                      {c.count > 1 && (
+                        <span className="ml-1 text-[11px] text-gray-400">×{c.count}</span>
+                      )}
+                    </td>
+                    <td className="py-1 pr-4 tabular-nums">
+                      {c.order_numbers.length > 0 ? c.order_numbers.join(' / ') : '-'}
+                    </td>
+                    <td className="whitespace-nowrap py-1">
+                      {c.ticket_id && (
+                        <Link
+                          href={`/tickets/${encodeURIComponent(c.ticket_id)}`}
+                          className="mr-2 text-brand-700 hover:underline"
+                        >
+                          チケット
+                        </Link>
+                      )}
+                      {c.csr_id && (
+                        <Link
+                          href={`/customer-records/${encodeURIComponent(c.csr_id)}`}
+                          className="text-brand-700 hover:underline"
+                        >
+                          対応記録
+                        </Link>
+                      )}
+                      {!c.ticket_id && !c.csr_id && <span className="text-gray-400">-</span>}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
-
-          {/* 案件一覧 (発生日降順。顧客名・本文は出さない) */}
-          <div>
-            <p className="text-[11px] font-medium text-gray-500 mb-1.5">
-              案件一覧 ({adjustedCases.length} 案件)
-            </p>
-            <div className="overflow-x-auto">
-              <table className="text-xs min-w-full">
-                <thead className="text-[10px] text-gray-400">
-                  <tr>
-                    <th className="text-left pr-4 pb-1 font-medium">発生日</th>
-                    <th className="text-left pr-4 pb-1 font-medium">注文日</th>
-                    <th className="text-left pr-4 pb-1 font-medium">経路</th>
-                    <th className="text-left pr-4 pb-1 font-medium">原因</th>
-                    <th className="text-left pr-4 pb-1 font-medium">責任区分</th>
-                    <th className="text-left pr-4 pb-1 font-medium">注文番号</th>
-                    <th className="text-left pb-1 font-medium">リンク</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {adjustedCases.map((c, i) => (
-                    <tr key={`${c.ticket_id ?? c.csr_id ?? i}-${i}`} className="text-gray-700" data-testid="defect-case-row">
-                      <td className="pr-4 py-1 tabular-nums whitespace-nowrap">
-                        {c.occurred_date || '-'}
-                      </td>
-                      <td className="pr-4 py-1 tabular-nums whitespace-nowrap">
-                        {basis === 'ordered' && !c.order_date ? (
-                          <span title="注文日不明のため発生日で代用">-</span>
-                        ) : (
-                          (c.order_date ?? '-')
-                        )}
-                      </td>
-                      <td className="pr-4 py-1 whitespace-nowrap">{caseRouteLabel(c)}</td>
-                      <td className="pr-4 py-1">
-                        {c.causes.length > 0
-                          ? c.causes
-                              .map((x) => (x.fbaReason ? `${x.label} (${x.fbaReason})` : x.label))
-                              .join('、')
-                          : '-'}
-                        {c.count > 1 && (
-                          <span className="ml-1 text-[10px] text-gray-400">×{c.count}</span>
-                        )}
-                      </td>
-                      <td className="pr-4 py-1">
-                        <ResponsibilityBadge value={c.responsibility} />
-                      </td>
-                      <td className="pr-4 py-1 tabular-nums">
-                        {c.order_numbers.length > 0 ? c.order_numbers.join(' / ') : '-'}
-                      </td>
-                      <td className="py-1 whitespace-nowrap">
-                        {c.ticket_id && (
-                          <Link
-                            href={`/tickets/${encodeURIComponent(c.ticket_id)}`}
-                            className="text-brand-700 hover:underline mr-2"
-                          >
-                            チケット
-                          </Link>
-                        )}
-                        {c.csr_id && (
-                          <Link
-                            href={`/customer-records/${encodeURIComponent(c.csr_id)}`}
-                            className="text-brand-700 hover:underline"
-                          >
-                            対応記録
-                          </Link>
-                        )}
-                        {!c.ticket_id && !c.csr_id && <span className="text-gray-400">-</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
           </div>
         </div>
       </td>

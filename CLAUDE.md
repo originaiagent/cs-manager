@@ -19,7 +19,7 @@ OriginAI マルチチャネル統合カスタマーサポート + AI改善サイ
 - `SUPABASE_SERVICE_ROLE_KEY`: Supabase service role key
 - `CRON_SECRET`: Vercel Cron Bearer token (`/api/cron/*` 認可)
 - `CS_MCP_KNOWLEDGE_TOKEN`: MCP `knowledge_search` ツール専用の静的 Bearer トークン (origin-ai の `customer-reply-writer` agent が注入)。go-live は cs-manager と origin-ai に同一値。未設定時 Core credential `cs_mcp_knowledge.token` にフォールバック。`INTERNAL_API_KEY`/`origin_ai_internal` とは別物 (流用禁止)。log 禁止。
-- `EC_MANAGER_API_URL`: ec-manager 外部 API base URL (不良率の分母=期間販売数と FBA 返品の取得元)。利用エンドポイント: `/api/external/sales-units` (期間販売数)・`/api/external/customer-returns` (FBA返品)・`/api/external/order-dates` (Amazon注文日)。未設定時は /quality/defect-rate が「販売数取得不可」表示に縮退 (ページは落ちない)。
+- `EC_MANAGER_API_URL`: ec-manager 外部 API base URL (不良率の分母=期間販売数と FBA 返品の取得元)。利用エンドポイント: `/api/external/sales-units` (期間販売数)・`/api/external/customer-returns` (FBA返品)・`/api/external/order-dates` (Amazon注文日)・`/api/external/rakuten-order-items` (楽天注文番号→商品管理番号。注文番号から製品を特定するため)。未設定時は /quality/defect-rate が「販売数取得不可」表示に縮退 (ページは落ちない)。
 - `EC_MANAGER_API_KEY`: ec-manager `/api/external/*` の `x-api-key` (= ec-manager 側 `SALES_API_KEY` と同値)。コードは Core credential `ec_manager_sales_api` (5 分 TTL) → env の順で解決するが、**`ec_manager_sales_api` は Core 未登録のため実運用は env が正**の経路 (ec-manager 自身も同じく env 運用。2026-07-17 時点、ec-manager の鍵でも 404 を実測)。Core 登録が済めば env は撤去可。log 禁止。
 
 ### ユーザー認証 (OIDC リダイレクト方式 / origin-core IdP)
@@ -42,13 +42,13 @@ npm run dev
 - `/api/diag/core`: Check Core API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 - `/api/diag/ai`: Check AI API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 - `/api/diag/yahoo-egress`: Yahoo 固定IPプロキシ経路の疎通確認 (requires `X-Diag-Token`)。proxy 経由で Yahoo 公開ホストへ実リクエストし `{ok, viaProxy, yahooStatus}` を返す。fail-closed で 502。
-- `/api/diag/defect-rate`: 不良率集計の**数字だけ**を返す検証口 (requires `X-Diag-Token`)。ページと同一クエリ (`?period=&month=&granularity=&from=&to=&view=&basis=`) で `loadDefectRateData` を共用し、`{rows, totalCases, factoryCases, responsibility, salesUnitsTotal, salesOk, returnsOk, asinResolutionDegraded, unmapped, coreRequests, elapsedMs}` を返す。製品名・注文番号・PII は含めない。
+- `/api/diag/defect-rate`: 不良率集計の**数字だけ**を返す検証口 (requires `X-Diag-Token`)。ページと同一クエリ (`?period=&month=&granularity=&from=&to=&basis=`) で `loadDefectRateData` を共用し、`{rows, totalCases, salesUnitsTotal, salesOk, returnsOk, asinResolutionDegraded, unmapped, coreRequests, elapsedMs}` を返す。製品名・注文番号・PII は含めない。
   - 本番の `/quality/defect-rate` は OIDC ゲート内で curl 検証できず「本番だけ不良数 0」を見逃した経緯への対処。**デプロイ後はこの口で `totalCases > 0` と `coreRequests` (数十以下が正常。数百なら N+1 退行) を必ず確認する。**
 
 ## 不良率 (/quality/defect-rate)
-- フィルタ: view (all | factory)、basis (occurred=発生日 | ordered=注文日)
+- 症状別表示 (製品ごとに症状の内訳を常時表示)。フィルタ: basis (occurred=発生日 | ordered=注文日)
 - エクスポート: `/quality/defect-rate/export` (CSV、OIDC ゲート内)
-- Note: 製品改善タブは廃止済み
+- Note: 製品改善タブは廃止済み。責任区分 (工場起因/配送起因等) は撤去済み (トム依頼になく差し戻し済)
 
 ## Yahoo egress 固定IPプロキシ (送信元IP固定)
 - cs-manager → Yahoo API の通信だけを **固定グローバルIP `104.198.123.146`** (GCP asia-northeast1, 東京) 経由で出す。Vercel egress は毎回変わるが Yahoo 利用申請は固定IP登録を要求するため。
@@ -64,9 +64,11 @@ npm run dev
   - 1 サイクルあたり最大送信件数 20 件 (Vercel タイムアウト対策)
 - `/api/cron/classify-defects`: 15分間隔（`*/15 * * * *`）。未分類 tickets (case_category is null) を古い順に最大 20 件 AI 分類 (PII マスク済テキストのみ origin-ai へ)。defect 時は `ticket_defect_causes` に複数原因 (正規化ラベル+大分類) を保存。skill 名は rag_config `defect_classify_skill` (default `cs_defect_classify`)。
   - 認可: 上記同パターン。前提: migration `20260717000000_defect_causes.sql` 適用済みであること。
+- `/api/cron/classify-return-comments`: 30分間隔（`*/30 * * * *`）。FBA返品 (ec-manager `/api/external/customer-returns`) の直近35日分のうち `customerComments` が非空の行を対象に、原子的クレーム RPC (`claim_fba_return_classify_batch`) 経由で最大20件AI分類し、症状ラベル (例:「水が出ない」) を `fba_return_symptoms` へ保存する。skill 名は tickets 分類と同一の rag_config `defect_classify_skill` (ラベル語彙分裂防止のため共有)。**顧客コメント原文は PII マスク後のみ origin-ai へ送信し、原文はどのテーブル・ログにも保存しない。**
+  - 認可: 上記同パターン。前提: migration `20260718000000_fba_return_symptoms.sql` 適用済みであること。
 
 ## DB Schema (Phase 1.1+)
-channels / channel_inboxes / tickets / messages / channel_sync_state / ticket_drafts / ticket_defect_causes (1チケット複数不良原因、AI/手動)。
+channels / channel_inboxes / tickets / messages / channel_sync_state / ticket_drafts / ticket_defect_causes (1チケット複数不良原因、AI/手動) / fba_return_symptoms (FBA返品の顧客コメントAI分類による症状ラベル。原文非保存) / fba_return_classify_state (返品コメント分類 cron のクレーム管理・lease/attempts)。
 全テーブル RLS 有効、service_role のみ読み書き可（Phase 1.2 で UI 用ポリシー追加予定）。
 `channel_credentials` は廃止 (Core /api/credentials 経由に移行済)。
 - `channels.status`: `active` | `inactive` | `pending` | `disabled`。`pending`=配線なしの申請中チャネル(表示のみ、例: Amazon)。`inactive`は`disabled`の旧称(後方互換で残置)。

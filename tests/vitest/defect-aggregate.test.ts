@@ -493,83 +493,11 @@ describe('extractOrderNumberFromChannelMeta', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 工場エビデンス化 (C3a-2/C3a-4): 責任区分・案件明細・集計基準
+// 工場エビデンス化 (C3a-2/C3a-4): 案件明細・集計基準
 // ---------------------------------------------------------------------------
 
-describe('aggregateDefectCases: 責任区分 (C3a-2)', () => {
-  it('案件代表の責任区分を count 換算で集計する (factory_cases / responsibility_breakdown)', () => {
-    const r = run({
-      tickets: [
-        ticket({
-          id: 't1',
-          product_id: 'child-1',
-          causes: [{ label: '水が出ない', major: 'function_defect' }], // factory
-        }),
-      ],
-      csrs: [
-        csr({ id: 'c1', product_id: 'group-A', defect_type: '自由記述の不良' }), // other→unverified
-      ],
-      fbaReturns: [
-        fba({
-          orderId: '503-1111111-1111111',
-          asin: 'B0TEST',
-          quantity: 2,
-          causeLabel: '配送中破損',
-          majorCategory: 'damaged',
-          fbaReason: 'DAMAGED_BY_CARRIER', // logistics (fbaReason 優先)
-        }),
-      ],
-      asinToChild: [['B0TEST', 'child-1']],
-      childToGroup: [['child-1', 'group-A']],
-    });
-    expect(r.parentRows).toHaveLength(1);
-    const row = r.parentRows[0];
-    expect(row.total_cases).toBe(4); // 1 + 1 + 2
-    expect(row.factory_cases).toBe(1);
-    expect(row.responsibility_breakdown).toEqual({
-      factory: 1,
-      logistics: 2, // quantity=2 の FBA 独立案件
-      listing: 0,
-      unverified: 1,
-    });
-    // 合計 = total_cases
-    const sum = Object.values(row.responsibility_breakdown).reduce((s, n) => s + n, 0);
-    expect(sum).toBe(row.total_cases);
-  });
-
-  it('1 案件に factory 原因が 1 つでもあれば案件代表は factory', () => {
-    const r = run({
-      tickets: [
-        ticket({
-          id: 't1',
-          product_id: 'child-1',
-          order_number: '503-2222222-2222222',
-          causes: [{ label: 'サイズが違う', major: 'size_mismatch' }], // listing
-        }),
-      ],
-      fbaReturns: [
-        fba({
-          orderId: '503-2222222-2222222',
-          asin: 'B0TEST',
-          causeLabel: '不良・故障',
-          majorCategory: 'function_defect',
-          fbaReason: 'DEFECTIVE', // factory
-        }),
-      ],
-      asinToChild: [['B0TEST', 'child-1']],
-      childToGroup: [['child-1', 'group-A']],
-    });
-    const row = r.parentRows[0];
-    expect(row.total_cases).toBe(1);
-    expect(row.factory_cases).toBe(1);
-    expect(row.cases[0].responsibility).toBe('factory');
-    expect(row.cases[0].causes.map((c) => c.responsibility).sort()).toEqual([
-      'factory',
-      'listing',
-    ]);
-  });
-
-  it('同一ラベルが AI 側優先で残っても FBA 理由コードは保持され責任区分に効く', () => {
+describe('aggregateDefectCases: FBA 理由コードの保持', () => {
+  it('同一ラベルが AI 側優先で残っても FBA 理由コードは保持される (CSV 明細用)', () => {
     const r = run({
       tickets: [
         ticket({
@@ -594,7 +522,6 @@ describe('aggregateDefectCases: 責任区分 (C3a-2)', () => {
     const detail = r.parentRows[0].cases[0];
     expect(detail.causes).toHaveLength(1);
     expect(detail.causes[0].fbaReason).toBe('DAMAGED_BY_CARRIER');
-    expect(detail.causes[0].responsibility).toBe('logistics'); // fbaReason 優先
   });
 });
 
@@ -685,10 +612,10 @@ describe('aggregateDefectCases: 案件明細 cases (C3a-2)', () => {
     expect(r.parentRows[0].total_cases).toBe(1);
   });
 
-  it('sales-only 行は明細が空で責任区分は全ゼロ', () => {
+  it('sales-only 行は明細が空で不良数ゼロ', () => {
     const r = run({ sales: salesOf({ groups: [['group-B', 50]] }) });
     expect(r.parentRows[0].cases).toEqual([]);
-    expect(r.parentRows[0].factory_cases).toBe(0);
+    expect(r.parentRows[0].total_cases).toBe(0);
   });
 });
 

@@ -10,17 +10,9 @@
  * BOM はここでは付けない (route 側で先頭に付与)。改行は Excel 互換の CRLF。
  */
 
-import {
-  MAJOR_CATEGORY_LABELS,
-  RESPONSIBILITY_LABELS,
-} from './defect-taxonomy';
+import { MAJOR_CATEGORY_LABELS } from './defect-taxonomy';
 import type { DefectAggRow, DefectBasis } from './defect-aggregate';
-import {
-  filterCasesByView,
-  caseRouteLabel,
-  caseBasisDate,
-  type DefectView,
-} from './defect-view';
+import { caseRouteLabel, caseBasisDate } from './defect-view';
 
 /** CSV ヘッダ (契約 C3b-3 の列順) */
 export const DEFECT_EVIDENCE_CSV_HEADER = [
@@ -33,7 +25,6 @@ export const DEFECT_EVIDENCE_CSV_HEADER = [
   '経路',
   '原因ラベル',
   '大分類',
-  '責任区分',
   'FBA理由コード',
   '注文番号',
   '数量',
@@ -64,16 +55,14 @@ export interface DefectEvidenceCsvRow {
 
 /**
  * 不良エビデンス CSV (ヘッダ + 明細) を組み立てる。
- * view=factory は責任区分 = factory の案件のみ出力する (画面の表示切替と同一規則)。
  */
 export function buildDefectEvidenceCsv(args: {
   rows: readonly DefectEvidenceCsvRow[];
-  view: DefectView;
   basis: DefectBasis;
 }): string {
   const lines: string[] = [DEFECT_EVIDENCE_CSV_HEADER.join(',')];
   for (const { row, productName, variationLabel } of args.rows) {
-    for (const c of filterCasesByView(row.cases, args.view)) {
+    for (const c of row.cases) {
       const base = [
         productName,
         row.group_id,
@@ -86,19 +75,12 @@ export function buildDefectEvidenceCsv(args: {
       const tail = [c.order_numbers.join('|'), String(c.count)];
       if (c.causes.length === 0) {
         // 原因未入力の案件 (CSR の対応種別のみ等) も 1 行出す (黙殺防止)
-        lines.push([...base, '', '', '', '', ...tail].map(escapeCsvField).join(','));
+        lines.push([...base, '', '', '', ...tail].map(escapeCsvField).join(','));
         continue;
       }
       for (const cause of c.causes) {
         lines.push(
-          [
-            ...base,
-            cause.label,
-            MAJOR_CATEGORY_LABELS[cause.major],
-            RESPONSIBILITY_LABELS[cause.responsibility],
-            cause.fbaReason ?? '',
-            ...tail,
-          ]
+          [...base, cause.label, MAJOR_CATEGORY_LABELS[cause.major], cause.fbaReason ?? '', ...tail]
             .map(escapeCsvField)
             .join(','),
         );

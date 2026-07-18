@@ -9,6 +9,7 @@ import {
   mapReturnReason,
   isKnownNonDefectReason,
   splitReturnsByReason,
+  fbaReturnKey,
 } from '@/lib/quality/return-reasons';
 
 describe('mapReturnReason', () => {
@@ -28,8 +29,6 @@ describe('mapReturnReason', () => {
       causeLabel: '説明と相違',
       fbaReason: 'NOT_AS_DESCRIBED',
     });
-    expect(mapReturnReason('DAMAGED_BY_FC')?.majorCategory).toBe('damaged');
-    expect(mapReturnReason('DAMAGED_BY_CARRIER')?.majorCategory).toBe('damaged');
     expect(mapReturnReason('ITEM_DEFECTIVE')?.majorCategory).toBe('function_defect');
     expect(mapReturnReason('QUALITY_UNACCEPTABLE')?.causeLabel).toBe('品質不良');
   });
@@ -45,6 +44,15 @@ describe('mapReturnReason', () => {
     expect(mapReturnReason('NO_REASON_GIVEN')).toBeUndefined();
     expect(mapReturnReason('APPAREL_STYLE')).toBeUndefined(); // 契約で明示的に含めない
     expect(mapReturnReason('ORDERED_WRONG_ITEM')).toBeUndefined();
+  });
+
+  it('配送中破損・倉庫内破損は製品不良ではないため undefined (不良集計から除外)', () => {
+    // この画面は工場への製品改善要求のエビデンスであり、配送・倉庫由来の破損は
+    // 製品不良ではない (定義パネル「配送中の破損・顧客都合の返品は不良に数えない」)。
+    expect(mapReturnReason('DAMAGED_BY_FC')).toBeUndefined();
+    expect(mapReturnReason('DAMAGED_BY_CARRIER')).toBeUndefined();
+    expect(isKnownNonDefectReason('DAMAGED_BY_FC')).toBe(true);
+    expect(isKnownNonDefectReason('DAMAGED_BY_CARRIER')).toBe(true);
   });
 
   it('未知コード・null・空文字は undefined', () => {
@@ -90,5 +98,35 @@ describe('splitReturnsByReason', () => {
     expect(result.defects).toEqual([]);
     expect(result.excluded).toEqual([]);
     expect(result.unclassified).toEqual([]);
+  });
+});
+
+describe('fbaReturnKey', () => {
+  it('orderId|sku|returnDate を決定的に連結する', () => {
+    expect(
+      fbaReturnKey({ orderId: 'ORDER1', sku: 'SKU1', returnDate: '2026-07-01' }),
+    ).toBe('ORDER1|SKU1|2026-07-01');
+  });
+
+  it('同一入力は常に同一キーを返す (cron とページローダの整合)', () => {
+    const row = { orderId: 'ORDER2', sku: 'SKU2', returnDate: '2026-07-10' };
+    expect(fbaReturnKey({ ...row })).toBe(fbaReturnKey({ ...row }));
+  });
+
+  it('各要素を trim してから連結する', () => {
+    expect(
+      fbaReturnKey({ orderId: '  ORDER3 ', sku: ' SKU3', returnDate: '2026-07-11 ' }),
+    ).toBe('ORDER3|SKU3|2026-07-11');
+  });
+
+  it('null は空文字として扱う (区切り文字は保持)', () => {
+    expect(fbaReturnKey({ orderId: 'ORDER4', sku: null, returnDate: null })).toBe('ORDER4||');
+    expect(fbaReturnKey({ orderId: null, sku: null, returnDate: null })).toBe('||');
+  });
+
+  it('異なる入力は異なるキーを返す', () => {
+    const a = fbaReturnKey({ orderId: 'ORDER5', sku: 'SKU5', returnDate: '2026-07-12' });
+    const b = fbaReturnKey({ orderId: 'ORDER5', sku: 'SKU6', returnDate: '2026-07-12' });
+    expect(a).not.toBe(b);
   });
 });

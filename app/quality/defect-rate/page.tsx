@@ -19,15 +19,7 @@ import {
   prevMonth,
   nextMonth,
 } from '@/lib/quality/period';
-import { RESPONSIBILITY_LABELS } from '@/lib/quality/defect-taxonomy';
 import { DEFECT_BASES, type DefectBasis } from '@/lib/quality/defect-aggregate';
-import {
-  DEFECT_VIEWS,
-  DEFECT_VIEW_LABELS,
-  applyViewToRow,
-  excludedByResponsibility,
-  type DefectView,
-} from '@/lib/quality/defect-view';
 import {
   loadDefectRateData,
   type DefectRateQueryParams,
@@ -61,7 +53,7 @@ export default async function DefectRatePage({
 
   // データ取得・集計は export route と共通のローダへ集約 (C3b)
   const data = await loadDefectRateData(searchParams);
-  const { mode, monthKey, range, granularity, view, basis, agg, rows } = data;
+  const { mode, monthKey, range, granularity, basis, agg, rows } = data;
 
   // 表示行 VM (名寄せ済み・serializable。client component へ渡す)
   const tableRows: DefectRateTableRow[] = rows.map((r) => ({
@@ -71,16 +63,13 @@ export default async function DefectRatePage({
     row: r,
   }));
 
-  // 閾値超過判定は view 適用後の率で行う (factory ビューでは工場起因のみの率)
-  const overThreshold = tableRows
-    .map((t) => ({ t, adjusted: applyViewToRow(t.row, view) }))
-    .filter(
-      ({ t, adjusted }) =>
-        adjusted.rate != null && (t.row.sales_units ?? 0) > 0 && adjusted.rate >= DEFAULT_THRESHOLD,
-    );
+  const overThreshold = tableRows.filter(
+    (t) => t.row.rate != null && (t.row.sales_units ?? 0) > 0 && t.row.rate >= DEFAULT_THRESHOLD,
+  );
 
-  // factory ビューの除外内訳 (配送・倉庫 / 自社 / 要精査)
-  const excluded = view === 'factory' ? excludedByResponsibility(rows) : null;
+  // 上部サマリ用の合計 (テーブルに表示している行集合と同じ粒度で合算する)
+  const salesUnitsTotal = tableRows.reduce((sum, t) => sum + (t.row.sales_units ?? 0), 0);
+  const totalCases = tableRows.reduce((sum, t) => sum + t.row.total_cases, 0);
 
   const unclassifiedReturns = data.unclassifiedReturns;
   const hasUnmappedNote =
@@ -101,9 +90,7 @@ export default async function DefectRatePage({
       sp.set('to', overrides.to ?? range.end);
     }
     sp.set('granularity', overrides.granularity ?? granularity);
-    // view / basis は既定値のとき URL に載せない (既存 URL・e2e との互換維持)
-    const v = (overrides.view ?? view) as DefectView;
-    if (v !== 'all') sp.set('view', v);
+    // basis は既定値のとき URL に載せない (既存 URL・e2e との互換維持)
     const b = (overrides.basis ?? basis) as DefectBasis;
     if (b !== 'occurred') sp.set('basis', b);
     return `?${sp.toString()}`;
@@ -118,7 +105,15 @@ export default async function DefectRatePage({
 
   return (
     <div>
-      {/* 期間 + 粒度 セレクタ */}
+      {/* header */}
+      <div className="mb-4">
+        <h1 className="text-[22px] font-bold text-gray-900 sm:text-[26px]">不良発生率</h1>
+        <p className="mt-1 text-[15px] text-gray-500">
+          製品ごとに、どの症状が何%出ているかを見る画面。
+        </p>
+      </div>
+
+      {/* 期間 セレクタ + CSV エクスポート */}
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <span className="text-xs text-gray-500 font-medium mr-1">期間</span>
         {(PERIODS as readonly Period[]).map((p) => (
@@ -189,7 +184,6 @@ export default async function DefectRatePage({
         >
           <input type="hidden" name="period" value="custom" />
           <input type="hidden" name="granularity" value={granularity} />
-          {view !== 'all' && <input type="hidden" name="view" value={view} />}
           {basis !== 'occurred' && <input type="hidden" name="basis" value={basis} />}
           <span className="text-xs text-gray-500">カスタム</span>
           <input
@@ -218,7 +212,19 @@ export default async function DefectRatePage({
           </button>
         </form>
 
-        <span className="text-xs text-gray-500 font-medium ml-4 mr-1">粒度</span>
+        <a
+          href={`/quality/defect-rate/export${queryStringFor({})}`}
+          data-testid="export-csv"
+          className="ml-auto inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+        >
+          <Download size={12} />
+          CSVで書き出す
+        </a>
+      </div>
+
+      {/* 粒度 + 集計基準 (発生日/注文日) セレクタ */}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-xs text-gray-500 font-medium mr-1">粒度</span>
         {(GRANULARITIES as readonly Granularity[]).map((g) => (
           <Link
             key={g}
@@ -228,22 +234,6 @@ export default async function DefectRatePage({
             className={chipClass(granularity === g)}
           >
             {GRANULARITY_LABELS[g]}
-          </Link>
-        ))}
-      </div>
-
-      {/* 表示切替 (全体/工場起因のみ) + 集計基準 (発生日/注文日) + CSV エクスポート */}
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <span className="text-xs text-gray-500 font-medium mr-1">表示</span>
-        {(DEFECT_VIEWS as readonly DefectView[]).map((v) => (
-          <Link
-            key={v}
-            href={`/quality/defect-rate${queryStringFor({ view: v })}`}
-            scroll={false}
-            data-testid={`view-${v}`}
-            className={chipClass(view === v)}
-          >
-            {DEFECT_VIEW_LABELS[v]}
           </Link>
         ))}
         <span className="text-xs text-gray-500 font-medium ml-4 mr-1">基準</span>
@@ -258,15 +248,41 @@ export default async function DefectRatePage({
             {BASIS_LABELS[b]}
           </Link>
         ))}
-        <a
-          href={`/quality/defect-rate/export${queryStringFor({})}`}
-          data-testid="export-csv"
-          className="ml-auto inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
-        >
-          <Download size={12} />
-          CSV エクスポート
-        </a>
       </div>
+
+      {/* 上部サマリ (対象期間 / 期間販売数 / 不良案件 / 閾値超過) */}
+      <dl className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4" data-testid="defect-rate-summary">
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <dt className="text-xs font-medium text-gray-500">対象期間</dt>
+          <dd className="mt-1 text-[15px] font-semibold tabular-nums text-gray-900">
+            {range.start} 〜 {range.end}
+          </dd>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <dt className="text-xs font-medium text-gray-500">期間販売数</dt>
+          <dd className="mt-1 text-[15px] font-semibold tabular-nums text-gray-900">
+            {data.salesOk ? `${salesUnitsTotal.toLocaleString()} 個` : '取得不可'}
+          </dd>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <dt className="text-xs font-medium text-gray-500">不良案件</dt>
+          <dd className="mt-1 text-[15px] font-semibold tabular-nums text-gray-900">
+            {totalCases.toLocaleString()} 件
+          </dd>
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <dt className="text-xs font-medium text-gray-500">
+            閾値 ({formatPercent(DEFAULT_THRESHOLD, 1)}) 超過
+          </dt>
+          <dd
+            className={`mt-1 text-[15px] font-semibold tabular-nums ${
+              overThreshold.length > 0 ? 'text-rose-700' : 'text-gray-900'
+            }`}
+          >
+            {overThreshold.length} 製品
+          </dd>
+        </div>
+      </dl>
 
       {/* 販売数 / FBA 返品の取得不可バナー (ページは落とさない) */}
       {!data.salesOk && (
@@ -300,29 +316,6 @@ export default async function DefectRatePage({
         </div>
       )}
 
-      {overThreshold.length > 0 && (
-        <div className="mb-4 flex items-start gap-3 rounded-lg border border-rose-200 bg-rose-50 p-4">
-          <AlertTriangle className="text-rose-600 shrink-0 mt-0.5" size={18} />
-          <div>
-            <p className="text-sm font-semibold text-rose-700">
-              不良率が閾値 ({formatPercent(DEFAULT_THRESHOLD, 1)}) を超えている対象が{' '}
-              {overThreshold.length} 件あります
-            </p>
-            <p className="text-xs text-rose-600 mt-1">
-              {overThreshold
-                .map(({ t, adjusted }) => {
-                  const label =
-                    granularity === 'variation'
-                      ? `${t.productName} / ${t.variationLabel}`
-                      : t.productName;
-                  return `${label} (${formatPercent(adjusted.rate ?? 0, 1)})`;
-                })
-                .join(' / ')}
-            </p>
-          </div>
-        </div>
-      )}
-
       {rows.length === 0 ? (
         <EmptyState
           title="集計対象のデータがありません"
@@ -332,19 +325,9 @@ export default async function DefectRatePage({
         <DefectRateTable
           rows={tableRows}
           granularity={granularity}
-          view={view}
           basis={basis}
           threshold={DEFAULT_THRESHOLD}
         />
-      )}
-
-      {/* factory ビュー: 除外した案件数の内訳 (全体との突合用) */}
-      {excluded && (
-        <p className="text-[11px] text-gray-500 mt-3" data-testid="factory-excluded-note">
-          ※ 工場起因のみ表示中。除外: {RESPONSIBILITY_LABELS.logistics} {excluded.logistics} 件 /{' '}
-          {RESPONSIBILITY_LABELS.listing} {excluded.listing} 件 / {RESPONSIBILITY_LABELS.unverified}{' '}
-          {excluded.unverified} 件
-        </p>
       )}
 
       {/* ordered 基準: 注文日不明の案件は発生日で代用した旨の注記 */}
@@ -368,6 +351,14 @@ export default async function DefectRatePage({
         <p className="text-[11px] text-amber-600 mt-1" data-testid="asin-degraded-note">
           ※ Core 製品解決が一時的に失敗し、FBA返品の一部が製品未解決扱いになっています。
           再読み込みで回復する場合があります。
+        </p>
+      )}
+
+      {/* 注文番号→製品の解決 (症状ハンドオフ) の一時的失敗による縮退注記 */}
+      {data.orderProductsDegraded && (
+        <p className="text-[11px] text-amber-600 mt-1" data-testid="order-products-degraded-note">
+          ※ 注文番号からの製品特定が一時的にできず、製品未特定の件数が多く出ています。
+          時間をおいて再読み込みしてください。
         </p>
       )}
 
@@ -398,10 +389,10 @@ export default async function DefectRatePage({
       <p className="text-[11px] text-gray-400 mt-3">
         ※ 期間は JST 基準 ({range.start} 〜 {range.end})。閾値{' '}
         {formatPercent(DEFAULT_THRESHOLD, 1)} (env DEFECT_RATE_THRESHOLD_DEFAULT)。
-        数字の定義は下の「この数字の定義」を参照。
+        数字の定義は下の「この数字の意味」を参照。
       </p>
 
-      {/* 集計定義パネル (C3b-4) */}
+      {/* 集計定義パネル */}
       <DefinitionsPanel />
     </div>
   );

@@ -1,7 +1,7 @@
 /**
  * defect-evidence-csv.ts (不良エビデンス CSV 生成純関数) の単体テスト — C3b-3
  *
- * 1 行 = 1 案件 × 1 原因 / 原因なし案件も 1 行 / view=factory フィルタ /
+ * 1 行 = 1 案件 × 1 原因 / 原因なし案件も 1 行 /
  * basis による基準日 / RFC4180 エスケープ / CRLF を検証する。
  */
 import { describe, it, expect } from 'vitest';
@@ -20,8 +20,7 @@ function caseDetail(overrides: Partial<DefectCaseDetail> = {}): DefectCaseDetail
     occurred_date: '2026-07-01',
     order_date: '2026-06-20',
     sources: ['ticket'],
-    causes: [{ label: '水が出ない', major: 'function_defect', responsibility: 'factory' }],
-    responsibility: 'factory',
+    causes: [{ label: '水が出ない', major: 'function_defect' }],
     order_numbers: ['408672-20260620-0001'],
     count: 1,
     ...overrides,
@@ -40,8 +39,6 @@ function aggRow(overrides: Partial<DefectAggRow> = {}): DefectAggRow {
     sources: { tickets: 0, csr: 0, fba: 0 },
     sales_units: 100,
     rate: null,
-    factory_cases: 0,
-    responsibility_breakdown: { factory: 0, logistics: 0, listing: 0, unverified: 0 },
     cases,
     ...overrides,
   };
@@ -95,11 +92,10 @@ describe('buildDefectEvidenceCsv', () => {
             cases: [
               caseDetail({
                 causes: [
-                  { label: '水が出ない', major: 'function_defect', responsibility: 'factory' },
+                  { label: '水が出ない', major: 'function_defect' },
                   {
                     label: '配送中破損',
                     major: 'damaged',
-                    responsibility: 'logistics',
                     fbaReason: 'DAMAGED_BY_CARRIER',
                   },
                 ],
@@ -108,17 +104,16 @@ describe('buildDefectEvidenceCsv', () => {
           }),
         }),
       ],
-      view: 'all',
       basis: 'occurred',
     });
     const ls = lines(csv);
     expect(ls[0]).toBe(DEFECT_EVIDENCE_CSV_HEADER.join(','));
     expect(ls).toHaveLength(3); // ヘッダ + 原因 2 行
-    // 発生日 / 注文日 / 基準日(occurred=発生日) / 経路 / 原因 / 大分類 / 責任区分
+    // 発生日 / 注文日 / 基準日(occurred=発生日) / 経路 / 原因 / 大分類 / FBA理由コード
     expect(ls[1]).toBe(
-      'シャワーヘッド A,g1,,2026-07-01,2026-06-20,2026-07-01,チケット,水が出ない,機能不良,工場起因,,408672-20260620-0001,1',
+      'シャワーヘッド A,g1,,2026-07-01,2026-06-20,2026-07-01,チケット,水が出ない,機能不良,,408672-20260620-0001,1',
     );
-    expect(ls[2]).toContain('配送中破損,破損・傷,配送・倉庫起因,DAMAGED_BY_CARRIER');
+    expect(ls[2]).toContain('配送中破損,破損・傷,DAMAGED_BY_CARRIER');
     expect(csv.endsWith('\r\n')).toBe(true);
   });
 
@@ -134,7 +129,6 @@ describe('buildDefectEvidenceCsv', () => {
           }),
         }),
       ],
-      view: 'all',
       basis: 'ordered',
     });
     const ls = lines(csv);
@@ -142,52 +136,21 @@ describe('buildDefectEvidenceCsv', () => {
     expect(ls[2]).toContain(',2026-07-05,,2026-07-05,'); // 注文日不明 → 基準日=発生日
   });
 
-  it('view=factory は工場起因の案件のみ出力する', () => {
-    const csv = buildDefectEvidenceCsv({
-      rows: [
-        csvRow({
-          row: aggRow({
-            cases: [
-              caseDetail({ responsibility: 'factory' }),
-              caseDetail({
-                responsibility: 'logistics',
-                causes: [
-                  {
-                    label: '配送中破損',
-                    major: 'damaged',
-                    responsibility: 'logistics',
-                    fbaReason: 'DAMAGED_BY_CARRIER',
-                  },
-                ],
-              }),
-            ],
-          }),
-        }),
-      ],
-      view: 'factory',
-      basis: 'occurred',
-    });
-    const ls = lines(csv);
-    expect(ls).toHaveLength(2); // ヘッダ + factory 案件のみ
-    expect(ls[1]).toContain('水が出ない');
-  });
-
   it('原因が 1 件も無い案件も 1 行出す (原因列は空)', () => {
     const csv = buildDefectEvidenceCsv({
       rows: [
         csvRow({
           row: aggRow({
-            cases: [caseDetail({ causes: [], responsibility: 'unverified', sources: ['csr'] })],
+            cases: [caseDetail({ causes: [], sources: ['csr'] })],
           }),
         }),
       ],
-      view: 'all',
       basis: 'occurred',
     });
     const ls = lines(csv);
     expect(ls).toHaveLength(2);
     expect(ls[1]).toBe(
-      'シャワーヘッド A,g1,,2026-07-01,2026-06-20,2026-07-01,対応記録,,,,,408672-20260620-0001,1',
+      'シャワーヘッド A,g1,,2026-07-01,2026-06-20,2026-07-01,対応記録,,,,408672-20260620-0001,1',
     );
   });
 
@@ -199,13 +162,12 @@ describe('buildDefectEvidenceCsv', () => {
           row: aggRow({
             cases: [
               caseDetail({
-                causes: [{ label: '傷, 汚れ', major: 'damaged', responsibility: 'factory' }],
+                causes: [{ label: '傷, 汚れ', major: 'damaged' }],
               }),
             ],
           }),
         }),
       ],
-      view: 'all',
       basis: 'occurred',
     });
     const ls = lines(csv);
@@ -227,7 +189,6 @@ describe('buildDefectEvidenceCsv', () => {
           }),
         }),
       ],
-      view: 'all',
       basis: 'occurred',
     });
     expect(lines(csv)[1]).toContain(',503-1234567-7654321|408672-20260620-0001,3');
@@ -236,7 +197,6 @@ describe('buildDefectEvidenceCsv', () => {
   it('バリエーション列は variationLabel をそのまま載せる (variation 粒度)', () => {
     const csv = buildDefectEvidenceCsv({
       rows: [csvRow({ variationLabel: 'ホワイト' })],
-      view: 'all',
       basis: 'occurred',
     });
     expect(lines(csv)[1]).toContain('シャワーヘッド A,g1,ホワイト,');

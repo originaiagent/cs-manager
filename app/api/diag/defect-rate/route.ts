@@ -1,7 +1,7 @@
 /**
  * 不良率集計の本番検証口 — N+1/429 事故の再発防止
  *
- * GET /api/diag/defect-rate?period=30d&granularity=parent&view=all&basis=occurred
+ * GET /api/diag/defect-rate?period=30d&granularity=parent&basis=occurred
  * (不良率ページと同一クエリパラメータ。データ取得・集計も同一ローダ loadDefectRateData を共用)
  *
  * 背景: 本番の /quality/defect-rate は OIDC ユーザーゲート内にあり curl で検証できないため、
@@ -16,18 +16,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authorizeApiRoute } from '@/lib/auth/api-auth';
 import { loadDefectRateData } from '@/lib/quality/defect-rate-data';
 import { withCoreRequestCount } from '@/lib/core-entry-keys';
-import type { Responsibility } from '@/lib/quality/defect-taxonomy';
 
 export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
 export const revalidate = 0;
-
-const RESPONSIBILITIES: readonly Responsibility[] = [
-  'factory',
-  'logistics',
-  'listing',
-  'unverified',
-];
 
 export async function GET(req: NextRequest) {
   const authError = authorizeApiRoute(req, { tier: 'diag' });
@@ -45,46 +37,35 @@ export async function GET(req: NextRequest) {
         granularity: sp.get('granularity') ?? undefined,
         from: sp.get('from') ?? undefined,
         to: sp.get('to') ?? undefined,
-        view: sp.get('view') ?? undefined,
         basis: sp.get('basis') ?? undefined,
       }),
     );
 
-    const responsibility: Record<Responsibility, number> = {
-      factory: 0,
-      logistics: 0,
-      listing: 0,
-      unverified: 0,
-    };
     let totalCases = 0;
-    let factoryCases = 0;
     let salesUnitsTotal = 0;
     for (const row of data.rows) {
       totalCases += row.total_cases;
-      factoryCases += row.factory_cases;
       salesUnitsTotal += row.sales_units ?? 0;
-      for (const r of RESPONSIBILITIES) {
-        responsibility[r] += row.responsibility_breakdown[r] ?? 0;
-      }
     }
 
     return NextResponse.json({
       ok: true,
       range: { start: data.range.start, end: data.range.end },
       granularity: data.granularity,
-      view: data.view,
       basis: data.basis,
       rows: data.rows.length,
       totalCases,
-      factoryCases,
-      responsibility,
       salesUnitsTotal,
       salesOk: data.salesOk,
       returnsOk: data.returnsOk,
       returnsTruncated: data.returnsTruncated,
       unclassifiedReturns: data.unclassifiedReturns,
+      returnsWithSymptoms: data.returnsWithSymptoms,
       asinResolutionDegraded: data.asinResolutionDegraded,
       amazonLookupFailed: data.amazonLookupFailed,
+      orderLinkedOrders: data.orderLinkedOrders,
+      orderAmbiguousOrders: data.orderAmbiguousOrders,
+      orderProductsDegraded: data.orderProductsDegraded,
       unmapped: data.agg.unmapped,
       orderedFallbackCases: data.agg.orderedFallbackCases,
       coreRequests,

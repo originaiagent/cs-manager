@@ -15,8 +15,9 @@ export interface ReturnReasonMapping {
   /** 日本語の原因ラベル (集計時に ticket/CSR 由来 cause と同列に扱う) */
   causeLabel: string;
   /**
-   * FBA 返品理由コード原文 (正規化済み大文字)。責任区分判定 (resolveResponsibility) と
-   * エビデンス明細への理由コード表示に使う (工場エビデンス化 C3a-1 で additive 追加)。
+   * FBA 返品理由コード原文 (正規化済み大文字)。CSV エクスポートの「FBA理由コード」列
+   * (エビデンス明細への理由コード表示) にのみ使う (工場エビデンス化 C3a-1 で additive 追加。
+   * 責任区分判定は撤去済み)。
    */
   fbaReason: string;
 }
@@ -31,13 +32,15 @@ const DEFECT_RETURN_REASONS: Record<string, Omit<ReturnReasonMapping, 'fbaReason
   QUALITY_UNACCEPTABLE: { majorCategory: 'other', causeLabel: '品質不良' },
   MISSING_PARTS: { majorCategory: 'missing_part', causeLabel: '部品欠品' },
   NOT_AS_DESCRIBED: { majorCategory: 'description_mismatch', causeLabel: '説明と相違' },
-  DAMAGED_BY_FC: { majorCategory: 'damaged', causeLabel: '倉庫内破損' },
-  DAMAGED_BY_CARRIER: { majorCategory: 'damaged', causeLabel: '配送中破損' },
 };
 
 /**
  * 既知の顧客都合 (商品起因ではない) 返品理由。不良集計から除外し、未分類にも数えない。
  * APPAREL_STYLE は契約で明示的に「含めない」(好みの問題 = 顧客都合)。
+ * DAMAGED_BY_FC (倉庫内破損) / DAMAGED_BY_CARRIER (配送中破損) もここに含める:
+ * この画面は工場への製品改善要求のエビデンスであり、配送・倉庫由来の破損は製品不良ではない。
+ * 責任区分の撤去により内訳表示が無くなったため、混入させると製品の不良率を実態より
+ * 高く見せてしまう (定義パネル「配送中の破損・顧客都合の返品は不良に数えない」との整合)。
  * export は集計定義パネル (C3b-4) がコードと同一の除外コード群を描画するため (乖離防止)。
  */
 export const NON_DEFECT_RETURN_REASONS = new Set<string>([
@@ -51,6 +54,8 @@ export const NON_DEFECT_RETURN_REASONS = new Set<string>([
   'NEVER_ARRIVED',
   'DAMAGED_BY_CUSTOMER',
   'CUSTOMER_DAMAGED',
+  'DAMAGED_BY_FC',
+  'DAMAGED_BY_CARRIER',
   'APPAREL_STYLE',
   'APPAREL_TOO_SMALL',
   'APPAREL_TOO_LARGE',
@@ -76,7 +81,7 @@ export function mapReturnReason(
   const code = reason.trim().toUpperCase();
   if (!code) return undefined;
   const entry = DEFECT_RETURN_REASONS[code];
-  // fbaReason (理由コード原文) を保持して返す (責任区分判定・明細表示用)
+  // fbaReason (理由コード原文) を保持して返す (CSV の FBA理由コード列にのみ使う)
   return entry ? { ...entry, fbaReason: code } : undefined;
 }
 
@@ -115,4 +120,25 @@ export function splitReturnsByReason<T extends { reason: string | null }>(
     }
   }
   return result;
+}
+
+/**
+ * FBA 返品行の識別子 (症状分類 cron / 集計側が同一の返品行を指し示すための決定的キー)。
+ *
+ * cs-manager は FBA 返品行そのものをローカル DB に持たない (ec-manager が保有し、都度
+ * /api/external/customer-returns で取得する) ため、行の主キーとして orderId|sku|returnDate
+ * を使う (顧客コメント原文は含めない = PII 非含有)。
+ * cron (src/lib/quality/return-comment-classify.ts) とページローダ (defect-rate-data.ts) の
+ * 双方が同じロジックでキーを計算しないと fba_return_symptoms が紐付かないため、必ずこの関数を
+ * 経由すること (独自にキーを組み立てない)。
+ */
+export function fbaReturnKey(row: {
+  orderId: string | null;
+  sku: string | null;
+  returnDate: string | null;
+}): string {
+  const orderId = (row.orderId ?? '').trim();
+  const sku = (row.sku ?? '').trim();
+  const returnDate = (row.returnDate ?? '').trim();
+  return [orderId, sku, returnDate].join('|');
 }
