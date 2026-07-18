@@ -92,12 +92,30 @@ function parseSymptomCandidate(candidate: unknown): ReturnSymptom[] | null {
     const co = c as Record<string, unknown>;
     const label =
       typeof co.label === 'string' ? co.label.trim().slice(0, MAX_LABEL_LENGTH) : '';
-    if (!label || seen.has(label)) continue;
+    if (!label || seen.has(label) || !isUsableSymptomLabel(label)) continue;
     seen.add(label);
     out.push({ label, major_category: normalizeMajorCategory(co.major_category) });
     if (out.length >= 3) break;
   }
   return out;
+}
+
+/** 症状ラベルに日本語が含まれるか (ひらがな/カタカナ/漢字/長音符) */
+const JAPANESE_RE = /[぀-ゟ゠-ヿ一-鿿ー]/;
+
+/**
+ * 症状ラベルとして画面に出してよい値か。
+ *
+ * 実データで観測した AI の逸脱を弾く (本番実測: 76件中4件):
+ *   - major_category の enum 値をそのまま label に入れてくる
+ *     (例: label="description_mismatch") → 画面に生の英語が出る
+ * 「日本語・15字以内・症状ベース」を指示しているので、日本語を含まないラベルは
+ * 症状として使えないと判断して捨てる (major_category は別途 normalize 済みのため
+ * 大分類の情報は失われない)。
+ */
+function isUsableSymptomLabel(label: string): boolean {
+  if ((MAJOR_CATEGORIES as readonly string[]).includes(label.toLowerCase())) return false;
+  return JAPANESE_RE.test(label);
 }
 
 /**
