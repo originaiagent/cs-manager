@@ -3,10 +3,10 @@
  *
  * 検証:
  *  - tier='diag' 認可: X-Diag-Token 無しは 401
- *  - CLASSIFY_VIA_EMBED=true (既定): GET /api/embed/discovery を叩き、
+ *  - CLASSIFY_VIA_EMBED=true (明示指定時): GET /api/embed/discovery を叩き、
  *    kind='oneshot' の対象2 slug (cs:classify-defect / cs:classify-return-comment) が
  *    両方可視な時のみ ok:true。401/403・slug不足は ok:false (HTTP 200 でも契約破壊を握り潰さない)
- *  - CLASSIFY_VIA_EMBED=false: 現行 invokeChat ping のまま
+ *  - CLASSIFY_VIA_EMBED=false (=既定): 現行 invokeChat ping のまま
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
@@ -49,7 +49,11 @@ describe('/api/diag/ai 認可', () => {
   });
 });
 
-describe('/api/diag/ai: CLASSIFY_VIA_EMBED=true (既定) discovery 検証', () => {
+describe('/api/diag/ai: CLASSIFY_VIA_EMBED=true discovery 検証', () => {
+  beforeEach(() => {
+    process.env.CLASSIFY_VIA_EMBED = 'true';
+  });
+
   it('正常: kind=oneshot の対象2 slug が両方可視なら ok:true', async () => {
     const fetchMock = vi.fn(async () => ({
       ok: true,
@@ -129,9 +133,9 @@ describe('/api/diag/ai: CLASSIFY_VIA_EMBED=true (既定) discovery 検証', () =
   });
 });
 
-describe('/api/diag/ai: CLASSIFY_VIA_EMBED=false は現行 invokeChat ping のまま', () => {
-  it('invokeChat の結果をそのまま返す (discovery は呼ばない)', async () => {
-    process.env.CLASSIFY_VIA_EMBED = 'false';
+describe('/api/diag/ai: CLASSIFY_VIA_EMBED=false (=既定) は現行 invokeChat ping のまま', () => {
+  it('未設定 (既定) でも invokeChat の結果をそのまま返す (discovery は呼ばない)', async () => {
+    delete process.env.CLASSIFY_VIA_EMBED; // 実行環境の env 残留に依存しないよう明示的に未設定化
     invokeChatMock.mockResolvedValue({ ok: true, message: 'pong', traceId: 't1', durationMs: 5 });
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);

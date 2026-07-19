@@ -218,9 +218,9 @@ export function validateEmbedDefectResult(
  * ticketId: embed 経路の target_id (実在保証済のチケット UUID)。
  * existingLabels: 同一製品の既存 cause_label 一覧 (小分け防止のためプロンプトに提示。PII 非含有の症状ラベル)。
  *
- * ロールバックスイッチ (G2, env `CLASSIFY_VIA_EMBED`): 既定は origin-ai embed oneshot
- * (`cs:classify-defect`) 経由。'false' で現行 invokeChat 直呼び経路 (本文JSON regexフォールバック込み)
- * へ即時復帰する。
+ * ロールバックスイッチ (G2, env `CLASSIFY_VIA_EMBED`): 既定は現行 invokeChat 直呼び経路
+ * (本文JSON regexフォールバック込み)。`CLASSIFY_VIA_EMBED=true` を明示指定した時のみ
+ * origin-ai embed oneshot (`cs:classify-defect`) 経由へ切替わる。
  */
 export async function classifyDefectInquiry(
   internalKey: string,
@@ -260,7 +260,7 @@ export async function classifyDefectInquiry(
     .filter(Boolean)
     .slice(0, MAX_EXISTING_LABELS);
 
-  // (2a) embed 経路 (既定): origin-ai oneshot `cs:classify-defect` を1本起動。
+  // (2a) embed 経路 (CLASSIFY_VIA_EMBED=true 明示指定時): origin-ai oneshot `cs:classify-defect` を1本起動。
   //   本文JSON regexフォールバックは新経路では使わない (fail-closed 形状検証のみ)。
   if (classifyViaEmbed()) {
     const run = await runEmbedOneshotAndPoll({
@@ -285,7 +285,7 @@ export async function classifyDefectInquiry(
     return { ok: true, category: validated.category, causes: validated.causes, maskFailed: false };
   }
 
-  // (2b) legacy 経路 (CLASSIFY_VIA_EMBED=false): 現行 invokeChat 直呼び (変更なし)。
+  // (2b) legacy 経路 (既定): 現行 invokeChat 直呼び (変更なし)。
   const message = [
     `[skill: ${classifySkill}] 次の顧客問い合わせ(個人情報マスク済)を分類してください。`,
     `- category: ${CASE_CATEGORIES.join(' / ')} から1つ`,

@@ -143,8 +143,8 @@ const TICKET = {
 };
 
 // このテストスイートはクレーム RPC / 予算ガードのループ挙動 (AI 呼出経路とは独立) を見るため、
-// 明示的に legacy 経路 (invokeChat 直呼び) へ固定する。embed 経路 (既定) のテストは
-// defect-classify-embed.test.ts に分離した。
+// 明示的に legacy 経路 (invokeChat 直呼び。既定) へ固定する。embed 経路 (CLASSIFY_VIA_EMBED=true) の
+// テストは defect-classify-embed.test.ts に分離した。
 const OLD_CLASSIFY_VIA_EMBED = process.env.CLASSIFY_VIA_EMBED;
 
 beforeEach(() => {

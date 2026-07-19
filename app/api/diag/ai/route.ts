@@ -71,8 +71,8 @@ export async function GET(req: NextRequest) {
   if (authError) return authError;
 
   try {
-    // CLASSIFY_VIA_EMBED=true (既定): 分類2 oneshot が embed 経路から可視かを確認する。
-    // false (ロールバック中): 現行 invokeChat ping のまま (接続確認の意味は不変)。
+    // CLASSIFY_VIA_EMBED=true (明示指定時): 分類2 oneshot が embed 経路から可視かを確認する。
+    // 既定 (未設定/false): 現行 invokeChat ping のまま (接続確認の意味は不変)。
     if (classifyViaEmbed()) {
       const result = await checkClassifyEmbedDiscovery();
       return NextResponse.json(result);

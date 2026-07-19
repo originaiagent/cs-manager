@@ -31,11 +31,12 @@ export const CLASSIFY_EMBED_POLL_DEADLINE_MS = 90_000;
 export const CLASSIFY_EMBED_POLL_INTERVAL_MS = 2_000;
 
 /**
- * ロールバックスイッチ (G2)。既定 true (embed 経路)。env `CLASSIFY_VIA_EMBED=false` で
- * 現行 invokeChat 経路へ即時復帰する (このPRでは旧経路コードを削除しない)。
+ * ロールバックスイッチ (G2)。既定 false (legacy invokeChat 経路)。env `CLASSIFY_VIA_EMBED=true` を
+ * 明示指定した時のみ origin-ai embed 経路へ切替わる (このPRでは旧経路コードを削除しない。
+ * 切替判断は司令塔がトム確認とセットで行うため、この叩き台段階では挙動を変えない=既定OFF)。
  */
 export function classifyViaEmbed(): boolean {
-  return process.env.CLASSIFY_VIA_EMBED !== 'false';
+  return process.env.CLASSIFY_VIA_EMBED === 'true';
 }
 
 /** causes/symptoms 共通の要素型 (label + major_category)。 */

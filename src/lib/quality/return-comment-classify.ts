@@ -206,8 +206,9 @@ export function validateEmbedReturnSymptomsResult(result: unknown): ReturnSympto
  * returnKey: embed 経路の target_id (fbaReturnKey で決定的に算出済の値をそのまま使う)。
  * existingLabels: 既存 cause_label 語彙 (tickets 分類と共有。ラベル分裂防止のためプロンプトに提示)。
  *
- * ロールバックスイッチ (G2, env `CLASSIFY_VIA_EMBED`): 既定は origin-ai embed oneshot
- * (`cs:classify-return-comment`) 経由。'false' で現行 invokeChat 直呼び経路へ即時復帰する。
+ * ロールバックスイッチ (G2, env `CLASSIFY_VIA_EMBED`): 既定は現行 invokeChat 直呼び経路。
+ * `CLASSIFY_VIA_EMBED=true` を明示指定した時のみ origin-ai embed oneshot
+ * (`cs:classify-return-comment`) 経由へ切替わる。
  */
 async function classifyReturnComment(
   internalKey: string,
@@ -248,7 +249,7 @@ async function classifyReturnComment(
     .filter(Boolean)
     .slice(0, MAX_EXISTING_LABELS);
 
-  // (2a) embed 経路 (既定): origin-ai oneshot `cs:classify-return-comment` を1本起動。
+  // (2a) embed 経路 (CLASSIFY_VIA_EMBED=true 明示指定時): origin-ai oneshot `cs:classify-return-comment` を1本起動。
   //   本文JSON regexフォールバックは新経路では使わない (fail-closed 形状検証のみ)。
   if (classifyViaEmbed()) {
     const run = await runEmbedOneshotAndPoll({
@@ -272,7 +273,7 @@ async function classifyReturnComment(
     return { ok: true, symptoms: validated, maskFailed: false };
   }
 
-  // (2b) legacy 経路 (CLASSIFY_VIA_EMBED=false): 現行 invokeChat 直呼び (変更なし)。
+  // (2b) legacy 経路 (既定): 現行 invokeChat 直呼び (変更なし)。
   const message = [
     `[skill: ${classifySkill}] 次はFBA返品時の顧客コメント(個人情報マスク済)です。製品の症状を抽出してください。`,
     '- symptoms: 0〜3件。各要素は {"label":"...","major_category":"..."}',

@@ -7,9 +7,13 @@
  *   - causes/symptoms は配列必須・0〜3件 (欠落・非配列・4件以上は invalid)
  *   - 不正要素 (label 空・major_category 非enum) は黙って除外せず結果全体を invalid にする
  *   - 重複 label も invalid 扱い
+ *
+ * G2 ロールバックスイッチ classifyViaEmbed() の既定 (未設定/false = legacy invokeChat 経路) を
+ * 直接固定する回帰テストも含む (defect-classify.ts / return-comment-classify.ts の分岐は
+ * 既存の統合テストで別途カバー)。
  */
-import { describe, it, expect } from 'vitest';
-import { validateEmbedCauseArray } from '@/lib/quality/classify-embed';
+import { describe, it, expect, afterEach } from 'vitest';
+import { classifyViaEmbed, validateEmbedCauseArray } from '@/lib/quality/classify-embed';
 import { validateEmbedDefectResult } from '@/lib/quality/defect-classify';
 import { validateEmbedReturnSymptomsResult } from '@/lib/quality/return-comment-classify';
 
@@ -176,5 +180,37 @@ describe('validateEmbedReturnSymptomsResult (return-comment-classify.ts)', () =>
         symptoms: [{ label: 'description_mismatch', major_category: 'description_mismatch' }],
       }),
     ).toBeNull();
+  });
+});
+
+describe('classifyViaEmbed (G2 ロールバックスイッチ)', () => {
+  const OLD_CLASSIFY_VIA_EMBED = process.env.CLASSIFY_VIA_EMBED;
+
+  afterEach(() => {
+    if (OLD_CLASSIFY_VIA_EMBED === undefined) {
+      delete process.env.CLASSIFY_VIA_EMBED;
+    } else {
+      process.env.CLASSIFY_VIA_EMBED = OLD_CLASSIFY_VIA_EMBED;
+    }
+  });
+
+  it('未設定は既定 false (legacy invokeChat 経路)', () => {
+    delete process.env.CLASSIFY_VIA_EMBED;
+    expect(classifyViaEmbed()).toBe(false);
+  });
+
+  it("'true' を明示指定した時のみ embed 経路 (true) になる", () => {
+    process.env.CLASSIFY_VIA_EMBED = 'true';
+    expect(classifyViaEmbed()).toBe(true);
+  });
+
+  it("'false' の明示指定も legacy 経路 (false) のまま", () => {
+    process.env.CLASSIFY_VIA_EMBED = 'false';
+    expect(classifyViaEmbed()).toBe(false);
+  });
+
+  it("'true' 以外の値 (例 '1') は legacy 経路 (false) のまま (曖昧な真偽値解釈をしない)", () => {
+    process.env.CLASSIFY_VIA_EMBED = '1';
+    expect(classifyViaEmbed()).toBe(false);
   });
 });

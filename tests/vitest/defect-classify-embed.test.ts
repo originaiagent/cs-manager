@@ -1,10 +1,11 @@
 /**
- * runDefectClassification の origin-ai embed 経路 (CLASSIFY_VIA_EMBED 既定 true) テスト。
+ * runDefectClassification の origin-ai embed 経路 (CLASSIFY_VIA_EMBED=true 明示指定) テスト。
  *
  * 検証:
- *  - embed 経路 (既定) で runEmbedOneshotAndPoll を正しい引数 (slug/targetType/targetId=ticketId/
- *    input.categories 等) で呼ぶこと (defect-classify-run.test.ts は legacy 固定なので別ファイル化)
- *  - CLASSIFY_VIA_EMBED='false' で invokeChat 直呼びへ切替わること (embed/legacy 両分岐)
+ *  - embed 経路 (CLASSIFY_VIA_EMBED=true) で runEmbedOneshotAndPoll を正しい引数
+ *    (slug/targetType/targetId=ticketId/input.categories 等) で呼ぶこと
+ *    (defect-classify-run.test.ts は legacy 固定なので別ファイル化)
+ *  - CLASSIFY_VIA_EMBED='false' (=既定) で invokeChat 直呼びのままであること (embed/legacy 両分岐)
  *  - embed 失敗時は classify_attempts を再更新しない (attempts はクレーム時加算済のまま。契約不変)
  *  - embed 応答の形状不正は分類失敗 (fail-closed) として扱われる
  */
@@ -115,7 +116,7 @@ const TICKET = {
 const OLD_CLASSIFY_VIA_EMBED = process.env.CLASSIFY_VIA_EMBED;
 
 beforeEach(() => {
-  delete process.env.CLASSIFY_VIA_EMBED; // 未設定 = 既定 true (embed 経路)
+  process.env.CLASSIFY_VIA_EMBED = 'true'; // 既定は legacy に変わったため、embed 経路のテストは明示的にONにする
   runEmbedOneshotAndPollMock.mockReset();
   runEmbedOneshotAndPollMock.mockResolvedValue({
     ok: true,
@@ -144,7 +145,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('runDefectClassification: embed 経路 (CLASSIFY_VIA_EMBED 既定 true)', () => {
+describe('runDefectClassification: embed 経路 (CLASSIFY_VIA_EMBED=true)', () => {
   it('正しい slug/targetType/targetId(=ticketId)/input で runEmbedOneshotAndPoll を1本だけ呼ぶ', async () => {
     const { sb, ticketUpdates } = makeFakeSb({ claimed: [TICKET] });
     const result = await runDefectClassification(sb);

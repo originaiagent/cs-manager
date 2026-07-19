@@ -8,8 +8,8 @@
  *   - → クレームは 1 件ずつ (p_limit=1)・attempt の直前に行い、予算超過後は次件をクレームしない。
  *
  * このスイートは AI 呼出経路とは独立なループ挙動を見るため、明示的に legacy 経路
- * (invokeChat 直呼び) へ固定する。embed 経路 (既定) は return-comment-classify-embed.test.ts。
- * DB / AI / mask / ec-manager は全てモック。
+ * (invokeChat 直呼び。既定) へ固定する。embed 経路 (CLASSIFY_VIA_EMBED=true) は
+ * return-comment-classify-embed.test.ts。DB / AI / mask / ec-manager は全てモック。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 

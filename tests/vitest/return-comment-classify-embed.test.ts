@@ -1,11 +1,11 @@
 /**
- * runReturnCommentClassification の origin-ai embed 経路 (CLASSIFY_VIA_EMBED 既定 true) テスト。
+ * runReturnCommentClassification の origin-ai embed 経路 (CLASSIFY_VIA_EMBED=true 明示指定) テスト。
  *
  * 検証:
- *  - embed 経路 (既定) で runEmbedOneshotAndPoll を正しい引数
+ *  - embed 経路 (CLASSIFY_VIA_EMBED=true) で runEmbedOneshotAndPoll を正しい引数
  *    (slug='cs:classify-return-comment' / targetType='fba_return' / targetId=return_key(fbaReturnKey) /
  *    input={comment_masked, existing_labels} のみ) で呼ぶこと
- *  - CLASSIFY_VIA_EMBED='false' で invokeChat 直呼び (legacy) へ切替わること (embed/legacy 両分岐)
+ *  - CLASSIFY_VIA_EMBED='false' (=既定) で invokeChat 直呼び (legacy) のままであること (embed/legacy 両分岐)
  *  - symptoms:[] (症状なし) は正常成功として classified_at のみ設定すること
  *  - embed 失敗時は classified_at を設定しない (attempts はクレーム時加算済のまま。契約不変)
  */
@@ -93,7 +93,7 @@ function makeFakeSb() {
 const OLD_CLASSIFY_VIA_EMBED = process.env.CLASSIFY_VIA_EMBED;
 
 beforeEach(() => {
-  delete process.env.CLASSIFY_VIA_EMBED; // 未設定 = 既定 true (embed 経路)
+  process.env.CLASSIFY_VIA_EMBED = 'true'; // 既定は legacy に変わったため、embed 経路のテストは明示的にONにする
   fetchCustomerReturnsMock.mockReset();
   fetchCustomerReturnsMock.mockResolvedValue({ ok: true, rows: [ROW] });
   runEmbedOneshotAndPollMock.mockReset();
@@ -121,7 +121,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('runReturnCommentClassification: embed 経路 (CLASSIFY_VIA_EMBED 既定 true)', () => {
+describe('runReturnCommentClassification: embed 経路 (CLASSIFY_VIA_EMBED=true)', () => {
   it('正しい slug/targetType/targetId(=return_key)/input で runEmbedOneshotAndPoll を1本だけ呼ぶ', async () => {
     const { sb, symptomUpserts, stateUpdates } = makeFakeSb();
     const result = await runReturnCommentClassification(sb);
