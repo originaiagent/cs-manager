@@ -5,7 +5,12 @@
  *  - embed 経路 (CLASSIFY_VIA_EMBED=true) で runEmbedOneshotAndPoll を正しい引数
  *    (slug='cs:classify-return-comment' / targetType='fba_return' / targetId=return_key(fbaReturnKey) /
  *    input={comment_masked, existing_labels} のみ) で呼ぶこと
- *  - CLASSIFY_VIA_EMBED='false' (=既定) で invokeChat 直呼び (legacy) のままであること (embed/legacy 両分岐)
+ *  - existing_labels はスキル契約 (cs-classify-return-comment-v3) どおり [{label,major_category}]
+ *    形式で送ること。major_category は ticket_defect_causes / fba_return_symptoms の実績ペアから
+ *    解決し、同一ラベルが複数 major_category で記録されていれば最頻値を採用すること。実績の無い
+ *    ラベルは 'other' へフォールバックすること
+ *  - CLASSIFY_VIA_EMBED='false' (=既定) で invokeChat 直呼び (legacy) のままであること (embed/legacy 両分岐)。
+ *    legacy 経路では major_category 解決の DB 問い合わせを行わないこと (無駄な往復を避ける)
  *  - symptoms:[] (症状なし) は正常成功として classified_at のみ設定すること
  *  - embed 失敗時は classified_at を設定しない (attempts はクレーム時加算済のまま。契約不変)
  */
@@ -40,10 +45,27 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 const ROW = { orderId: 'o1', sku: 's1', returnDate: '2026-07-01', customerComments: '水が出ない' };
 const KEY = fbaReturnKey(ROW);
 
-function makeFakeSb() {
+interface FakeSbOpts {
+  /** top_defect_cause_labels RPC が返す既存ラベル行 (mergeExistingLabels の入力) */
+  globalLabelRows?: Array<{ label: string; n: number }>;
+  /** ticket_defect_causes.select().in() が返す実績ペア (major_category 解決の一次ソース) */
+  causeRows?: Array<{ cause_label: string; major_category: string }>;
+  /** fba_return_symptoms.select().in() が返す実績ペア (major_category 解決の二次ソース) */
+  symptomRows?: Array<{ cause_label: string; major_category: string }>;
+  /** true で ticket_defect_causes.select().in() が { data: null, error } を返す (throw ではない失敗形) */
+  causeQueryError?: boolean;
+  /** true で fba_return_symptoms.select().in() が { data: null, error } を返す (throw ではない失敗形) */
+  symptomQueryError?: boolean;
+}
+
+function makeFakeSb(opts: FakeSbOpts = {}) {
+  const globalLabelRows = opts.globalLabelRows ?? [];
+  const causeRows = opts.causeRows ?? [];
+  const symptomRows = opts.symptomRows ?? [];
   const rpcCalls: Array<{ name: string; params: unknown }> = [];
   const stateUpdates: string[] = [];
   const symptomUpserts: Array<Record<string, unknown>[]> = [];
+  const categoryLookupTables: string[] = [];
   let claimed = false;
 
   const sb = {
@@ -54,7 +76,7 @@ function makeFakeSb() {
         claimed = true;
         return Promise.resolve({ data: [{ return_key: KEY, attempts: 1 }], error: null });
       }
-      if (name === 'top_defect_cause_labels') return Promise.resolve({ data: [], error: null });
+      if (name === 'top_defect_cause_labels') return Promise.resolve({ data: globalLabelRows, error: null });
       return Promise.resolve({ data: null, error: { message: `unexpected rpc ${name}` } });
     },
     from: (table: string) => {
@@ -75,8 +97,30 @@ function makeFakeSb() {
           }),
         };
       }
+      if (table === 'ticket_defect_causes') {
+        return {
+          select: () => ({
+            in: () => {
+              categoryLookupTables.push(table);
+              if (opts.causeQueryError) {
+                return Promise.resolve({ data: null, error: { message: 'db error' } });
+              }
+              return Promise.resolve({ data: causeRows, error: null });
+            },
+          }),
+        };
+      }
       if (table === 'fba_return_symptoms') {
         return {
+          select: () => ({
+            in: () => {
+              categoryLookupTables.push(table);
+              if (opts.symptomQueryError) {
+                return Promise.resolve({ data: null, error: { message: 'db error' } });
+              }
+              return Promise.resolve({ data: symptomRows, error: null });
+            },
+          }),
           upsert: (rows: Record<string, unknown>[]) => {
             symptomUpserts.push(rows);
             return Promise.resolve({ error: null });
@@ -87,7 +131,7 @@ function makeFakeSb() {
     },
   } as unknown as SupabaseClient;
 
-  return { sb, rpcCalls, stateUpdates, symptomUpserts };
+  return { sb, rpcCalls, stateUpdates, symptomUpserts, categoryLookupTables };
 }
 
 const OLD_CLASSIFY_VIA_EMBED = process.env.CLASSIFY_VIA_EMBED;
@@ -140,6 +184,66 @@ describe('runReturnCommentClassification: embed 経路 (CLASSIFY_VIA_EMBED=true)
     expect(stateUpdates).toEqual([KEY]);
   });
 
+  it('existing_labels は [{label,major_category}] 形式で送る (実績ペアから最頻値を解決)', async () => {
+    const { sb } = makeFakeSb({
+      globalLabelRows: [
+        { label: '水が出ない', n: 5 },
+        { label: '傷あり', n: 2 },
+      ],
+      causeRows: [
+        { cause_label: '水が出ない', major_category: 'function_defect' },
+        { cause_label: '水が出ない', major_category: 'function_defect' },
+        { cause_label: '傷あり', major_category: 'damaged' },
+      ],
+      // 少数派 (1件のみ) は最頻値に勝てない
+      symptomRows: [{ cause_label: '水が出ない', major_category: 'damaged' }],
+    });
+    await runReturnCommentClassification(sb);
+
+    const call = runEmbedOneshotAndPollMock.mock.calls[0][0];
+    expect(call.input.existing_labels).toEqual([
+      { label: '水が出ない', major_category: 'function_defect' },
+      { label: '傷あり', major_category: 'damaged' },
+    ]);
+  });
+
+  it('ticket_defect_causes / fba_return_symptoms に実績の無いラベルは major_category=other へフォールバックする', async () => {
+    const { sb } = makeFakeSb({
+      globalLabelRows: [{ label: '謎の不具合', n: 1 }],
+      causeRows: [],
+      symptomRows: [],
+    });
+    await runReturnCommentClassification(sb);
+
+    const call = runEmbedOneshotAndPollMock.mock.calls[0][0];
+    expect(call.input.existing_labels).toEqual([{ label: '謎の不具合', major_category: 'other' }]);
+  });
+
+  it('major_category 解決の DB 問い合わせが失敗 ({data:null,error}) しても分類は続行し全ラベル other になる (codex CONCERN対応)', async () => {
+    const { sb } = makeFakeSb({
+      globalLabelRows: [{ label: '水が出ない', n: 5 }],
+      causeRows: [{ cause_label: '水が出ない', major_category: 'function_defect' }],
+      causeQueryError: true,
+    });
+    const result = await runReturnCommentClassification(sb);
+
+    expect(result.classified).toBe(1);
+    const call = runEmbedOneshotAndPollMock.mock.calls[0][0];
+    expect(call.input.existing_labels).toEqual([{ label: '水が出ない', major_category: 'other' }]);
+  });
+
+  it('同数タイブレークは ticket_defect_causes 側 (先に集計) が勝つ (決定的な安定規則)', async () => {
+    const { sb } = makeFakeSb({
+      globalLabelRows: [{ label: '水が出ない', n: 5 }],
+      causeRows: [{ cause_label: '水が出ない', major_category: 'function_defect' }],
+      symptomRows: [{ cause_label: '水が出ない', major_category: 'damaged' }],
+    });
+    await runReturnCommentClassification(sb);
+
+    const call = runEmbedOneshotAndPollMock.mock.calls[0][0];
+    expect(call.input.existing_labels).toEqual([{ label: '水が出ない', major_category: 'function_defect' }]);
+  });
+
   it('CLASSIFY_VIA_EMBED=false で invokeChat 直呼び (legacy) へ即時復帰する (embed/legacy 両分岐)', async () => {
     process.env.CLASSIFY_VIA_EMBED = 'false';
     invokeChatMock.mockResolvedValue({
@@ -147,12 +251,16 @@ describe('runReturnCommentClassification: embed 経路 (CLASSIFY_VIA_EMBED=true)
       structuredOutput: { symptoms: [{ label: '水が出ない', major_category: 'function_defect' }] },
       message: '',
     });
-    const { sb } = makeFakeSb();
+    const { sb, categoryLookupTables } = makeFakeSb({
+      globalLabelRows: [{ label: '水が出ない', n: 5 }],
+    });
     const result = await runReturnCommentClassification(sb);
 
     expect(result.classified).toBe(1);
     expect(runEmbedOneshotAndPollMock).not.toHaveBeenCalled();
     expect(invokeChatMock).toHaveBeenCalledTimes(1);
+    // legacy 経路は label 文字列のみ使うため、major_category 解決の DB 問い合わせをしない (無駄往復回避)
+    expect(categoryLookupTables).toHaveLength(0);
   });
 
   it('symptoms:[] (症状なし) は正常成功として classified_at のみ設定する', async () => {

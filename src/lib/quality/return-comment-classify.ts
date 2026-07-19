@@ -13,7 +13,16 @@
  *     でのみ実際に消費される。
  *   - 既存ラベル語彙は defect-classify.ts と同じ RPC (top_defect_cause_labels) を再利用する
  *     (ticket_defect_causes / customer_service_records.defect_type の頻出ラベル)。
- *     これにより tickets 側と症状ラベルの語彙が共有され、同義ラベルへの分裂を防ぐ。
+ *     これにより tickets 側と症状ラベルの語彙が共有され、同義ラベルへの分裂を防ぐ
+ *     (ラベル文字列の選定ロジックはこの資料化で変更していない)。
+ *   - embed 経路のスキル契約 (cs-classify-return-comment-v3) は existing_labels を
+ *     [{label, major_category}] で受ける (docs/ops/m2-skills.sql)。選定済みラベルの
+ *     major_category は ticket_defect_causes / fba_return_symptoms の実績ペアから解決し
+ *     (同一ラベルが複数 major_category で記録されている場合は最頻値を採用)、実績の無い
+ *     ラベル (customer_service_records.defect_type 由来の自由記述等) は normalizeMajorCategory
+ *     と同じ既定 'other' にフォールバックする。legacy 経路はラベル文字列のみ使うため
+ *     (CLASSIFY_VIA_EMBED が既定 OFF のため通常運用で無駄な問い合わせにしないよう)
+ *     embed 経路が有効な時のみこの解決を行う (resolveExistingLabelCategories)。
  *
  * 対象取得 (20260718000000_fba_return_symptoms.sql / claim 1件ずつ化 2026-07-19):
  *   - cs-manager は FBA 返品行そのものをローカル DB に持たない (ec-manager 保有)。
@@ -45,6 +54,7 @@ import { fbaReturnKey } from './return-reasons';
 import { mergeExistingLabels } from './defect-classify';
 import {
   MAJOR_CATEGORIES,
+  isMajorCategory,
   normalizeMajorCategory,
   type MajorCategory,
 } from './defect-taxonomy';
@@ -202,9 +212,79 @@ export function validateEmbedReturnSymptomsResult(result: unknown): ReturnSympto
 }
 
 /**
+ * 既存ラベル (mergeExistingLabels で選定済みの語彙。選定ロジック自体は変更しない) それぞれの
+ * major_category を実データから解決する。embed 経路のスキル契約 (cs-classify-return-comment-v3)
+ * が existing_labels を [{label, major_category}] で要求するため (docs/ops/m2-skills.sql)。
+ *
+ * ticket_defect_causes / fba_return_symptoms の実績ペア (cause_label, major_category) を
+ * 対象ラベルに絞って合算し、ラベル毎に最頻値を採用する (同一ラベルが複数 major_category で
+ * 記録されている場合は「最頻major_categoryで1本化」)。customer_service_records.defect_type
+ * 由来など実績の無いラベル (major_category を持たない自由記述語彙) は normalizeMajorCategory
+ * と同じ既定 'other' へフォールバックする (ハードコードではなく実データ解決が欠損した分のみ)。
+ * 語彙提示はヒント用途のため、DB 取得失敗時も分類自体は続行する (fail-soft。全ラベル 'other')。
+ */
+async function resolveExistingLabelCategories(
+  sb: SupabaseClient,
+  labels: string[],
+): Promise<ReturnSymptom[]> {
+  if (labels.length === 0) return [];
+
+  // 取得不能時 (throw / { data: null, error } どちらの失敗形も) は全ラベル 'other' へ
+  // フォールバックする (語彙提示はヒント用途のため、解決不能でも分類自体は続行する)。
+  const fallback = (): ReturnSymptom[] =>
+    labels.map((label) => ({ label, major_category: 'other' as MajorCategory }));
+
+  try {
+    const [causesRes, symptomsRes] = await Promise.all([
+      sb.from('ticket_defect_causes').select('cause_label, major_category').in('cause_label', labels),
+      sb.from('fba_return_symptoms').select('cause_label, major_category').in('cause_label', labels),
+    ]);
+    // Supabase クエリは失敗時に throw せず { data: null, error } を返す (loadGlobalTopLabels と
+    // 同じ流儀)。error を無視すると data=null を「実績なし」と誤認して黙って other 化してしまう
+    // ため、明示的にチェックしてフォールバックする。
+    if (causesRes.error || symptomsRes.error) return fallback();
+
+    const counts = new Map<string, Map<MajorCategory, number>>();
+    const bump = (label: unknown, category: unknown) => {
+      if (typeof label !== 'string' || !isMajorCategory(category)) return;
+      const byCategory = counts.get(label) ?? new Map<MajorCategory, number>();
+      byCategory.set(category, (byCategory.get(category) ?? 0) + 1);
+      counts.set(label, byCategory);
+    };
+    for (const row of (causesRes.data ?? []) as Array<{ cause_label: unknown; major_category: unknown }>) {
+      bump(row.cause_label, row.major_category);
+    }
+    for (const row of (symptomsRes.data ?? []) as Array<{ cause_label: unknown; major_category: unknown }>) {
+      bump(row.cause_label, row.major_category);
+    }
+
+    return labels.map((label) => {
+      const byCategory = counts.get(label);
+      if (!byCategory || byCategory.size === 0) return { label, major_category: 'other' as MajorCategory };
+      // 最頻値を採用 (「重複labelは最頻major_categoryで1本化」)。同数タイブレークは
+      // 集計順 (ticket_defect_causes → fba_return_symptoms の順に加算) の先勝ちで決定的。
+      // 業務上の優先根拠があるわけではなく、あくまで安定した (=再実行しても同じ結果になる) 規則。
+      let best: MajorCategory = 'other';
+      let bestCount = 0;
+      for (const [category, n] of byCategory) {
+        if (n > bestCount) {
+          best = category;
+          bestCount = n;
+        }
+      }
+      return { label, major_category: best };
+    });
+  } catch {
+    return fallback();
+  }
+}
+
+/**
  * FBA 返品の顧客コメント (raw) を masked 化し、症状抽出させる。
  * returnKey: embed 経路の target_id (fbaReturnKey で決定的に算出済の値をそのまま使う)。
- * existingLabels: 既存 cause_label 語彙 (tickets 分類と共有。ラベル分裂防止のためプロンプトに提示)。
+ * existingLabels: 既存 cause_label 語彙 + major_category (tickets 分類と共有。ラベル分裂防止の
+ *   ためプロンプトに提示。embed 経路のスキル契約が existing_labels[{label,major_category}] を
+ *   要求するため object 形で受け取る。legacy 経路のプロンプトは label のみ使用する)。
  *
  * ロールバックスイッチ (G2, env `CLASSIFY_VIA_EMBED`): 既定は現行 invokeChat 直呼び経路。
  * `CLASSIFY_VIA_EMBED=true` を明示指定した時のみ origin-ai embed oneshot
@@ -214,7 +294,7 @@ async function classifyReturnComment(
   internalKey: string,
   returnKey: string,
   rawComment: string,
-  existingLabels: string[],
+  existingLabels: ReturnSymptom[],
   classifySkill: string,
 ): Promise<ClassifyCommentResult> {
   const trimmed = rawComment.trim();
@@ -245,8 +325,8 @@ async function classifyReturnComment(
   }
 
   const labels = existingLabels
-    .map((l) => l.trim())
-    .filter(Boolean)
+    .map((l) => ({ label: l.label.trim(), major_category: l.major_category }))
+    .filter((l) => l.label.length > 0)
     .slice(0, MAX_EXISTING_LABELS);
 
   // (2a) embed 経路 (CLASSIFY_VIA_EMBED=true 明示指定時): origin-ai oneshot `cs:classify-return-comment` を1本起動。
@@ -258,6 +338,8 @@ async function classifyReturnComment(
       targetId: returnKey,
       input: {
         comment_masked: masked,
+        // スキル契約 (cs-classify-return-comment-v3 / docs/ops/m2-skills.sql):
+        // existing_labels は [{label, major_category}] を要求する。
         existing_labels: labels,
       },
       deadlineMs: CLASSIFY_EMBED_POLL_DEADLINE_MS,
@@ -273,7 +355,7 @@ async function classifyReturnComment(
     return { ok: true, symptoms: validated, maskFailed: false };
   }
 
-  // (2b) legacy 経路 (既定): 現行 invokeChat 直呼び (変更なし)。
+  // (2b) legacy 経路 (既定): 現行 invokeChat 直呼び (変更なし。プロンプトは label 文字列のみ使用)。
   const message = [
     `[skill: ${classifySkill}] 次はFBA返品時の顧客コメント(個人情報マスク済)です。製品の症状を抽出してください。`,
     '- symptoms: 0〜3件。各要素は {"label":"...","major_category":"..."}',
@@ -283,7 +365,7 @@ async function classifyReturnComment(
     '- 表現が違うだけで同じ症状なら、言い換えず既存ラベルを一字一句そのまま使う',
     '- 推測・創作は禁止。コメント本文に根拠のある内容のみ使う。情報不足・症状が読み取れない場合は {"symptoms":[]} とする',
     'JSON {"symptoms":[...]} のみで答えてください。',
-    ...(labels.length > 0 ? ['', '## existing_labels', ...labels.map((l) => `- ${l}`)] : []),
+    ...(labels.length > 0 ? ['', '## existing_labels', ...labels.map((l) => `- ${l.label}`)] : []),
     '',
     '## comment_masked',
     masked,
@@ -436,6 +518,11 @@ export async function runReturnCommentClassification(
 
   const globalLabels = await loadGlobalSymptomLabels(sb);
   const existingLabels = mergeExistingLabels([], globalLabels, MAX_EXISTING_LABELS);
+  // major_category 解決 (DB 往復) は embed 経路が有効な時のみ行う (legacy 経路はラベル文字列
+  // のみ使用するため。CLASSIFY_VIA_EMBED は既定 OFF のため、通常運用では無駄な問い合わせを避ける)。
+  const existingLabelEntries = classifyViaEmbed()
+    ? await resolveExistingLabelCategories(sb, existingLabels)
+    : existingLabels.map((label) => ({ label, major_category: 'other' as MajorCategory }));
 
   const deadline = Date.now() + runBudgetMs();
 
@@ -460,7 +547,7 @@ export async function runReturnCommentClassification(
     }
     result.scanned += 1;
 
-    const cls = await classifyReturnComment(internalKey, key, comment, existingLabels, classifySkill);
+    const cls = await classifyReturnComment(internalKey, key, comment, existingLabelEntries, classifySkill);
 
     if (!cls.ok) {
       // mask 失敗 / AI 呼び出し失敗は再試行対象 (attempts はクレーム時に加算済のため
