@@ -18,6 +18,8 @@ import { getSupabaseAdmin } from '@/lib/db/supabase-admin';
 import { authorizeAiManifestRequest } from '@/lib/ai-capabilities/internal-key-guard';
 import { getCapability } from '@/lib/ai-capabilities/manifest';
 import { applySearchFilters, parseSearchParams } from '@/app/customer-records/_lib/build-search-query';
+import { readDefectRateCapability } from '@/lib/ai-capabilities/defect-rate-capability';
+import { readInquiryStatsCapability } from '@/lib/ai-capabilities/inquiry-stats-capability';
 
 // node:crypto を使う内部鍵ガードのため Node runtime を強制する。
 export const runtime = 'nodejs';
@@ -83,6 +85,18 @@ export async function GET(
   switch (slug) {
     case 'customer-service':
       return readCustomerService(sp);
+    case 'defect-rate':
+      try {
+        return NextResponse.json(await readDefectRateCapability(sp), { status: 200 });
+      } catch (error: any) {
+        return NextResponse.json({ error: error?.message ?? 'Failed to load defect rate' }, { status: 500 });
+      }
+    case 'inquiry-stats':
+      try {
+        return NextResponse.json(await readInquiryStatsCapability(sp), { status: 200 });
+      } catch (error: any) {
+        return NextResponse.json({ error: error?.message ?? 'Failed to load inquiry stats' }, { status: 500 });
+      }
     default:
       // manifest に登録済だが dispatch 未実装 (fail-closed)。
       return NextResponse.json({ ok: false, error: 'Capability not implemented' }, { status: 404 });

@@ -45,6 +45,12 @@ npm run dev
 - `/api/diag/core`: Check Core API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 - `/api/diag/ai`: Check AI API connectivity (requires `X-Diag-Token: $DIAG_TOKEN` header)
 
+## AI Capability Data (`/api/ai/capabilities/[slug]`)
+- `customer-service` に加え、read-only の `defect-rate`（不良発生率）と
+  `inquiry-stats`（問い合わせ統計）を提供する。
+- 全 slug は既存の `X-Internal-API-Key` 認証を共通で通り、未登録・未実装 slug は 404。
+- 新規2口は商品ID/商品名と期間で絞り込み可能。集計値のみを返し、顧客PIIは取得・出力しない。
+
 ## Cron Jobs (Vercel)
 - `/api/cron/sync-channels`: 10分間隔（`*/10 * * * *`）。code='rakuten' を**除く** active channels を順に adapter 実行 → tickets/messages を upsert。
   - 認可: `Authorization: Bearer ${CRON_SECRET}` または手動 `X-Diag-Token: $DIAG_TOKEN`

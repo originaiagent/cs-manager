@@ -52,6 +52,74 @@ export interface FetchProductsByIdsResult {
   error?: string;
 }
 
+export interface SearchProductsResult {
+  ok: boolean;
+  products: CoreProduct[];
+  error?: string;
+}
+
+/**
+ * 商品名の部分一致検索 (Core Master v1)。
+ *
+ * - エンドポイント: GET /api/v1/master/products/search?q=&limit=&fields=
+ * - 認証・timeout・エラー処理は他の products ラッパーと同一。
+ */
+export async function searchProductsByName(
+  query: string,
+  limit: number = 100,
+): Promise<SearchProductsResult> {
+  const coreApiUrl = process.env.CORE_API_URL?.replace(/\s+$/, '');
+  if (!coreApiUrl) return { ok: false, products: [], error: 'CORE_API_URL is not set' };
+  const entryKeys = getEntryKeys();
+  if (entryKeys.length === 0) {
+    return { ok: false, products: [], error: 'CORE_CREDENTIAL_KEY is not set' };
+  }
+  const fields = 'id,product_name,variation,product_group_id';
+  const url =
+    `${coreApiUrl.replace(/\/$/, '')}/api/v1/master/products/search` +
+    `?q=${encodeURIComponent(query.trim())}` +
+    `&limit=${Math.min(Math.max(Math.trunc(limit) || 100, 1), 500)}` +
+    `&fields=${encodeURIComponent(fields)}`;
+  try {
+    const response = await fetchWithEntryKeys(
+      url,
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(CORE_API_TIMEOUT_MS),
+      },
+      { entryKeys },
+    );
+    if (!response.ok) {
+      try { await response.arrayBuffer(); } catch { /* ignore */ }
+      return {
+        ok: false,
+        products: [],
+        error: `Core API error: ${response.status} ${response.statusText}`,
+      };
+    }
+    const body = await response.json();
+    const rows = Array.isArray(body) ? body : (body?.data ?? body?.products ?? []);
+    if (!Array.isArray(rows)) {
+      return { ok: false, products: [], error: 'Unexpected response shape' };
+    }
+    return {
+      ok: true,
+      products: rows.filter((row): row is CoreProduct => !!row && typeof row === 'object'),
+    };
+  } catch (error: any) {
+    const isTimeout = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+    return {
+      ok: false,
+      products: [],
+      error: isTimeout
+        ? `Timeout after ${CORE_API_TIMEOUT_MS}ms`
+        : `Network error: ${error?.message ?? String(error)}`,
+    };
+  }
+}
+
 export async function fetchProducts(limit: number = 1): Promise<FetchProductsResult> {
   if (!CORE_API_URL) {
     return { ok: false, count: 0, error: 'CORE_API_URL is not set' };
