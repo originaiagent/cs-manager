@@ -161,7 +161,100 @@ const CUSTOMER_SERVICE: Capability = {
   },
 };
 
-export const CAPABILITIES: Capability[] = [CUSTOMER_SERVICE];
+const DEFECT_RATE: Capability = {
+  concept: '不良発生率',
+  slug: 'defect-rate',
+  aliases: ['不良率', '不良発生', '品質', '返品理由', '不良原因'],
+  description:
+    '問い合わせ・顧客対応記録・FBA返品を統合し、商品バリエーション別の不良件数、販売数、不良率、原因・経路・期間別内訳を返す。',
+  domain: '品質管理',
+  read_only: true,
+  endpoint: { method: 'GET', path: '/api/ai/capabilities/defect-rate' },
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      product_id: { type: 'string', description: 'Core 商品IDまたは親group_id' },
+      product: { type: 'string', description: '商品名の部分一致' },
+      date_from: { type: 'string', description: '開始日 YYYY-MM-DD' },
+      date_to: { type: 'string', description: '終了日 YYYY-MM-DD' },
+      granularity: { type: 'string', enum: ['month', 'week'], default: 'month' },
+      limit: { type: 'number', minimum: 1, maximum: 50, default: 10 },
+    },
+    required: [],
+  },
+  output_schema: {
+    type: 'object',
+    properties: {
+      ok: { type: 'boolean' },
+      period: { type: 'object' },
+      bucket_granularity: { type: 'string' },
+      basis: { const: 'occurred' },
+      basis_date: { type: 'string' },
+      denominator_source: { type: 'string' },
+      sales_ok: { type: 'boolean' },
+      returns_ok: { type: 'boolean' },
+      returns_truncated: { type: 'boolean' },
+      product_filter: { type: 'object' },
+      limit: { type: 'number' },
+      truncated: { type: 'boolean' },
+      products: { type: 'array', items: { type: 'object' } },
+    },
+    required: [
+      'ok', 'period', 'bucket_granularity', 'basis', 'basis_date', 'denominator_source',
+      'sales_ok', 'returns_ok', 'returns_truncated', 'product_filter', 'limit', 'truncated', 'products',
+    ],
+  },
+};
+
+const INQUIRY_STATS: Capability = {
+  concept: '問い合わせ統計',
+  slug: 'inquiry-stats',
+  aliases: ['問い合わせ件数', '問い合わせ傾向', '問い合わせ分類', '前期比', 'CS統計'],
+  description:
+    '商品・期間で問い合わせを集計し、対応分類、不良原因大分類、FBA返品症状と直前同日数期間との比較を返す。' +
+    '総問い合わせ件数・対応分類はチケットの product_id 一致で絞り込むため、製品未紐付けのチケットは' +
+    '商品指定時にカウントされないことがある (不良原因大分類・FBA返品症状は defect-rate と同じ多段解決を使う)。',
+  domain: 'カスタマーサポート',
+  read_only: true,
+  endpoint: { method: 'GET', path: '/api/ai/capabilities/inquiry-stats' },
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      product_id: { type: 'string', description: 'Core 商品IDまたは親group_id' },
+      product: { type: 'string', description: '商品名の部分一致' },
+      date_from: { type: 'string', description: '開始日 YYYY-MM-DD' },
+      date_to: { type: 'string', description: '終了日 YYYY-MM-DD' },
+    },
+    required: [],
+  },
+  output_schema: {
+    type: 'object',
+    properties: {
+      ok: { type: 'boolean' },
+      period: { type: 'object' },
+      basis_date: { type: 'string' },
+      product_filter: { type: 'object' },
+      total_inquiries: { type: 'number' },
+      case_category_breakdown: { type: 'object' },
+      defect_major_category_breakdown: { type: 'object' },
+      fba_symptom_breakdown: { type: 'object' },
+      previous_period: { type: 'object' },
+      change_vs_previous: { type: 'object' },
+      sales_ok: { type: 'boolean' },
+      returns_ok: { type: 'boolean' },
+      returns_truncated: { type: 'boolean' },
+    },
+    required: [
+      'ok', 'period', 'basis_date', 'product_filter', 'total_inquiries',
+      'case_category_breakdown', 'defect_major_category_breakdown', 'fba_symptom_breakdown',
+      'previous_period', 'change_vs_previous', 'sales_ok', 'returns_ok', 'returns_truncated',
+    ],
+  },
+};
+
+export const CAPABILITIES: Capability[] = [CUSTOMER_SERVICE, DEFECT_RATE, INQUIRY_STATS];
 
 export const manifest: CapabilityManifest = {
   tool_slug: TOOL_SLUG,
