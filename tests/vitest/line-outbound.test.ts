@@ -220,6 +220,39 @@ async function runSend(repo: LineDraftRepo, client: LineMessagingClient) {
   return p;
 }
 
+describe('L1 二重返信ガード (config.forward_mode)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('forward_mode=true → 承認済み draft があっても送信も claim もしない', async () => {
+    const repo = new FakeRepo([draft('d1')]);
+    const fetchSpy = vi.fn(async () => new Response('{}', { status: 200 }));
+    const client = new LineMessagingClient({
+      credentials: { channel_access_token: 'tok' },
+      fetchImpl: fetchSpy as unknown as typeof fetch,
+    });
+    const fwdChannel: LineChannelRow = { ...channel, config: { ...channel.config, forward_mode: true } };
+
+    const p = sendApprovedLineDrafts(fwdChannel, noopLogger, { repo, client });
+    await vi.runAllTimersAsync();
+    const res = await p;
+
+    expect(res).toMatchObject({ attempted: 0, succeeded: 0, failed: 0 });
+    expect(fetchSpy).not.toHaveBeenCalled(); // LINE へ push しない (二重返信防止)
+    expect(repo.drafts.get('d1')!.status).toBe('approved'); // status を動かさない (claim もしない)
+  });
+
+  it('forward_mode 未設定 → 従来どおり送信する (後方互換)', async () => {
+    const repo = new FakeRepo([draft('d1')]);
+    const client = clientReturning(() =>
+      new Response(JSON.stringify({ sentMessages: [{ id: 'mm1' }] }), { status: 200 }),
+    );
+    const res = await runSend(repo, client);
+    expect(res.succeeded).toBe(1);
+    expect(repo.drafts.get('d1')!.status).toBe('sent');
+  });
+});
+
 describe('sendApprovedLineDrafts orchestration', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());

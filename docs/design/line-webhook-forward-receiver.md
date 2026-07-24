@@ -144,9 +144,10 @@ Tier2 は **transport（送信元がLステップか）認証**であり **paylo
 
 ## 5. L1 二重返信ガード（構造ガードを主・運用を副）＆ L5 復帰条件
 roadmap L1 は「返信は当面Lステップ・cs-managerは閲覧+下書きのみ・二重返信防止」。
-- **構造ガード（主・additive・既定安全）**: `line-sync`/`outbound` は **`config.forward_mode===true` の channel を送信 skip**（または専用 `send_enabled=false` gate。既定送信可・forward_mode 時のみ停止）。承認クリック運用に依存せず、token 漏洩で偽造下書きが承認されても**自動送信されない**。既に forward_mode を足すので追加コスト極小。→ 敵対レビュー3観点が独立指摘。
-- **運用ガード（副）**: L1 中は下書きを承認しない。
-- **L5 復帰（Tier2 撤去の完了条件）**: (1) `forward_mode=false` を確認（送信解除は forward_until 超過ではなく **forward_mode=false のみ**・§10.3）、(2) **Tier2 拒否テスト**（forward token 付きが 401）、(3) Core `line_webhook_forward.token` を**削除**（停止参照だけでなく失効）+ キャッシュ失効確認、(4) LINE Webhook を cs-manager 直結へ repoint 確認、(5) 送信 skip gate 解除。L5 goal の完了条件に含める。
+- **✅ 構造ガード（実装済 2026-07-24 / codex code review APPROVE）**: `sendApprovedLineDrafts` 冒頭で **`config.forward_mode===true` なら早期 return**（credential 取得・stale reclaim・draft claim のいずれもせず `attempted/succeeded/failed=0` を返す）。承認クリック運用に依存せず二重返信を止める。**既定（未設定/false）は従来どおり送信＝後方互換**。テストで pin 済（`tests/vitest/line-outbound.test.ts`）。
+- **運用ガード（副）**: L1 中は下書きを承認しない（構造ガードがあるので万一承認しても送信されない）。
+- **L5 復帰の完了条件**: (1) **L1 中に溜まった `approved` 下書きの残件を確認**し不要なものは status を戻す/破棄（⚠️ codex 指摘: `forward_mode=false` に戻すと**溜まった承認済み下書きが次の cron から順次送信される**）、(2) `forward_mode=false` に変更（送信解除は forward_until 超過ではなく **forward_mode=false のみ**・§10.3）、(3) LINE Webhook を cs-manager 直結へ repoint 確認、(4) 送信復旧を実確認。
+  - ※ Tier2 未実装のため、旧項目の「Tier2 拒否テスト」「Core `line_webhook_forward.token` 失効」は**不要**（Case A 確定により Tier2 自体を作っていない）。
 
 ---
 
