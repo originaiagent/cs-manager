@@ -20,6 +20,7 @@ import { getCapability } from '@/lib/ai-capabilities/manifest';
 import { applySearchFilters, parseSearchParams } from '@/app/customer-records/_lib/build-search-query';
 import { readDefectRateCapability } from '@/lib/ai-capabilities/defect-rate-capability';
 import { readInquiryStatsCapability } from '@/lib/ai-capabilities/inquiry-stats-capability';
+import { readBrowseCapability } from '@/lib/ai-capabilities/browse-capability';
 
 // node:crypto を使う内部鍵ガードのため Node runtime を強制する。
 export const runtime = 'nodejs';
@@ -97,6 +98,9 @@ export async function GET(
       } catch (error: any) {
         return NextResponse.json({ error: error?.message ?? 'Failed to load inquiry stats' }, { status: 500 });
       }
+    case 'browse':
+      // エラー正規化 (400 invalid_op 等 / 500 browse_failed) は reader 内で完結する。
+      return readBrowseCapability(sp);
     default:
       // manifest に登録済だが dispatch 未実装 (fail-closed)。
       return NextResponse.json({ ok: false, error: 'Capability not implemented' }, { status: 404 });
