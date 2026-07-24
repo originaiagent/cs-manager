@@ -34,5 +34,15 @@
 - 教訓: **外部レポートの取込では Content-Type の charset を必ず尊重する。ASCII列しか見ていないと文字化けは何ヶ月も潜伏する。**
 - 申し送り: 同レポートに `status` 列は実在せず（12列に無い）、既存パーサは `idx("status")` が -1 のため常に空文字を入れている。本タスク範囲外のため未修正。
 
+## 2026-07-23 L1技術準備（Lステップ→LINE移行：併用期間の受け口設計）
+- 状態: L1設計完了・コード実装待ち
+- ブランチ: claude/lstep-handoff-note
+- 内容:
+  - **Lステップ併用期間の受信受け口設計を codex で APPROVE** (round1-5・残blocker/major=0)。同一エンドポイント内の段階認証: Tier1=既存 x-line-signature（透過対応・Case A カバー）。Tier2=opt-in で転送元共有token（Core credential line_webhook_forward・fail-closed・tier独立）。Tier2は Case B 確定時のみ実装。
+  - **最重要の未知点Q2**: 「Lステップ Webhook転送がカスタムヘッダを透過するか」は公開情報未確定。Lステップ側は月5,500円オプション、転送先URL欄のみ公開・カスタムヘッダ可否は非公開。→ トム申込み後の実データ1通で Case A/B を確定する方針（推測で設計しない）。
+  - **コスト・喪失・二重返信ガード**: RAG予算hard cap / outbox と failures を同一tx で登録 / forward_mode channel は送信 skip。
+  - **ドキュメント作成**: `docs/design/line-webhook-forward-receiver.md`（設計文書）、`docs/lstep-line-migration-L1-tom-guide.md`（トム向け申込み/運用手順）。
+  - **実装状況**: 設計書のみ。Case A/B 実測後に src/ コード着手。
+
 ---
 *200行を超えたら完了済みタスクを月単位で要約すること*

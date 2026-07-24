@@ -439,6 +439,25 @@ export async function sendApprovedLineDrafts(
 ): Promise<OutboundResult> {
   const cfg = (channel.config ?? {}) as Record<string, unknown>;
 
+  // L1 併用期間の二重返信ガード (構造ガード / 設計 docs/design/line-webhook-forward-receiver.md §5)
+  //
+  // Lステップ Webhook 転送で受信だけ cs-manager に流す併用期間 (forward_mode=true) は、
+  // 返信の正は Lステップ側にある。ここで送信すると顧客に二重返信が届くため、
+  // **承認済み draft があっても送信しない** (claim もしない = status を動かさない)。
+  // 「承認ボタンを押さない」運用規律に依存せず、config 1 個で構造的に止める。
+  // 既定 (forward_mode 未設定) は従来どおり送信するため後方互換。L5 で false に戻す。
+  if (cfg.forward_mode === true) {
+    logger.info('line.outbound.skipped_forward_mode', { channelId: channel.id });
+    return {
+      channelId: channel.id,
+      channelCode: channel.code,
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      errors: [],
+    };
+  }
+
   const serviceCode =
     typeof cfg.service_code === 'string' && cfg.service_code.trim()
       ? cfg.service_code.trim()
