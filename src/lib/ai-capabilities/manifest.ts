@@ -254,7 +254,98 @@ const INQUIRY_STATS: Capability = {
   },
 };
 
-export const CAPABILITIES: Capability[] = [CUSTOMER_SERVICE, DEFECT_RATE, INQUIRY_STATS];
+/**
+ * capability: 汎用データ閲覧 (browse)
+ *
+ * 能力自動増殖ループ M2「汎用読み層 data_browse」の cs-manager 側 browse 窓。
+ * 静的カタログ (lib/ai-capabilities/browse-catalog.ts) の allowlist 内テーブルのみ
+ * list (カタログ一覧) / rows (行取得) できる。WHERE 式・join・任意 SQL は不可。
+ * PII 列 (顧客氏名・メール・受取人名等)・秘密 (接続設定)・システム内部はカタログから除外済み。
+ */
+const BROWSE: Capability = {
+  concept: '汎用データ閲覧',
+  slug: 'browse',
+  aliases: ['生データ', 'データ閲覧', 'テーブル一覧', 'browse', 'データブラウズ'],
+  description:
+    '静的カタログで公開された cs-manager のテーブル (チケット・対応記録・不良原因・ナレッジ等) を' +
+    'そのまま閲覧する汎用 read。op=list でカタログ (テーブル・公開列・注記) 一覧、' +
+    'op=rows で指定テーブルの行を固定ソート・ページングで返す。PII 列・秘密・システム内部は非公開。',
+  domain: 'カスタマーサポート',
+  read_only: true,
+  endpoint: { method: 'GET', path: '/api/ai/capabilities/browse' },
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      op: {
+        type: 'string',
+        enum: ['list', 'rows'],
+        description: '操作。list=公開テーブルのカタログ一覧 / rows=行の取得',
+      },
+      table: {
+        type: 'string',
+        description: 'rows のみ: カタログ内テーブル名 (完全一致。カタログ外は 400 unknown_table)',
+      },
+      limit: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 100,
+        default: 50,
+        description: '取得行数 (1-100・範囲外の整数は clamp)',
+      },
+      offset: {
+        type: 'integer',
+        minimum: 0,
+        maximum: 10000,
+        default: 0,
+        description: '読み飛ばし行数 (0-10000・範囲外の整数は clamp)',
+      },
+    },
+    required: ['op'],
+  },
+  output_schema: {
+    oneOf: [
+      {
+        type: 'object',
+        description: 'op=list: 公開テーブルのカタログ一覧',
+        properties: {
+          operation: { const: 'list' },
+          as_of: { type: 'string', description: 'ISO8601' },
+          tables: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                table: { type: 'string' },
+                description: { type: 'string' },
+                columns: { type: 'array', items: { type: 'string' } },
+                order_by: { type: 'string' },
+                note: { type: 'string' },
+              },
+              required: ['table', 'description', 'columns', 'order_by'],
+            },
+          },
+        },
+        required: ['operation', 'as_of', 'tables'],
+      },
+      {
+        type: 'object',
+        description: 'op=rows: 指定テーブルの行 (固定ソート・truncated=limit 超過またはバイト上限打ち切り)',
+        properties: {
+          operation: { const: 'rows' },
+          as_of: { type: 'string', description: 'ISO8601' },
+          table: { type: 'string' },
+          columns: { type: 'array', items: { type: 'string' } },
+          rows: { type: 'array', items: { type: 'object' } },
+          truncated: { type: 'boolean' },
+        },
+        required: ['operation', 'as_of', 'table', 'columns', 'rows', 'truncated'],
+      },
+    ],
+  },
+};
+
+export const CAPABILITIES: Capability[] = [CUSTOMER_SERVICE, DEFECT_RATE, INQUIRY_STATS, BROWSE];
 
 export const manifest: CapabilityManifest = {
   tool_slug: TOOL_SLUG,
